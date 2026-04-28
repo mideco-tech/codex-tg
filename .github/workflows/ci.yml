@@ -23,9 +23,14 @@ jobs:
             exit 1
           fi
 
-          real_secret_patterns='(BOT_TOKEN|TELEGRAM_BOT_TOKEN)[[:space:]]*=[[:space:]]*[0-9]+:[A-Za-z0-9_-]{20,}|api_hash[[:space:]]*=[[:space:]]*[0-9a-f]{32}|api_id[[:space:]]*=[[:space:]]*[0-9]{6,}|phone[[:space:]]*=[[:space:]]*\+[0-9]{8,}|C:\\Users\\[^\\]+'
+          real_secret_patterns='(BOT_TOKEN|TELEGRAM_BOT_TOKEN)[[:space:]]*=[[:space:]]*[0-9]+:[A-Za-z0-9_-]{20,}|api_hash[[:space:]]*=[[:space:]]*[0-9a-f]{32}|api_id[[:space:]]*=[[:space:]]*[0-9]{6,}|phone[[:space:]]*=[[:space:]]*\+[0-9]{8,}'
           if git grep -nE "$real_secret_patterns" -- ':!go.sum' ':!docs/assets/*.png'; then
-            echo "Potential secret or private local path found."
+            echo "Potential secret found."
+            exit 1
+          fi
+
+          if git grep -n 'C:\\Users\\' -- ':!go.sum' ':!docs/assets/*.png' | grep -v 'C:\\Users\\you'; then
+            echo "Potential private Windows local path found."
             exit 1
           fi
       - name: Test
