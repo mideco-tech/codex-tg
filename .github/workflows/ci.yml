@@ -15,11 +15,20 @@ jobs:
       - name: Secret pattern smoke scan
         shell: bash
         run: |
-          ! grep -RInE 'BOT_TOKEN=|TELEGRAM_BOT_TOKEN=|api_hash *= *[0-9a-f]{20,}|api_id *= *[0-9]{6,}|phone *= *\+|\.session|\.sqlite|\.env$' . \
-            --exclude-dir=.git \
-            --exclude=go.sum
+          set -euo pipefail
+
+          forbidden_files='(^|/)(\.env|\.env\.local|.*\.sqlite|.*\.db|.*\.log|.*\.exe|.*\.session)$'
+          if git ls-files | grep -E "$forbidden_files"; then
+            echo "Forbidden local/runtime file is tracked."
+            exit 1
+          fi
+
+          real_secret_patterns='(BOT_TOKEN|TELEGRAM_BOT_TOKEN)[[:space:]]*=[[:space:]]*[0-9]+:[A-Za-z0-9_-]{20,}|api_hash[[:space:]]*=[[:space:]]*[0-9a-f]{32}|api_id[[:space:]]*=[[:space:]]*[0-9]{6,}|phone[[:space:]]*=[[:space:]]*\+[0-9]{8,}|C:\\Users\\[^\\]+'
+          if git grep -nE "$real_secret_patterns" -- ':!go.sum' ':!docs/assets/*.png'; then
+            echo "Potential secret or private local path found."
+            exit 1
+          fi
       - name: Test
         run: go test ./...
       - name: Build
         run: go build -buildvcs=false ./...
-
