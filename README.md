@@ -4,9 +4,9 @@ Telegram remote UI and observer for local OpenAI Codex App Server, built in Go.
 
 `codex-tg` turns a Telegram bot into a mobile control surface for local Codex threads: it watches Codex GUI/CLI activity, keeps thread identity visible, routes replies back to the right thread, and exposes high-signal controls such as Plan Mode prompts, Stop, Steer, Details, Tools file, and Get full log.
 
-> Screenshot slot: `docs/assets/telegram-plan-mode-demo.png`
->
-> The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/telegram-plan-mode-demo.md). Add the real screenshot only after reviewing it for private data.
+![codex-tg Telegram Plan Mode demo](docs/assets/telegram-plan-mode-demo.png)
+
+The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/telegram-plan-mode-demo.md).
 
 ## Why It Matters
 
@@ -14,6 +14,20 @@ Telegram remote UI and observer for local OpenAI Codex App Server, built in Go.
 - Continue supervising long-running coding tasks while away from the workstation.
 - Use Telegram as a low-friction fallback surface on unreliable or constrained networks.
 - Preserve local-first ownership: Codex sessions, workspaces, SQLite state, and tokens stay on your machine.
+
+## Demo Screenshots
+
+**1. User request and Plan Mode**
+
+![User request and Plan Mode](docs/assets/telegram-plan-mode-demo-1-user-plan.png)
+
+**2. Tool execution and output**
+
+![Tool execution and output](docs/assets/telegram-plan-mode-demo-2-tool-output.png)
+
+**3. Final answer and Details**
+
+![Final answer and Details](docs/assets/telegram-plan-mode-demo-3-final-details.png)
 
 ## Features
 
