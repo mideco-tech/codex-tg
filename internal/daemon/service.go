@@ -40,7 +40,7 @@ type Sender interface {
 	EditMessage(ctx context.Context, chatID, topicID, messageID int64, text string, buttons [][]model.ButtonSpec) error
 	EditRenderedMessage(ctx context.Context, chatID, topicID, messageID int64, rendered model.RenderedMessage, buttons [][]model.ButtonSpec) error
 	DeleteMessage(ctx context.Context, chatID, topicID, messageID int64) error
-	SendDocument(ctx context.Context, chatID, topicID int64, fileName, filePath, caption string) (int64, error)
+	SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string) (int64, error)
 }
 
 type DirectResponse struct {

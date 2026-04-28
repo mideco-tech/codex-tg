@@ -1,86 +1,83 @@
-# codex-telegram-remote-go
+# codex-tg
 
-Greenfield Go core for a thread-first Telegram remote UI over local `codex app-server`.
+Telegram remote UI and observer for local OpenAI Codex App Server, built in Go.
 
-The Python oracle remains at:
+`codex-tg` turns a Telegram bot into a mobile control surface for local Codex threads: it watches Codex GUI/CLI activity, keeps thread identity visible, routes replies back to the right thread, and exposes high-signal controls such as Plan Mode prompts, Stop, Steer, Details, Tools file, and Get full log.
 
-`..\codex-telegram-remote`
+> Screenshot slot: `docs/assets/telegram-plan-mode-demo.png`
+>
+> The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/telegram-plan-mode-demo.md). Add the real screenshot only after reviewing it for private data.
 
-This Go repository owns the daemon/runtime rewrite:
+## Why It Matters
 
-- non-blocking startup
-- separate live and poll app-server sessions
-- SQLite-backed thread cache, bindings, observer targets, approvals, delivery queue, and daemon state
-- Telegram long polling transport
-- durable observer delivery for foreign GUI/CLI threads
-- routeable `[Plan]` prompt-cards for Codex Plan Mode / waiting-input states
+- Keep local Codex work observable from a phone without exposing Codex App Server to the internet.
+- Continue supervising long-running coding tasks while away from the workstation.
+- Use Telegram as a low-friction fallback surface on unreliable or constrained networks.
+- Preserve local-first ownership: Codex sessions, workspaces, SQLite state, and tokens stay on your machine.
 
-## Runtime scope
+## Features
 
-Runtime commands:
+- Thread-first routing over local `codex app-server` stdio.
+- Global observer for foreign GUI/CLI runs, with polling fallback through `thread/read`.
+- Stable visual identity per thread: emoji marker plus project/thread/run chips.
+- Explicit `New run -> [User] -> [commentary] -> [Tool] -> [Output] -> [Final]` chronology.
+- Plan Mode `[Plan]` prompt-cards with reply-first routing and structured buttons when Codex provides choices.
+- Final Card with Details pagination and on-demand Tools file export.
+- On-demand full log archive from Codex session JSONL.
+- SQLite-backed durable state for bindings, routes, callbacks, observer target, panels, and delivery metadata.
+- Cross-platform Go daemon foundation for Windows, macOS, and Linux.
 
-- `ctr-go daemon run`
-- `ctr-go status`
-- `ctr-go doctor`
-- `ctr-go repair`
+## Quickstart
+
+Prerequisites:
+
+- Go 1.26 or newer.
+- OpenAI Codex CLI with `codex app-server`.
+- A Telegram bot token from BotFather.
+- Your Telegram numeric user id.
+
+```powershell
+git clone https://github.com/<you>/codex-tg.git
+cd codex-tg
+
+$env:CTR_GO_TELEGRAM_BOT_TOKEN = "<telegram-bot-token>"
+$env:CTR_GO_ALLOWED_USER_IDS = "<telegram-user-id>"
+$env:CTR_GO_DEFAULT_CWD = "C:\Users\you\Projects\Codex"
+
+go run ./cmd/ctr-go daemon run
+```
+
+In Telegram:
+
+```text
+/start
+/observe all
+/threads
+/context
+```
+
+Start or continue a Codex thread from Codex GUI/CLI. `codex-tg` should create a `New run` card, a `[User]` card, live progress cards, and a final answer card in Telegram.
+
+## Runtime Commands
+
+```powershell
+go run ./cmd/ctr-go doctor
+go run ./cmd/ctr-go status
+go run ./cmd/ctr-go repair
+go run ./cmd/ctr-go daemon run
+```
 
 Telegram commands:
 
-- `/start`
-- `/help`
-- `/threads`
-- `/projects`
-- `/show`
-- `/bind`
-- `/reply`
-- `/context`
-- `/whereami`
-- `/observe all|off`
-- `/status`
-- `/repair`
-- `/stop`
-- `/approve`
-- `/deny`
+- `/start`, `/help`
+- `/threads`, `/projects`, `/show`, `/bind`, `/reply`
+- `/context`, `/whereami`
+- `/observe all`, `/observe off`
+- `/status`, `/repair`, `/stop`, `/approve`, `/deny`
 
-Current runtime foundation:
+## Configuration
 
-- live app-server notifications for turns started in the current daemon session
-- polling fallback through `thread/read` for foreign GUI/CLI activity
-- SQLite-backed durable delivery queue
-
-Target observer/UI v2 contract:
-
-- global observer monitoring is default-on when the operator surface can be resolved automatically
-- `/observe all` moves the single global observer target to the current chat/topic
-- `/observe off` disables global monitoring instead of merely removing an extra feed
-- the primary operator affordance is a summary panel keyed by `(chat, project, thread)`
-- the summary panel owns actionable buttons such as `Stop` and `Steer`
-- tool/output messages are passive stream messages and do not carry buttons
-- final answers are delivered separately and expose on-demand log retrieval via `Получить полный лог`
-- Codex Plan Mode waiting input is delivered as a separate `[Plan]` prompt-card
-- `[Plan]` is reply-first; structured buttons are shown only when Codex provides explicit options
-- polling-discovered Plan prompts without `requestId` are answered through `turn/steer`, with `turn/start` fallback when the active turn is gone
-- every observer/card message uses a shared visual identity header:
-  `emoji [Project] [Thread] [T:thread] [R:run] [Kind]`
-- the emoji marker is stable per thread and avoids active collisions while the palette is available; `T:` and `R:` chips remain the unambiguous visual anchor
-- foreign GUI/CLI runs start with separate `New run` and `[User]` cards before the live trio; if the prompt is late, `[User]` starts as a placeholder and is edited in-place
-
-## Portable Go on this machine
-
-Portable Go is installed at:
-
-`go`
-
-Typical session setup:
-
-```powershell
-$env:PATH = "<go-bin>;$env:PATH"
-go version
-```
-
-## Environment
-
-Primary env vars:
+Primary environment variables:
 
 - `CTR_GO_HOME`
 - `CTR_GO_CODEX_BIN`
@@ -102,47 +99,55 @@ Compatibility fallbacks:
 - `CTR_ALLOWED_USER_IDS`
 - `CTR_ALLOWED_CHAT_IDS`
 
-Example:
-
-```powershell
-$env:CTR_GO_TELEGRAM_BOT_TOKEN = "<telegram-bot-token>"
-$env:CTR_GO_ALLOWED_USER_IDS = "<telegram-user-id>"
-$env:CTR_GO_DEFAULT_CWD = "C:\Users\you\Projects\Codex"
-go run ./cmd/ctr-go daemon run
-```
-
 ## Verification
 
-Build and tests:
-
 ```powershell
-go build -buildvcs=false ./...
 go test ./...
+go build -buildvcs=false ./...
 ```
 
-CLI smoke:
+Live demo for a screenshot:
 
 ```powershell
-go run ./cmd/ctr-go doctor
-go run ./cmd/ctr-go status
-go run ./cmd/ctr-go repair
+$env:CTR_DEMO_TELEGRAM_E2E = "1"
+$env:CTR_DEMO_TELEGRAM_CHAT_ID = "<telegram-chat-id>"
+$env:CTR_GO_TELEGRAM_BOT_TOKEN = "<telegram-bot-token>"
+$env:CTR_DEMO_KEEP_MESSAGES = "true"
+go test -tags demo_e2e ./tests -run TestTelegramPlanModeScreenshotDemo -count=1 -v
 ```
 
-Live daemon smoke:
+See [docs/demo/telegram-plan-mode-demo.md](docs/demo/telegram-plan-mode-demo.md) for the screenshot checklist.
 
-```powershell
-go run ./cmd/ctr-go daemon run
+## GitHub Metadata
+
+Suggested repository description:
+
+```text
+Telegram remote UI and observer for local OpenAI Codex App Server, built in Go.
 ```
 
-Known operational caveat:
+Suggested topics:
 
-- Telegram long polling will return `409 Conflict` if another bot process is already consuming the same token. Stop the other consumer before validating this Go runtime against Telegram.
+```text
+openai-codex codex-cli codex-app-server telegram-bot go golang ai-agents
+coding-agent remote-control developer-tools local-first sqlite json-rpc
+agent-observer plan-mode telegram-ui windows macos linux
+```
 
-## Reference docs
+## Documentation
 
+- [Architecture](docs/wiki/Architecture.md)
+- [Quickstart](docs/wiki/Quickstart.md)
+- [Telegram UX](docs/wiki/Telegram-UX.md)
+- [Plan Mode](docs/wiki/Plan-Mode.md)
+- [Security](docs/wiki/Security.md)
+- [Operations](docs/wiki/Operations.md)
+- [Demo](docs/wiki/Demo.md)
 - [Contract matrix](docs/research/contract-matrix.md)
-- [ADR-003 Telegram observer/UI v2](docs/adr/ADR-003-telegram-observer-ui-v2.md)
-- [ADR-006 Plan prompt mode](docs/adr/ADR-006-plan-prompt-mode.md)
-- [ADR-010 Run chronology and user notice](docs/adr/ADR-010-run-chronology-and-user-notice.md)
-- [Acceptance](docs/acceptance/vertical-slice.md)
-- [Success metrics](docs/metrics/success-metrics.md)
+- [ADRs](docs/adr/)
+
+## Operational Notes
+
+- Telegram long polling returns `409 Conflict` when another process consumes the same bot token.
+- Do not expose Codex App Server on a public interface. `codex-tg` is designed around local stdio.
+- Keep bot tokens, Telegram sessions, SQLite databases, logs, and `.env` files out of git.

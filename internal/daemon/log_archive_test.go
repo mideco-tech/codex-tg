@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -108,6 +109,25 @@ func TestBuildThreadLogArchiveUsesPrimaryPathAndIncludesHumanAndRawLog(t *testin
 	}
 	if !entries[filepath.Base(primaryPath)] {
 		t.Fatalf("zip archive does not include raw jsonl %q", filepath.Base(primaryPath))
+	}
+
+	dataResult, err := BuildThreadLogArchiveData(context.Background(), thread, LogArchiveHint{PreferredTurnID: "turn-primary"})
+	if err != nil {
+		t.Fatalf("BuildThreadLogArchiveData() failed: %v", err)
+	}
+	if dataResult.FileName == "" || len(dataResult.Data) == 0 {
+		t.Fatalf("in-memory archive result = file %q len %d, want data", dataResult.FileName, len(dataResult.Data))
+	}
+	dataArchive, err := zip.NewReader(bytes.NewReader(dataResult.Data), int64(len(dataResult.Data)))
+	if err != nil {
+		t.Fatalf("zip.NewReader(in-memory) failed: %v", err)
+	}
+	dataEntries := map[string]bool{}
+	for _, file := range dataArchive.File {
+		dataEntries[file.Name] = true
+	}
+	if !dataEntries["human-log.txt"] || !dataEntries[filepath.Base(primaryPath)] {
+		t.Fatalf("in-memory archive entries = %#v, want human-log and raw jsonl", dataEntries)
 	}
 }
 

@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"codex-telegram-remote-go/internal/appserver"
@@ -314,18 +312,9 @@ func (s *Service) sendDetailsToolsFile(ctx context.Context, chatID, topicID int6
 	if sender == nil {
 		return &DirectResponse{Text: "Telegram sender is not ready yet."}, nil
 	}
-	dir := filepath.Join(s.cfg.Paths.DataDir, "details-exports")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
 	fileName := fmt.Sprintf("%s-%s-details-%d.txt", sanitizeFileName(thread.ProjectName), sanitizeFileName(thread.ShortID()), index)
-	path := filepath.Join(dir, fileName)
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		return nil, err
-	}
-	defer func() { _ = os.Remove(path) }()
 	caption := s.visualHeader(ctx, "Details tools", *thread, snapshot.LatestTurnID)
-	if _, err := sender.SendDocument(ctx, chatID, topicID, fileName, path, caption); err != nil {
+	if _, err := sender.SendDocumentData(ctx, chatID, topicID, fileName, []byte(body), caption); err != nil {
 		return &DirectResponse{Text: fmt.Sprintf("Could not send details tools file: %v", err)}, nil
 	}
 	_ = route

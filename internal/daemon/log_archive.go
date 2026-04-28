@@ -3,6 +3,7 @@ package daemon
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,6 +44,13 @@ type BuildLogArchiveResult struct {
 	SourceJSONLPath string
 }
 
+type BuildLogArchiveDataResult struct {
+	FileName        string
+	Data            []byte
+	HumanLog        string
+	SourceJSONLPath string
+}
+
 func (s *Service) sendFullLogArchive(ctx context.Context, chatID, topicID int64, threadID string) (*DirectResponse, error) {
 	s.mu.RLock()
 	sender := s.sender
@@ -57,24 +65,46 @@ func (s *Service) sendFullLogArchive(ctx context.Context, chatID, topicID int64,
 	if thread == nil {
 		return &DirectResponse{Text: fmt.Sprintf("Unknown thread: %s", threadID)}, nil
 	}
-	archive, err := BuildThreadLogArchive(ctx, s.cfg.Paths, *thread, LogArchiveHint{})
+	archive, err := BuildThreadLogArchiveData(ctx, *thread, LogArchiveHint{})
 	if err != nil {
 		return &DirectResponse{Text: fmt.Sprintf("Could not build full log: %v", err)}, nil
 	}
 	caption := s.visualHeader(ctx, "Full log", *thread, "")
-	if _, err := sender.SendDocument(ctx, chatID, topicID, archive.FileName, archive.FilePath, caption); err != nil {
+	if _, err := sender.SendDocumentData(ctx, chatID, topicID, archive.FileName, archive.Data, caption); err != nil {
 		return &DirectResponse{Text: fmt.Sprintf("Could not send full log: %v", err)}, nil
 	}
-	s.cleanupArchiveFiles(archive)
 	return &DirectResponse{CallbackText: "Полный лог отправлен."}, nil
 }
 
-func BuildThreadLogArchive(ctx context.Context, paths config.Paths, thread model.Thread, hint LogArchiveHint) (*BuildLogArchiveResult, error) {
+func BuildThreadLogArchiveData(ctx context.Context, thread model.Thread, hint LogArchiveHint) (*BuildLogArchiveDataResult, error) {
 	sessionPath, err := findSessionLogPath(thread, hint)
 	if err != nil {
 		return nil, err
 	}
 	humanLog, err := buildHumanLog(sessionPath)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	baseName := fmt.Sprintf("%s-%s-log", sanitizeFileName(thread.ProjectName), sanitizeFileName(thread.ShortID()))
+	data, err := buildLogArchiveData(sessionPath, humanLog)
+	if err != nil {
+		return nil, err
+	}
+	return &BuildLogArchiveDataResult{
+		FileName:        baseName + ".zip",
+		Data:            data,
+		HumanLog:        humanLog,
+		SourceJSONLPath: sessionPath,
+	}, nil
+}
+
+func BuildThreadLogArchive(ctx context.Context, paths config.Paths, thread model.Thread, hint LogArchiveHint) (*BuildLogArchiveResult, error) {
+	archive, err := BuildThreadLogArchiveData(ctx, thread, hint)
 	if err != nil {
 		return nil, err
 	}
@@ -87,21 +117,20 @@ func BuildThreadLogArchive(ctx context.Context, paths config.Paths, thread model
 		return nil, ctx.Err()
 	default:
 	}
-	baseName := fmt.Sprintf("%s-%s-log", sanitizeFileName(thread.ProjectName), sanitizeFileName(thread.ShortID()))
+	baseName := strings.TrimSuffix(archive.FileName, ".zip")
 	humanLogPath := filepath.Join(dir, baseName+"-human-log.txt")
-	if err := os.WriteFile(humanLogPath, []byte(humanLog), 0o644); err != nil {
+	if err := os.WriteFile(humanLogPath, []byte(archive.HumanLog), 0o644); err != nil {
 		return nil, err
 	}
-	fileName := baseName + ".zip"
-	filePath := filepath.Join(dir, fileName)
-	if err := writeLogArchive(filePath, sessionPath, humanLog); err != nil {
+	filePath := filepath.Join(dir, archive.FileName)
+	if err := os.WriteFile(filePath, archive.Data, 0o600); err != nil {
 		return nil, err
 	}
 	return &BuildLogArchiveResult{
-		FileName:        fileName,
+		FileName:        archive.FileName,
 		FilePath:        filePath,
 		HumanLogPath:    humanLogPath,
-		SourceJSONLPath: sessionPath,
+		SourceJSONLPath: archive.SourceJSONLPath,
 	}, nil
 }
 
@@ -454,27 +483,41 @@ func valueFromMapAny(values map[string]any, key string) any {
 }
 
 func writeLogArchive(destination, sessionPath, humanLog string) error {
-	file, err := os.Create(destination)
+	data, err := buildLogArchiveData(sessionPath, humanLog)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	return os.WriteFile(destination, data, 0o600)
+}
 
-	archive := zip.NewWriter(file)
-	defer archive.Close()
+func buildLogArchiveData(sessionPath, humanLog string) ([]byte, error) {
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
 
 	if err := writeZipFile(archive, "human-log.txt", strings.NewReader(humanLog)); err != nil {
-		return err
+		_ = archive.Close()
+		return nil, err
 	}
 	rawFile, err := os.Open(sessionPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			if closeErr := archive.Close(); closeErr != nil {
+				return nil, closeErr
+			}
+			return buffer.Bytes(), nil
 		}
-		return err
+		_ = archive.Close()
+		return nil, err
 	}
 	defer rawFile.Close()
-	return writeZipFile(archive, filepath.Base(sessionPath), rawFile)
+	if err := writeZipFile(archive, filepath.Base(sessionPath), rawFile); err != nil {
+		_ = archive.Close()
+		return nil, err
+	}
+	if err := archive.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
 }
 
 func writeZipFile(archive *zip.Writer, name string, source io.Reader) error {

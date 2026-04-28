@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Secret pattern smoke scan
+        shell: bash
+        run: |
+          ! grep -RInE 'BOT_TOKEN=|TELEGRAM_BOT_TOKEN=|api_hash *= *[0-9a-f]{20,}|api_id *= *[0-9]{6,}|phone *= *\+|\.session|\.sqlite|\.env$' . \
+            --exclude-dir=.git \
+            --exclude=go.sum
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: go build -buildvcs=false ./...
+

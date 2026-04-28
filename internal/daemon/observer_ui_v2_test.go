@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +25,7 @@ type recordedDocument struct {
 	topicID  int64
 	fileName string
 	filePath string
+	data     []byte
 	caption  string
 }
 
@@ -67,12 +67,12 @@ func (s *recordingSender) DeleteMessage(ctx context.Context, chatID, topicID, me
 	return nil
 }
 
-func (s *recordingSender) SendDocument(ctx context.Context, chatID, topicID int64, fileName, filePath, caption string) (int64, error) {
+func (s *recordingSender) SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string) (int64, error) {
 	s.documents = append(s.documents, recordedDocument{
 		chatID:   chatID,
 		topicID:  topicID,
 		fileName: fileName,
-		filePath: filePath,
+		data:     append([]byte(nil), data...),
 		caption:  caption,
 	})
 	return int64(len(s.documents)), nil
@@ -1357,8 +1357,11 @@ func TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile(t *testing.T
 	if len(sender.documents) != 1 {
 		t.Fatalf("documents = %#v, want one tools file", sender.documents)
 	}
-	if _, err := os.Stat(sender.documents[0].filePath); !os.IsNotExist(err) {
-		t.Fatalf("tools file path %s still exists or stat error=%v, want cleanup after send", sender.documents[0].filePath, err)
+	if sender.documents[0].filePath != "" {
+		t.Fatalf("tools file used path %q, want in-memory document data", sender.documents[0].filePath)
+	}
+	if !strings.Contains(string(sender.documents[0].data), "[Details tools]") || !strings.Contains(string(sender.documents[0].data), "[Tool]") {
+		t.Fatalf("tools file data = %q, want details tool content", string(sender.documents[0].data))
 	}
 
 	backToken := buttonToken(toolMode.buttons, "Back")

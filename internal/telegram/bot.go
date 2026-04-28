@@ -171,6 +171,10 @@ func (b *Bot) SendDocument(ctx context.Context, chatID, topicID int64, fileName,
 	if err != nil {
 		return 0, err
 	}
+	return b.SendDocumentData(ctx, chatID, topicID, fileName, data, caption)
+}
+
+func (b *Bot) SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string) (int64, error) {
 	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	message, err := b.client.SendDocument(sendCtx, chatID, topicID, DocumentFile{
 		Name:        fileName,
