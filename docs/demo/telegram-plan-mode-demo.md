@@ -18,21 +18,28 @@ go test -tags demo_e2e ./tests -run TestTelegramPlanModeScreenshotDemo -count=1 
 I am preparing for relocation and want to work as an LLM engineer.
 Please review this repository as a public portfolio project:
 run the Go test suite, inspect the architecture, and tell me whether it is ready for a v0.1 GitHub release.
+
+Please check:
+
+- `codex app-server` integration
+- Telegram Plan Mode UX
+- local-first SQLite state
+- public README and GitHub docs
 ```
 
 ## Expected Telegram Story
 
 1. `[User]` with the relocation / LLM engineer portfolio prompt.
 2. `[Plan]` asking for validation depth with `Fast smoke` and `Full test suite` buttons.
-3. `[commentary]` with a short progress update.
+3. `[commentary]` with Markdown converted to Telegram entities: bold text, inline code, numbered list, and a fenced `bash` block.
 4. `[Tool]` showing `go test ./...`.
 5. `[Output]` showing short successful output.
-6. `[Final]` with release-readiness feedback and buttons.
+6. `[Final]` with release-readiness feedback, Markdown list, inline code, link entity, and buttons.
 
 ## Screenshot Guidance
 
 - Crop the screenshot to Telegram messages only.
 - Keep the `[User]`, `[Plan]`, `[Tool]`, `[Output]`, and `[Final]` cards visible.
+- Verify the screenshot demonstrates Markdown-to-Telegram formatting: no raw triple backticks, visible code block, inline code, list formatting, and a clickable docs link.
 - Do not include private usernames, chat ids, local filesystem paths, or bot tokens.
 - Review the screenshot manually before committing it.
-

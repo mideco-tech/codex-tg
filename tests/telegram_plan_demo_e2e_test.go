@@ -19,9 +19,14 @@ import (
 	"codex-telegram-remote-go/internal/tgformat"
 )
 
-const demoPrompt = `I am preparing for relocation and want to work as an LLM engineer.
-Please review this repository as a public portfolio project:
-run the Go test suite, inspect the architecture, and tell me whether it is ready for a v0.1 GitHub release.`
+const demoPrompt = "I am preparing for relocation and want to work as an LLM engineer.\n" +
+	"Please review this repository as a public portfolio project:\n" +
+	"run the Go test suite, inspect the architecture, and tell me whether it is ready for a v0.1 GitHub release.\n\n" +
+	"Please check:\n\n" +
+	"- `codex app-server` integration\n" +
+	"- Telegram Plan Mode UX\n" +
+	"- local-first SQLite state\n" +
+	"- public README and GitHub docs"
 
 func TestTelegramPlanModeScreenshotDemo(t *testing.T) {
 	if os.Getenv("CTR_DEMO_TELEGRAM_E2E") != "1" {
@@ -80,12 +85,30 @@ func TestTelegramPlanModeScreenshotDemo(t *testing.T) {
 			{Text: "Full test suite", CallbackData: "demo_full_test_suite"},
 		}},
 	})
-	sendRendered(tgformat.RenderMarkdownWithHeader(demoHeader("commentary")+"\nStatus: inProgress", "I will run the Go test suite and summarize this repository as a public LLM engineering portfolio project."), nil)
+	commentary := `I will validate the release with **real commands** and keep the Telegram view readable.
+
+Planned checks:
+
+1. Run ` + "`go test ./...`" + `.
+2. Review the docs for a public ` + "`v0.1`" + ` release.
+3. Confirm the demo highlights Markdown-to-Telegram formatting.
+
+` + "```bash\n" + `go test ./...
+` + "```"
+	sendRendered(tgformat.RenderMarkdownWithHeader(demoHeader("commentary")+"\nStatus: inProgress", commentary), nil)
 	sendText(demoHeader("Tool") + "\n[Shell:go]\n" + htmlCode("powershell", "go test ./...") + "\nStatus: running")
 
 	output, commandErr := runDemoGoTest(ctx)
 	sendText(demoHeader("Output") + "\n" + htmlCode("", trimDemoOutput(output)))
-	final := "This repository is ready for a public v0.1 release as an LLM engineering portfolio project.\n\nIt demonstrates local agent orchestration, Telegram UX, App Server integration, durable state, and live E2E validation."
+	final := `This repository is ready for a public **v0.1** release as an LLM engineering portfolio project.
+
+Highlights:
+
+- Local agent orchestration over ` + "`codex app-server`" + `.
+- Telegram UX with Plan Mode, Details, ` + "`Tools file`" + `, and ` + "`Get full log`" + `.
+- Durable local state and live E2E validation.
+
+Useful link: [OpenAI Codex docs](https://developers.openai.com/codex/).`
 	if commandErr != nil {
 		final = fmt.Sprintf("The public demo ran, but the local test suite needs attention before v0.1.\n\n`go test ./...` failed with: `%v`", commandErr)
 	}
