@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 const (

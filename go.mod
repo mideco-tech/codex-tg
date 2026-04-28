@@ -1,4 +1,4 @@
-module codex-telegram-remote-go
+module github.com/mideco-tech/codex-tg
 
 go 1.26.0
 

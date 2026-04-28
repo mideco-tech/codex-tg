@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 func TestClientEditMessageTextSendsExpectedJSON(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 func TestBotEditMessageRejectsMultiChunkPayload(t *testing.T) {

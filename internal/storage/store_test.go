@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 func TestGlobalObserverTargetPersistsAndObserveOffDisablesMonitoring(t *testing.T) {

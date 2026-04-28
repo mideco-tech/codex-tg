@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"codex-telegram-remote-go/internal/appserver"
-	"codex-telegram-remote-go/internal/config"
-	"codex-telegram-remote-go/internal/model"
-	"codex-telegram-remote-go/internal/storage"
+	"github.com/mideco-tech/codex-tg/internal/appserver"
+	"github.com/mideco-tech/codex-tg/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/storage"
 )
 
 type Session interface {

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"codex-telegram-remote-go/internal/appserver"
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/appserver"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 func TestLatestActiveToolFromSessionLinesDetectsRunningShellCommand(t *testing.T) {

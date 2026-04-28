@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 func TestDiffSnapshotEmitsCompletionForNewTerminalTurn(t *testing.T) {

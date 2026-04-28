@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"codex-telegram-remote-go/internal/config"
-	"codex-telegram-remote-go/internal/daemon"
-	"codex-telegram-remote-go/internal/telegram"
+	"github.com/mideco-tech/codex-tg/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/daemon"
+	"github.com/mideco-tech/codex-tg/internal/telegram"
 )
 
 func main() {

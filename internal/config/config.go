@@ -21,7 +21,7 @@ func DefaultPaths() Paths {
 	home := os.Getenv("CTR_GO_HOME")
 	if strings.TrimSpace(home) == "" {
 		userHome, _ := os.UserHomeDir()
-		home = filepath.Join(userHome, ".codex-telegram-remote-go")
+		home = filepath.Join(userHome, ".codex-tg")
 	}
 	return Paths{
 		Home:    home,

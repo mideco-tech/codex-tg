@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"codex-telegram-remote-go/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/config"
 )
 
 func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {

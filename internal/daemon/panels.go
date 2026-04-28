@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"codex-telegram-remote-go/internal/appserver"
-	"codex-telegram-remote-go/internal/model"
-	"codex-telegram-remote-go/internal/tgformat"
+	"github.com/mideco-tech/codex-tg/internal/appserver"
+	"github.com/mideco-tech/codex-tg/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/tgformat"
 )
 
 const (

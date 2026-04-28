@@ -3,7 +3,7 @@ package tests
 import (
 	"testing"
 
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 func TestProjectNameFromCWDUsesSharedGeneralFallbacks(t *testing.T) {

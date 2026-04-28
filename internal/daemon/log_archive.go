@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"codex-telegram-remote-go/internal/config"
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 type sessionLogEnvelope struct {

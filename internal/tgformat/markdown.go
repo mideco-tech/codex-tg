@@ -6,7 +6,7 @@ import (
 
 	tgmd "github.com/eekstunt/telegramify-markdown-go"
 
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 const TelegramMessageLimit = 4096

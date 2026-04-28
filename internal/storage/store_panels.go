@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"codex-telegram-remote-go/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
 func (s *Store) SetGlobalObserverTarget(ctx context.Context, chatID, topicID int64, enabled bool) error {

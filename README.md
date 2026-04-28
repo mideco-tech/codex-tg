@@ -51,7 +51,7 @@ Prerequisites:
 - Your Telegram numeric user id.
 
 ```powershell
-git clone https://github.com/<you>/codex-tg.git
+git clone https://github.com/mideco-tech/codex-tg.git
 cd codex-tg
 
 $env:CTR_GO_TELEGRAM_BOT_TOKEN = "<telegram-bot-token>"
@@ -158,7 +158,12 @@ agent-observer plan-mode telegram-ui windows macos linux
 - [Operations](docs/wiki/Operations.md)
 - [Demo](docs/wiki/Demo.md)
 - [Contract matrix](docs/research/contract-matrix.md)
+- [Validation notes](docs/testing/validation-notes.md)
 - [ADRs](docs/adr/)
+
+## License
+
+Apache License 2.0. This keeps the project permissive for the community while also providing an explicit patent grant that large companies usually expect from infrastructure and developer-tooling projects.
 
 ## Operational Notes
 

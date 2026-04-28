@@ -106,7 +106,7 @@ func (c *Client) Start(ctx context.Context) error {
 	if _, err := c.Request(ctx, "initialize", map[string]any{
 		"capabilities": map[string]any{"experimentalApi": true},
 		"clientInfo": map[string]any{
-			"name":    "codex-telegram-remote-go",
+			"name":    "codex-tg",
 			"version": "0.1.0",
 		},
 	}); err != nil {

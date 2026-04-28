@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"codex-telegram-remote-go/internal/model"
-	"codex-telegram-remote-go/internal/telegram"
-	"codex-telegram-remote-go/internal/tgformat"
+	"github.com/mideco-tech/codex-tg/internal/model"
+	"github.com/mideco-tech/codex-tg/internal/telegram"
+	"github.com/mideco-tech/codex-tg/internal/tgformat"
 )
 
 const demoPrompt = "I am preparing for relocation and want to work as an LLM engineer.\n" +
