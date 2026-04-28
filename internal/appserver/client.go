@@ -68,7 +68,7 @@ func (c *Client) Start(ctx context.Context) error {
 		c.mu.Unlock()
 		return nil
 	}
-	cmd, err := c.buildCommand(ctx)
+	cmd, err := c.buildCommand()
 	if err != nil {
 		c.mu.Unlock()
 		return err
@@ -361,7 +361,7 @@ func (c *Client) StderrTail() []string {
 	return out
 }
 
-func (c *Client) buildCommand(ctx context.Context) (*exec.Cmd, error) {
+func (c *Client) buildCommand() (*exec.Cmd, error) {
 	executable, err := exec.LookPath(c.codexBin)
 	if err != nil {
 		executable = c.codexBin
@@ -370,12 +370,12 @@ func (c *Client) buildCommand(ctx context.Context) (*exec.Cmd, error) {
 		ext := strings.ToLower(filepath.Ext(executable))
 		if ext == ".cmd" || ext == ".bat" {
 			command := fmt.Sprintf("%s app-server --listen %s", executable, c.listenURL)
-			cmd := exec.CommandContext(ctx, os.Getenv("ComSpec"), "/d", "/c", command)
+			cmd := exec.Command(os.Getenv("ComSpec"), "/d", "/c", command)
 			cmd.Dir = c.cwd
 			return cmd, nil
 		}
 	}
-	cmd := exec.CommandContext(ctx, executable, "app-server", "--listen", c.listenURL)
+	cmd := exec.Command(executable, "app-server", "--listen", c.listenURL)
 	cmd.Dir = c.cwd
 	return cmd, nil
 }
