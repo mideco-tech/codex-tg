@@ -3,7 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 )
@@ -341,7 +341,15 @@ func NormalizePath(value string) string {
 	if trimmed == "" {
 		return ""
 	}
-	return filepath.Clean(trimmed)
+	// Codex threads may originate from Windows, macOS, or Linux while tests and
+	// CI run on any OS. Normalize both separator styles without using host-OS
+	// path semantics.
+	normalized := strings.ReplaceAll(trimmed, "\\", "/")
+	cleaned := path.Clean(normalized)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
 }
 
 func ProjectNameFromCWD(cwd string) (projectName string, directoryName string) {
@@ -349,12 +357,12 @@ func ProjectNameFromCWD(cwd string) (projectName string, directoryName string) {
 	if normalized == "" {
 		return "Shared/General", ""
 	}
-	slashed := strings.ToLower(filepath.ToSlash(normalized))
+	slashed := strings.ToLower(normalized)
 	if slashed == "c:/users/you/documents/codex" {
 		return "Shared/General", "General"
 	}
-	dir := filepath.Base(normalized)
-	if dir == "." || dir == string(filepath.Separator) || dir == "" {
+	dir := path.Base(normalized)
+	if dir == "." || dir == "/" || dir == "" {
 		return "Shared/General", ""
 	}
 	return dir, dir
