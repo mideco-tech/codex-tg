@@ -41,6 +41,12 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 - SQLite-backed durable state for bindings, routes, callbacks, observer target, panels, and delivery metadata.
 - Cross-platform Go daemon foundation for Windows, macOS, and Linux.
 
+## Platform Status
+
+- Windows: actively tested with the local Codex App Server, Telegram Bot API, observer flows, and live E2E demo.
+- macOS: in progress.
+- Linux: CI runs tests/builds on Ubuntu; full local daemon/runtime validation is still pending.
+
 ## Quickstart
 
 Prerequisites:
