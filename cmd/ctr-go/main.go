@@ -69,6 +69,7 @@ func runDaemon(cfg config.Config) error {
 		return err
 	}
 	defer service.Close()
+	service.SetLogger(logger)
 
 	bot, err := telegram.NewBot(cfg, service, logger)
 	if err != nil {

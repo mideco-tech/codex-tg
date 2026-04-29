@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Added bounded daemon diagnostics for Telegram-originated turn lifecycle, app-server calls, session repair, transport failures, and first terminal status of Telegram-originated turns.
+- Normalized App Server snapshots that contain a `final_answer` but still report `inProgress`, clearing stale active-turn state before Telegram routing.
+- Treated `no active turn to steer` as stale active-turn evidence so Telegram input can start a new turn instead of returning a false parallel-turn warning.
+- Prevented global observer sync from recreating duplicate `New run` panels for Telegram-originated turns already represented by a Telegram input panel.
+- Added `Get thread id` to live summary and Final Card actions so operators can copy full thread/turn ids without SQLite or logs.
+- Sanitized Telegram-visible rendering so missing App Server command/status/request fields never appear as literal `"<nil>"`, with unit coverage and a local live nil-guard E2E path documented.
+- Serialized App Server session lifecycle repair/startup so stale old live loops cannot clear newer sessions or create duplicate live subscriptions.
+- Gated transient Telegram-origin empty `interrupted` snapshots so Telegram does not collapse into a false terminal card before App Server catch-up.
+
 ## v0.1.1 - 2026-04-29
 
 - Changed observer chronology so `New run` is an orientation card without run status.

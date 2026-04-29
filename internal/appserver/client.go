@@ -60,6 +60,7 @@ type Client struct {
 	cwd            string
 	requestTimeout time.Duration
 
+	startMu        sync.Mutex
 	mu             sync.Mutex
 	cmd            *exec.Cmd
 	stdin          io.WriteCloser
@@ -89,6 +90,9 @@ func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration) *C
 }
 
 func (c *Client) Start(ctx context.Context) error {
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
+
 	c.mu.Lock()
 	if c.started {
 		c.mu.Unlock()
@@ -137,12 +141,23 @@ func (c *Client) Start(ctx context.Context) error {
 			"version": version.Version,
 		},
 	}); err != nil {
+		_ = c.closeRunning()
 		return err
 	}
-	return c.Notify(ctx, "initialized", nil)
+	if err := c.Notify(ctx, "initialized", nil); err != nil {
+		_ = c.closeRunning()
+		return err
+	}
+	return nil
 }
 
 func (c *Client) Close() error {
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
+	return c.closeRunning()
+}
+
+func (c *Client) closeRunning() error {
 	c.mu.Lock()
 	if !c.started {
 		c.mu.Unlock()
@@ -210,6 +225,7 @@ func (c *Client) Request(ctx context.Context, method string, params map[string]a
 		return nil, err
 	}
 	if _, err := io.WriteString(stdin, string(payload)+"\n"); err != nil {
+		c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdin", "method": method, "error": err.Error(), "stderr_tail": c.StderrTail()}})
 		return nil, err
 	}
 
@@ -259,8 +275,11 @@ func (c *Client) Notify(ctx context.Context, method string, params map[string]an
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(stdin, string(payload)+"\n")
-	return err
+	if _, err := io.WriteString(stdin, string(payload)+"\n"); err != nil {
+		c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdin", "method": method, "error": err.Error(), "stderr_tail": c.StderrTail()}})
+		return err
+	}
+	return nil
 }
 
 func (c *Client) RespondServerRequest(ctx context.Context, requestID string, result map[string]any) error {
@@ -280,8 +299,11 @@ func (c *Client) RespondServerRequest(ctx context.Context, requestID string, res
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(stdin, string(payload)+"\n")
-	return err
+	if _, err := io.WriteString(stdin, string(payload)+"\n"); err != nil {
+		c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdin", "method": "serverRequest/respond", "error": err.Error(), "stderr_tail": c.StderrTail()}})
+		return err
+	}
+	return nil
 }
 
 func (c *Client) ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error) {
@@ -631,14 +653,25 @@ func (c *Client) readStdout() {
 		line := scanner.Bytes()
 		var payload map[string]any
 		if err := json.Unmarshal(line, &payload); err != nil {
-			c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"line": string(line), "error": err.Error()}})
+			c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdout", "error": err.Error(), "line_len": len(line), "stderr_tail": c.StderrTail()}})
 			continue
 		}
 		c.handlePayload(payload)
 	}
-	if err := scanner.Err(); err != nil {
-		c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdout", "error": err.Error()}})
+	if !c.isStarted() {
+		return
 	}
+	if err := scanner.Err(); err != nil {
+		c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdout", "error": err.Error(), "stderr_tail": c.StderrTail()}})
+		return
+	}
+	c.broadcast(Event{Channel: "transport_closed", Params: map[string]any{"stream": "stdout", "reason": "eof", "stderr_tail": c.StderrTail()}})
+}
+
+func (c *Client) isStarted() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.started
 }
 
 func (c *Client) readStderr() {
@@ -681,7 +714,10 @@ func (c *Client) handlePayload(payload map[string]any) {
 			return
 		}
 		if method, ok := payload["method"].(string); ok {
-			requestID := fmt.Sprintf("%v", id)
+			requestID := rpcString(id)
+			if requestID == "" {
+				return
+			}
 			params := asMap(payload["params"])
 			c.mu.Lock()
 			c.serverRequests[requestID] = params
@@ -693,13 +729,24 @@ func (c *Client) handlePayload(payload map[string]any) {
 	method, _ := payload["method"].(string)
 	params := asMap(payload["params"])
 	if strings.EqualFold(method, "serverRequest/resolved") {
-		if requestID := fmt.Sprintf("%v", params["requestId"]); requestID != "" {
+		if requestID := rpcString(params["requestId"]); requestID != "" {
 			c.mu.Lock()
 			delete(c.serverRequests, requestID)
 			c.mu.Unlock()
 		}
 	}
 	c.broadcast(Event{Channel: "notification", Method: method, Params: params})
+}
+
+func rpcString(value any) string {
+	if value == nil {
+		return ""
+	}
+	out := strings.TrimSpace(fmt.Sprintf("%v", value))
+	if out == "" || out == "<nil>" {
+		return ""
+	}
+	return out
 }
 
 func (c *Client) broadcast(event Event) {

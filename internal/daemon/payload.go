@@ -17,12 +17,23 @@ func payloadString(value any) string {
 	}
 }
 
+func payloadAny(value any) any {
+	if payloadString(value) == "" {
+		return nil
+	}
+	return value
+}
+
 func cleanPayloadString(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || value == "<nil>" {
 		return ""
 	}
 	return value
+}
+
+func cleanTelegramNilLiteral(value string) string {
+	return strings.ReplaceAll(value, "<nil>", "")
 }
 
 func payloadMapString(values map[string]any, key string) string {

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,6 +35,7 @@ type recordingSender struct {
 	documents []recordedDocument
 	edits     []recordedMessage
 	deletes   []recordedMessage
+	editErr   error
 }
 
 func (s *recordingSender) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec) (int64, error) {
@@ -53,11 +55,17 @@ func (s *recordingSender) SendRenderedMessages(ctx context.Context, chatID, topi
 }
 
 func (s *recordingSender) EditMessage(ctx context.Context, chatID, topicID, messageID int64, text string, buttons [][]model.ButtonSpec) error {
+	if s.editErr != nil {
+		return s.editErr
+	}
 	s.edits = append(s.edits, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: text, buttons: buttons})
 	return nil
 }
 
 func (s *recordingSender) EditRenderedMessage(ctx context.Context, chatID, topicID, messageID int64, rendered model.RenderedMessage, buttons [][]model.ButtonSpec) error {
+	if s.editErr != nil {
+		return s.editErr
+	}
 	s.edits = append(s.edits, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: rendered.Text, entities: rendered.Entities, buttons: buttons})
 	return nil
 }
@@ -404,6 +412,36 @@ func TestSummaryPanelDisplaysAgentMessagesChronologically(t *testing.T) {
 	}
 	if strings.Contains(text, "1. [commentary]") || strings.Contains(text, "2. [commentary]") || strings.Contains(text, "3. [commentary]") {
 		t.Fatalf("summary text must not number commentary entries: %q", text)
+	}
+}
+
+func TestSummaryPanelRemovesNilLiteralBeforeRendering(t *testing.T) {
+	t.Parallel()
+
+	thread := model.Thread{
+		ID:          "thread-nil-summary",
+		Title:       "Nil summary",
+		ProjectName: "Codex",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-nil-summary",
+		LatestTurnStatus: "<nil>",
+		LatestAgentMessageEntries: []appserver.AgentMessageEntry{
+			{ID: "agent-nil", Phase: "<nil>", Text: "Before <nil> after"},
+		},
+	}
+
+	service := newTestService(t)
+	messages := service.renderSummaryPanelMarkdown(context.Background(), thread, snapshot, snapshot.LatestAgentMessageEntries, nil)
+	if len(messages) != 1 {
+		t.Fatalf("len(messages) = %d, want 1", len(messages))
+	}
+	if strings.Contains(messages[0].Text, "<nil>") {
+		t.Fatalf("summary text leaked nil literal: %q", messages[0].Text)
+	}
+	if !strings.Contains(messages[0].Text, "Before  after") {
+		t.Fatalf("summary text = %q, want sanitized agent text", messages[0].Text)
 	}
 }
 
@@ -758,6 +796,75 @@ func TestTelegramInputSyncDoesNotDuplicateUserRequestNotice(t *testing.T) {
 	}
 	if panel == nil || panel.SourceMode != model.PanelSourceTelegramInput || panel.RunNoticeMessageID != sender.messages[0].messageID || panel.LastUserNoticeFP != "" {
 		t.Fatalf("panel = %#v, want telegram_input with empty user notice fp", panel)
+	}
+}
+
+func TestGlobalObserverDoesNotRecreateTelegramOriginPanelOnEditFailure(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	thread := model.Thread{
+		ID:          "thread-telegram-origin-no-global-duplicate",
+		Title:       "Telegram prompt",
+		ProjectName: "Codex",
+		CWD:         `C:\Users\you\Projects\Codex`,
+		UpdatedAt:   time.Now().UTC().Unix(),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, "turn-telegram-origin-no-global-duplicate"); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-telegram-origin-no-global-duplicate",
+		LatestTurnStatus: "inProgress",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot(initial) failed: %v", err)
+	}
+
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
+	if len(sender.messages) != 4 {
+		t.Fatalf("initial message count = %d, want New run + trio; messages=%#v", len(sender.messages), sender.messages)
+	}
+	panelBefore, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel(before) failed: %v", err)
+	}
+	if panelBefore == nil || panelBefore.SourceMode != model.PanelSourceTelegramInput {
+		t.Fatalf("panel before = %#v, want telegram_input", panelBefore)
+	}
+
+	nextSnapshot := appserver.CompactSnapshot(&snapshot, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-telegram-origin-no-global-duplicate",
+		LatestTurnStatus: "inProgress",
+		LatestAgentMessageEntries: []appserver.AgentMessageEntry{
+			{ID: "agent-1", Phase: model.DetailItemCommentary, Text: "Working.", FP: "agent-1-fp"},
+		},
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, nextSnapshot); err != nil {
+		t.Fatalf("UpsertSnapshot(next) failed: %v", err)
+	}
+	sender.editErr = errors.New("forced edit failure")
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
+
+	if len(sender.messages) != 4 {
+		t.Fatalf("message count after global sync = %d, want no duplicate New run/trio; messages=%#v", len(sender.messages), sender.messages)
+	}
+	panelAfter, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel(after) failed: %v", err)
+	}
+	if panelAfter == nil || panelAfter.ID != panelBefore.ID || panelAfter.SourceMode != model.PanelSourceTelegramInput {
+		t.Fatalf("panel after = %#v, want original telegram_input panel %#v", panelAfter, panelBefore)
 	}
 }
 

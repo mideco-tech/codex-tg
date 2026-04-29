@@ -11,6 +11,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Backend integration surface is only `codex app-server` over stdio.
 - Durable identity is `threadId`; Telegram chat/topic is only an input and rendering surface.
 - Live observer events come from the daemon session; foreign GUI/CLI activity must also be covered by polling `thread/read`.
+- App Server session lifecycle transitions must be serialized and generation-aware; stale old-session close/error events must not invalidate newer sessions or create repair loops.
 - Startup must remain non-blocking; never put full thread sync into synchronous startup.
 - SQLite is the local source of truth for bindings, routes, callbacks, panels, observer target, delivery metadata, and daemon state.
 - Do not add a second runtime backbone through `codex exec resume`, SDK-only wrappers, or MCP.
@@ -29,6 +30,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Telegram-originated Plan Mode starts must pass App Server `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
 - `/model` and `/effort` are Telegram button menus for collaboration-mode model settings. Persist selections in SQLite, not env-only local config. After a selection, remove the inline choice buttons from the edited message.
 - Replies to active turns should steer the active turn. If steering is rejected while the thread still looks active, do not start a parallel turn.
+- Stale active-turn ghosts are different: if `thread/read` exposes a final answer or `turn/steer` says `no active turn to steer`, follow ADR-012 and allow a new `turn/start` after re-read instead of returning a false parallel-turn warning.
 - Every observer-visible message must include the shared identity header: emoji marker, project, thread, `T:`, `R:`, and kind.
 - Emoji markers are visual hints only. Persisted message routes and callback tokens are the routing authority.
 
@@ -54,6 +56,8 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 
 ## Required Checks
 
+For feature/test context before changing Telegram routing, observer panels, Plan Mode, diagnostics, Telegram rendering, or lifecycle recovery, read `docs/testing/regression-map.md` and the ADR named there. Keep the map current when adding or changing behavior.
+
 Run before committing code changes:
 
 ```powershell
@@ -73,6 +77,7 @@ For Telegram UI, routing, callbacks, Plan Mode, Details, or observer behavior, u
 
 - Keep changes small and contract-preserving.
 - Update ADRs when behavior or architecture changes. Supersede old ADRs instead of silently contradicting them.
+- Treat ADRs plus `docs/testing/regression-map.md` as the TDD handoff surface: new behavior needs an ADR/contract note, unit-test anchors, and validation notes when live Telegram was used.
 - Update README and docs when public behavior changes.
 - Add or update tests for routing, observer target, panel lifecycle, callbacks, Markdown/entity rendering, and export behavior.
 - Use real Telegram readback for UI changes when possible; Bot API send/edit success alone is not sufficient.

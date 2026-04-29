@@ -24,12 +24,27 @@ type sessionTailToolOverlay struct {
 	FP        string
 }
 
+type sessionTailFinalOverlay struct {
+	TurnID    string
+	Text      string
+	Timestamp string
+	FP        string
+}
+
 func applySessionTailToolOverlay(thread model.Thread, snapshot *appserver.ThreadReadSnapshot) bool {
 	if snapshot == nil || strings.TrimSpace(thread.ID) == "" {
 		return false
 	}
 	overlay, ok := latestActiveSessionTailTool(thread, snapshot.LatestTurnID)
 	if !ok {
+		return false
+	}
+	overlayTurnID := strings.TrimSpace(overlay.TurnID)
+	snapshotTurnID := strings.TrimSpace(snapshot.LatestTurnID)
+	if snapshotTurnID != "" && overlayTurnID != "" && snapshotTurnID != overlayTurnID && !isTerminalStatus(snapshot.LatestTurnStatus) {
+		return false
+	}
+	if strings.TrimSpace(snapshot.LatestFinalFP) != "" && !snapshot.WaitingOnApproval && !snapshot.WaitingOnReply {
 		return false
 	}
 	label := strings.TrimSpace(overlay.Command)
@@ -69,6 +84,28 @@ func applySessionTailToolOverlay(thread model.Thread, snapshot *appserver.Thread
 	return true
 }
 
+func applySessionTailFinalOverlay(thread model.Thread, snapshot *appserver.ThreadReadSnapshot) bool {
+	if snapshot == nil || strings.TrimSpace(thread.ID) == "" {
+		return false
+	}
+	overlay, ok := latestSessionTailFinal(thread, snapshot.LatestTurnID)
+	if !ok {
+		return false
+	}
+	if strings.TrimSpace(snapshot.LatestFinalText) == "" {
+		snapshot.LatestFinalText = overlay.Text
+	}
+	if strings.TrimSpace(snapshot.LatestFinalFP) == "" {
+		snapshot.LatestFinalFP = overlay.FP
+	}
+	snapshot.LatestTurnStatus = "completed"
+	snapshot.Thread.Status = "completed"
+	snapshot.Thread.ActiveTurnID = ""
+	snapshot.SessionTailActiveTool = false
+	snapshot.DetailItems = upsertSessionTailFinalDetails(snapshot.DetailItems, overlay)
+	return true
+}
+
 func latestActiveSessionTailTool(thread model.Thread, fallbackTurnID string) (sessionTailToolOverlay, bool) {
 	sessionPath, err := sessionPathForOverlay(thread)
 	if err != nil {
@@ -79,6 +116,18 @@ func latestActiveSessionTailTool(thread model.Thread, fallbackTurnID string) (se
 		return sessionTailToolOverlay{}, false
 	}
 	return latestActiveToolFromSessionLines(lines, fallbackTurnID)
+}
+
+func latestSessionTailFinal(thread model.Thread, fallbackTurnID string) (sessionTailFinalOverlay, bool) {
+	sessionPath, err := sessionPathForOverlay(thread)
+	if err != nil {
+		return sessionTailFinalOverlay{}, false
+	}
+	lines, err := readTailLines(sessionPath, sessionTailOverlayMaxBytes)
+	if err != nil || len(lines) == 0 {
+		return sessionTailFinalOverlay{}, false
+	}
+	return latestFinalFromSessionLines(lines, fallbackTurnID)
 }
 
 func threadHasActiveSessionTailTool(thread model.Thread, fallbackTurnID string) bool {
@@ -132,6 +181,48 @@ func readTailLines(path string, maxBytes int64) ([]string, error) {
 	return lines, nil
 }
 
+func latestFinalFromSessionLines(lines []string, fallbackTurnID string) (sessionTailFinalOverlay, bool) {
+	fallbackTurnID = strings.TrimSpace(fallbackTurnID)
+	currentTurnID := fallbackTurnID
+	var latest sessionTailFinalOverlay
+	for _, line := range lines {
+		var entry sessionLogEnvelope
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Type == "turn_context" {
+			if turnID := strings.TrimSpace(valueFromMap(entry.Payload, "turn_id")); turnID != "" {
+				currentTurnID = turnID
+			}
+			continue
+		}
+		if entry.Type != "event_msg" || valueFromMap(entry.Payload, "type") != "task_complete" {
+			continue
+		}
+		turnID := strings.TrimSpace(valueFromMap(entry.Payload, "turn_id"))
+		if turnID == "" {
+			turnID = currentTurnID
+		}
+		if fallbackTurnID != "" && turnID != fallbackTurnID {
+			continue
+		}
+		text := strings.TrimSpace(valueFromMap(entry.Payload, "last_agent_message"))
+		if text == "" {
+			text = strings.TrimSpace(valueFromMap(entry.Payload, "message"))
+		}
+		if text == "" {
+			continue
+		}
+		latest = sessionTailFinalOverlay{
+			TurnID:    turnID,
+			Text:      text,
+			Timestamp: strings.TrimSpace(entry.Timestamp),
+			FP:        hashStrings("session_tail_final", turnID, text),
+		}
+	}
+	return latest, strings.TrimSpace(latest.Text) != ""
+}
+
 func latestActiveToolFromSessionLines(lines []string, fallbackTurnID string) (sessionTailToolOverlay, bool) {
 	type callState struct {
 		overlay sessionTailToolOverlay
@@ -175,7 +266,21 @@ func latestActiveToolFromSessionLines(lines []string, fallbackTurnID string) (se
 				}
 			}
 		case "event_msg":
-			if valueFromMap(entry.Payload, "type") != "exec_command_end" {
+			eventType := valueFromMap(entry.Payload, "type")
+			if eventType == "task_complete" {
+				turnID := strings.TrimSpace(valueFromMap(entry.Payload, "turn_id"))
+				if turnID == "" {
+					turnID = currentTurnID
+				}
+				for _, state := range calls {
+					if state != nil && strings.TrimSpace(state.overlay.TurnID) == turnID {
+						state.closed = true
+						state.overlay.Status = "completed"
+					}
+				}
+				continue
+			}
+			if eventType != "exec_command_end" {
 				continue
 			}
 			callID := strings.TrimSpace(valueFromMap(entry.Payload, "call_id"))
@@ -218,7 +323,7 @@ func overlayFromResponseItem(entry sessionLogEnvelope, turnID string) (sessionTa
 	if callID == "" {
 		return sessionTailToolOverlay{}, false
 	}
-	name := strings.TrimSpace(valueFromMap(entry.Payload, "name"))
+	name := firstPayloadString(entry.Payload, "name", "tool")
 	command := commandFromResponseItem(entry.Payload)
 	if strings.TrimSpace(command) == "" && strings.TrimSpace(name) == "" {
 		return sessionTailToolOverlay{}, false
@@ -235,7 +340,10 @@ func overlayFromResponseItem(entry sessionLogEnvelope, turnID string) (sessionTa
 }
 
 func commandFromResponseItem(payload map[string]any) string {
-	name := strings.TrimSpace(valueFromMap(payload, "name"))
+	name := firstPayloadString(payload, "name", "tool")
+	if command := commandFromArgumentsString(valueFromMap(payload, "arguments")); command != "" {
+		return command
+	}
 	if strings.EqualFold(name, "shell_command") {
 		args := strings.TrimSpace(valueFromMap(payload, "arguments"))
 		if args != "" {
@@ -247,12 +355,30 @@ func commandFromResponseItem(payload map[string]any) string {
 			}
 		}
 	}
-	for _, key := range []string{"command", "input", "arguments"} {
+	for _, key := range []string{"command", "cmd", "input"} {
 		if command := strings.TrimSpace(valueFromMap(payload, key)); command != "" {
 			return command
 		}
 	}
 	return ""
+}
+
+func commandFromArgumentsString(arguments string) string {
+	arguments = strings.TrimSpace(arguments)
+	if arguments == "" || arguments == "<nil>" || arguments == "{}" || arguments == "[]" || arguments == "map[]" {
+		return ""
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(arguments), &parsed); err == nil {
+		if len(parsed) == 0 {
+			return ""
+		}
+		if command := firstPayloadString(parsed, "command", "cmd", "input", "query", "path", "text"); command != "" {
+			return command
+		}
+		return ""
+	}
+	return arguments
 }
 
 func upsertSessionTailToolDetails(items []model.DetailItem, overlay sessionTailToolOverlay) []model.DetailItem {
@@ -289,5 +415,31 @@ func upsertSessionTailToolDetails(items []model.DetailItem, overlay sessionTailT
 			CommentaryIndex: commentaryIndex,
 		})
 	}
+	return out
+}
+
+func upsertSessionTailFinalDetails(items []model.DetailItem, overlay sessionTailFinalOverlay) []model.DetailItem {
+	if strings.TrimSpace(overlay.FP) == "" || strings.TrimSpace(overlay.Text) == "" {
+		return items
+	}
+	id := strings.TrimSpace(overlay.TurnID)
+	if id == "" {
+		id = "session-tail-final"
+	}
+	id += ":final"
+	out := make([]model.DetailItem, 0, len(items)+1)
+	for _, item := range items {
+		if item.ID == id || item.FP == overlay.FP || item.Kind == model.DetailItemFinal {
+			continue
+		}
+		out = append(out, item)
+	}
+	out = append(out, model.DetailItem{
+		ID:    id,
+		Kind:  model.DetailItemFinal,
+		Text:  overlay.Text,
+		FP:    overlay.FP,
+		Phase: "final_answer",
+	})
 	return out
 }

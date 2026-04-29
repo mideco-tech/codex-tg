@@ -15,6 +15,60 @@ import (
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
+func TestValueFromMapSkipsNilLikeValues(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		"nil":     nil,
+		"literal": "<nil>",
+		"text":    "  ok  ",
+	}
+	for _, key := range []string{"missing", "nil", "literal"} {
+		if got := valueFromMap(payload, key); got != "" {
+			t.Fatalf("valueFromMap(%q) = %q, want empty", key, got)
+		}
+	}
+	if got := valueFromMap(payload, "text"); got != "ok" {
+		t.Fatalf("valueFromMap(text) = %q, want ok", got)
+	}
+}
+
+func TestRenderCommandSkipsNilLikeValues(t *testing.T) {
+	t.Parallel()
+
+	if got := renderCommand(nil); got != "" {
+		t.Fatalf("renderCommand(nil) = %q, want empty", got)
+	}
+	if got := renderCommand([]any{nil, "<nil>", "echo ok"}); got != "echo ok" {
+		t.Fatalf("renderCommand(slice) = %q, want echo ok", got)
+	}
+	if got := renderCommand(map[string]any{"command": "<nil>", "input": "printf ok"}); got != "printf ok" {
+		t.Fatalf("renderCommand(map) = %q, want printf ok", got)
+	}
+	if got := renderCommand(map[string]any{"name": "read_thread_terminal", "arguments": "{}"}); got != "read_thread_terminal" {
+		t.Fatalf("renderCommand(empty arguments map) = %q, want read_thread_terminal", got)
+	}
+	if got := renderCommand(map[string]any{"name": "exec_command", "arguments": `{"cmd":"sleep 1"}`}); got != "sleep 1" {
+		t.Fatalf("renderCommand(exec arguments) = %q, want sleep 1", got)
+	}
+}
+
+func TestRenderEventMsgWithoutCommandDoesNotPrintNil(t *testing.T) {
+	t.Parallel()
+
+	got := renderEventMsg("2026-04-29T10:00:00Z", map[string]any{
+		"type":              "exec_command_end",
+		"status":            "completed",
+		"aggregated_output": "ok\n",
+	})
+	if strings.Contains(got, "<nil>") {
+		t.Fatalf("renderEventMsg leaked <nil>: %q", got)
+	}
+	if !strings.Contains(got, "TOOL OUTPUT (completed)") {
+		t.Fatalf("renderEventMsg = %q, want completed tool output", got)
+	}
+}
+
 func TestBuildThreadLogArchiveUsesPrimaryPathAndIncludesHumanAndRawLog(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("USERPROFILE", home)

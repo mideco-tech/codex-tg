@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 )
 
 const telegramMessageLimit = 4096
+
+var telegramBotTokenURLPattern = regexp.MustCompile(`bot[0-9]+:[A-Za-z0-9_-]+`)
 
 type Bot struct {
 	cfg     config.Config
@@ -55,7 +58,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	}
 	b.me = me
 	if err := b.client.SetMyCommands(startCtx, defaultCommands()); err != nil {
-		b.logger.Printf("telegram setMyCommands failed: %v", err)
+		b.logger.Printf("telegram setMyCommands failed: %s", sanitizeTelegramLogError(err))
 	}
 	b.logger.Printf("telegram bot ready: @%s", me.Username)
 	return nil
@@ -74,7 +77,7 @@ func (b *Bot) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			b.logger.Printf("telegram getUpdates failed: %v", err)
+			b.logger.Printf("telegram getUpdates failed: %s", sanitizeTelegramLogError(err))
 			select {
 			case <-ctx.Done():
 				return nil
@@ -87,10 +90,17 @@ func (b *Bot) Run(ctx context.Context) error {
 				offset = update.UpdateID + 1
 			}
 			if err := b.handleUpdate(ctx, update); err != nil {
-				b.logger.Printf("telegram update %d failed: %v", update.UpdateID, err)
+				b.logger.Printf("telegram update %d failed: %s", update.UpdateID, sanitizeTelegramLogError(err))
 			}
 		}
 	}
+}
+
+func sanitizeTelegramLogError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return telegramBotTokenURLPattern.ReplaceAllString(err.Error(), "bot<redacted>")
 }
 
 func (b *Bot) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec) (int64, error) {

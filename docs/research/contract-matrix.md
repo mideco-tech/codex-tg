@@ -17,7 +17,9 @@ This file now serves two purposes:
 - `/bind <thread>`
 - `/reply [--plan] <thread> <text>`
 - `/plan <thread> <text>`
+- `/plan <text>`
 - `/plan_mode <thread> <text>`
+- `/plan_mode <text>`
 - `/settings`
 - `/model`
 - `/effort`
@@ -54,13 +56,16 @@ This file now serves two purposes:
 - Telegram-originated Plan Mode starts use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
 - `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
 - After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
+- `/plan <text>` and `/plan_mode <text>` use reply route, armed state, or current binding when the first token is not a known or UUID-like thread id.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
-- Replies to active turns steer the active turn. If steering is rejected while the thread still looks active, the bridge must not create a parallel `turn/start`.
+- Replies to active turns steer the active turn. If steering is rejected while the thread still looks genuinely active, the bridge must not create a parallel `turn/start`; stale-active errors such as `no active turn to steer` are handled by ADR-012 and may fall back to a new `turn/start` after re-read.
 - All observer/card messages carry a visual identity header: `emoji [Project] [Thread] [T:thread] [R:run] [Kind]`.
 - Emoji markers are stable visual hints; route correctness remains based on DB message routes and callback tokens.
+- Full `thread_id` and `turn_id` are exposed through `/context` and the `Get thread id` summary/Final action; compact `T:`/`R:` chips are not routing authority.
 - Foreign GUI/CLI runs create separate `New run` and `[User]` cards before the live trio.
 - If the prompt is not available when the run is discovered, `[User]` starts as a placeholder and is edited into the real prompt later.
 - Telegram-originated runs create `New run` and the live trio, but do not duplicate the user request as `[User]`.
+- Telegram-visible text must never render literal `"<nil>"`. Missing, null, empty, or nil-like App Server fields are treated as absent and must be cleaned before Markdown/entity conversion.
 
 ## Callback / button surface from the oracle
 
@@ -103,6 +108,7 @@ Target v2 callback surface:
 - `settings_reasoning_menu`
 - `settings_model_set`
 - `settings_reasoning_set`
+- `get_thread_id`
 
 ## Routing precedence
 

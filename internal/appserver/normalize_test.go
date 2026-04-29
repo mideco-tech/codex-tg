@@ -1,11 +1,23 @@
 package appserver
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
+
+func TestStringValueTreatsNilLiteralAsMissing(t *testing.T) {
+	t.Parallel()
+
+	if got := stringValue("<nil>", "fallback"); got != "fallback" {
+		t.Fatalf("stringValue(<nil>) = %q, want fallback", got)
+	}
+	if got := stringValue("ok", "fallback"); got != "ok" {
+		t.Fatalf("stringValue(ok) = %q, want ok", got)
+	}
+}
 
 func TestDiffSnapshotEmitsCompletionForNewTerminalTurn(t *testing.T) {
 	previous := &model.ThreadSnapshotState{
@@ -133,6 +145,52 @@ func TestSnapshotFromThreadReadKeepsAgentMessagePhasesAndFinalAnswerOnly(t *test
 	}
 }
 
+func TestSnapshotFromThreadReadTreatsFinalAnswerAsCompletedWhenStatusIsStale(t *testing.T) {
+	t.Parallel()
+
+	snapshot := SnapshotFromThreadRead(map[string]any{
+		"id":           "thread-stale",
+		"name":         "Stale live state",
+		"cwd":          "/Users/example/project",
+		"status":       "inProgress",
+		"activeTurnId": "turn-stale",
+		"turns": []any{
+			map[string]any{
+				"id":     "turn-stale",
+				"status": "inProgress",
+				"items": []any{
+					map[string]any{
+						"id":   "user-1",
+						"type": "userMessage",
+						"content": []any{
+							map[string]any{"type": "text", "text": "Run it."},
+						},
+					},
+					map[string]any{
+						"id":    "agent-final",
+						"type":  "agentMessage",
+						"phase": "final_answer",
+						"text":  "Done.",
+					},
+				},
+			},
+		},
+	})
+
+	if got, want := snapshot.LatestTurnStatus, "completed"; got != want {
+		t.Fatalf("LatestTurnStatus = %q, want %q", got, want)
+	}
+	if got := snapshot.Thread.ActiveTurnID; got != "" {
+		t.Fatalf("Thread.ActiveTurnID = %q, want empty", got)
+	}
+	if got, want := snapshot.Thread.Status, "completed"; got != want {
+		t.Fatalf("Thread.Status = %q, want %q", got, want)
+	}
+	if got, want := snapshot.LatestFinalText, "Done."; got != want {
+		t.Fatalf("LatestFinalText = %q, want %q", got, want)
+	}
+}
+
 func TestSnapshotFromThreadReadBuildsOrderedDetailsAndLinksToolsToCommentary(t *testing.T) {
 	t.Parallel()
 
@@ -181,6 +239,45 @@ func TestSnapshotFromThreadReadBuildsOrderedDetailsAndLinksToolsToCommentary(t *
 	}
 	if got, want := snapshot.DetailItems[4].CommentaryIndex, 2; got != want {
 		t.Fatalf("second commentary index = %d, want %d", got, want)
+	}
+}
+
+func TestSnapshotFromThreadReadLabelsDynamicToolWithoutEmptyArguments(t *testing.T) {
+	t.Parallel()
+
+	snapshot := SnapshotFromThreadRead(map[string]any{
+		"id":     "thread-dynamic-tool",
+		"name":   "Dynamic tool",
+		"cwd":    "/Users/example/project",
+		"status": "inProgress",
+		"turns": []any{
+			map[string]any{
+				"id":     "turn-dynamic-tool",
+				"status": "inProgress",
+				"items": []any{
+					map[string]any{"id": "user-1", "type": "userMessage", "content": []any{
+						map[string]any{"type": "text", "text": "Read terminal."},
+					}},
+					map[string]any{
+						"id":        "call-read-terminal",
+						"type":      "dynamicToolCall",
+						"tool":      "read_thread_terminal",
+						"arguments": map[string]any{},
+						"status":    "inProgress",
+					},
+				},
+			},
+		},
+	})
+
+	if got, want := snapshot.LatestToolLabel, "read_thread_terminal"; got != want {
+		t.Fatalf("LatestToolLabel = %q, want %q", got, want)
+	}
+	if strings.Contains(snapshot.LatestToolLabel, "{}") || strings.Contains(snapshot.LatestProgressText, "{}") {
+		t.Fatalf("snapshot leaked empty arguments as text: label=%q progress=%q", snapshot.LatestToolLabel, snapshot.LatestProgressText)
+	}
+	if len(snapshot.DetailItems) != 2 || snapshot.DetailItems[1].Label != "read_thread_terminal" {
+		t.Fatalf("DetailItems = %#v, want dynamic tool label", snapshot.DetailItems)
 	}
 }
 

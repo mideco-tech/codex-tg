@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -548,8 +552,8 @@ func TestSnapshotHasPassiveChangeIgnoresIdenticalTerminalReplay(t *testing.T) {
 
 	current.LatestFinalFP = "upgraded-fingerprint"
 	current.LatestFinalText = "Done."
-	if snapshotHasPassiveChange(&previous, &current) {
-		t.Fatal("snapshotHasPassiveChange returned true for same terminal turn with changed fingerprint")
+	if !snapshotHasPassiveChange(&previous, &current) {
+		t.Fatal("snapshotHasPassiveChange returned false for same terminal turn with changed final fingerprint")
 	}
 
 	current.LatestTurnID = "turn-2"
@@ -625,6 +629,175 @@ func TestPollTrackedSyncsFirstSeenRecentTerminalCatchup(t *testing.T) {
 	}
 	if len(sender.deletes) != 2 {
 		t.Fatalf("deletes = %#v, want tool/output cleanup after final", sender.deletes)
+	}
+}
+
+func TestPollTrackedDefersTelegramOriginEmptyInterruptedAndKeepsActiveState(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	logs := captureServiceLogs(service)
+	ctx := context.Background()
+	turnID := "turn-empty-interrupted"
+	thread := model.Thread{
+		ID:           "thread-empty-interrupted",
+		Title:        "Empty interrupted",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	previousCurrent := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+	}
+	previous := appserver.CompactSnapshot(nil, previousCurrent, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, previous); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	service.poll = &stubSession{
+		threadReads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayload(thread, turnID, "interrupted"),
+		},
+	}
+	service.pollConnected = true
+
+	service.pollTracked(ctx)
+
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("snapshot = nil")
+	}
+	if stored.LastSeenTurnStatus != "inProgress" {
+		t.Fatalf("LastSeenTurnStatus = %q, want inProgress", stored.LastSeenTurnStatus)
+	}
+	if stored.LastCompletionFP != "" {
+		t.Fatalf("LastCompletionFP = %q, want empty while deferred", stored.LastCompletionFP)
+	}
+	if stored.NextPollAfter == "" {
+		t.Fatal("NextPollAfter is empty, want hot polling while deferred")
+	}
+	if !service.threadNeedsCatchupPolling(ctx, thread, stored) {
+		t.Fatal("threadNeedsCatchupPolling = false, want deferred empty interrupted to keep polling")
+	}
+	state := loadTerminalGateState(t, service, ctx, terminalGateDeferKey(thread.ID, turnID))
+	if state.EmptyInterruptedSeenCount != 1 || state.LastDecision != string(terminalGateDefer) {
+		t.Fatalf("defer state = %#v, want one deferred empty interrupted", state)
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"event":"telegram_origin_terminal_deferred"`)
+	if strings.Contains(got, `"event":"telegram_origin_turn_terminal"`) {
+		t.Fatalf("terminal log should be deferred, got:\n%s", got)
+	}
+}
+
+func TestRefreshThreadForOperationDefersEmptyInterrupted(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	turnID := "turn-refresh-empty-interrupted"
+	thread := model.Thread{
+		ID:           "thread-refresh-empty-interrupted",
+		Title:        "Refresh empty interrupted",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	previousCurrent := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+	}
+	previous := appserver.CompactSnapshot(nil, previousCurrent, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, previous); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	stub := &stubSession{
+		threadReads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayload(thread, turnID, "interrupted"),
+		},
+	}
+
+	refreshed, err := service.refreshThreadForOperation(ctx, stub, thread.ID, "thread_read")
+	if err != nil {
+		t.Fatalf("refreshThreadForOperation failed: %v", err)
+	}
+	if refreshed == nil || refreshed.Status != "active" || refreshed.ActiveTurnID != turnID {
+		t.Fatalf("refreshed thread = %#v, want existing active thread", refreshed)
+	}
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("snapshot = nil")
+	}
+	if stored.LastSeenTurnStatus != "inProgress" {
+		t.Fatalf("LastSeenTurnStatus = %q, want inProgress", stored.LastSeenTurnStatus)
+	}
+	if stored.LastCompletionFP != "" {
+		t.Fatalf("LastCompletionFP = %q, want empty while deferred", stored.LastCompletionFP)
+	}
+	if stored.NextPollAfter == "" {
+		t.Fatal("NextPollAfter is empty, want hot polling while deferred")
+	}
+}
+
+func TestPollTrackedSkipsThreadNotLoadedWithoutRepair(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	logs := captureServiceLogs(service)
+	thread := model.Thread{
+		ID:          "thread-not-loaded",
+		Title:       "Not loaded",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		UpdatedAt:   time.Now().UTC().Unix(),
+		Status:      "active",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetGlobalObserverTarget(ctx, 123456789, 0, true); err != nil {
+		t.Fatalf("SetGlobalObserverTarget failed: %v", err)
+	}
+	service.poll = &stubSession{threadReadErr: errors.New("map[code:-32600 message:thread not loaded: thread-not-loaded]")}
+	service.pollConnected = true
+
+	service.pollTracked(ctx)
+
+	repair, err := service.store.GetState(ctx, "control.repair_request")
+	if err != nil {
+		t.Fatalf("GetState(control.repair_request) failed: %v", err)
+	}
+	if strings.TrimSpace(repair) != "" {
+		t.Fatalf("repair request = %q, want empty for thread not loaded", repair)
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"event":"thread_read_skipped"`)
+	requireLogContains(t, got, `"reason":"thread_not_loaded"`)
+	if strings.Contains(got, `"event":"repair_requested"`) {
+		t.Fatalf("unexpected repair_requested log for thread not loaded: %s", got)
 	}
 }
 
@@ -821,6 +994,86 @@ func TestReplyToActiveThreadSteersActiveTurn(t *testing.T) {
 	}
 }
 
+func TestStaleActiveThreadWithFinalAnswerStartsNewTurn(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:           "stale-active-final-thread",
+		Title:        "Stale active final",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		Status:       "active",
+		ActiveTurnID: "turn-stale",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{
+		threadReads: map[string]map[string]any{
+			thread.ID: {
+				"id":           thread.ID,
+				"name":         thread.Title,
+				"cwd":          thread.CWD,
+				"status":       "inProgress",
+				"activeTurnId": "turn-stale",
+				"turns": []any{
+					map[string]any{
+						"id":     "turn-stale",
+						"status": "inProgress",
+						"items": []any{
+							map[string]any{
+								"id":   "user-1",
+								"type": "userMessage",
+								"content": []any{
+									map[string]any{"type": "text", "text": "Original request"},
+								},
+							},
+							map[string]any{
+								"id":    "final-1",
+								"type":  "agentMessage",
+								"phase": "final_answer",
+								"text":  "Done.",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThread(ctx, 123456789, 0, thread.ID, "Start after stale final")
+	if err != nil {
+		t.Fatalf("sendInputToThread failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want new started turn", response)
+	}
+	if len(stub.turnSteerCalls) != 0 {
+		t.Fatalf("turnSteerCalls = %#v, want no stale steer", stub.turnSteerCalls)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one new turn", stub.turnStartCalls)
+	}
+	stored, err := service.store.GetThread(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetThread failed: %v", err)
+	}
+	if stored == nil || stored.ActiveTurnID != "started-turn" || stored.Status != "inProgress" {
+		t.Fatalf("stored thread = %#v, want seeded started turn", stored)
+	}
+	snapshot, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if snapshot == nil || snapshot.LastSeenTurnID != "started-turn" || snapshot.LastSeenTurnStatus != "inProgress" {
+		t.Fatalf("snapshot = %#v, want seeded started turn", snapshot)
+	}
+}
+
 func TestReplyToActiveThreadDoesNotFallbackToTurnStartWhenSteerFails(t *testing.T) {
 	t.Parallel()
 
@@ -853,6 +1106,89 @@ func TestReplyToActiveThreadDoesNotFallbackToTurnStartWhenSteerFails(t *testing.
 	}
 	if len(stub.turnStartCalls) != 0 {
 		t.Fatalf("turnStartCalls = %#v, want no fallback start", stub.turnStartCalls)
+	}
+}
+
+func TestNoActiveTurnSteerFailureFallsBackToTurnStart(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:           "stale-no-active-thread",
+		Title:        "Stale no active",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		Status:       "active",
+		ActiveTurnID: "turn-stale",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{turnSteerErr: errors.New("map[code:-32600 message:no active turn to steer]")}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThread(ctx, 123456789, 0, thread.ID, "Start because stale active is gone")
+	if err != nil {
+		t.Fatalf("sendInputToThread failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want fallback started turn", response)
+	}
+	if len(stub.turnSteerCalls) != 1 {
+		t.Fatalf("turnSteerCalls = %#v, want one failed active steer", stub.turnSteerCalls)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one fallback start", stub.turnStartCalls)
+	}
+}
+
+func TestActiveTurnMismatchRetriesFoundTurn(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	oldTurnID := "019dd9db-2c71-7180-9c56-7aeb99f28f18"
+	foundTurnID := "019dda1b-fc45-72d3-8dfb-03dc4c708b8b"
+	thread := model.Thread{
+		ID:           "active-mismatch-thread",
+		Title:        "Active mismatch",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		Status:       "active",
+		ActiveTurnID: oldTurnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{
+		turnSteerErrs: []error{
+			fmt.Errorf("map[code:-32600 message:expected active turn id `%s` but found `%s`]", oldTurnID, foundTurnID),
+			nil,
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThread(ctx, 123456789, 0, thread.ID, "Steer authoritative active turn")
+	if err != nil {
+		t.Fatalf("sendInputToThread failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID || response.TurnID != foundTurnID {
+		t.Fatalf("response = %#v, want retry steer turn", response)
+	}
+	if len(stub.turnSteerCalls) != 2 {
+		t.Fatalf("turnSteerCalls = %#v, want old then found", stub.turnSteerCalls)
+	}
+	if got := stub.turnSteerCalls[0].turnID; got != oldTurnID {
+		t.Fatalf("first steer turn = %q, want old", got)
+	}
+	if got := stub.turnSteerCalls[1].turnID; got != foundTurnID {
+		t.Fatalf("second steer turn = %q, want found", got)
+	}
+	if len(stub.turnStartCalls) != 0 {
+		t.Fatalf("turnStartCalls = %#v, want no new parallel start", stub.turnStartCalls)
 	}
 }
 
@@ -931,6 +1267,572 @@ func TestPlanCommandStartsPlanCollaborationMode(t *testing.T) {
 	}
 }
 
+func TestPlanCommandUsesBoundThreadWhenNoExplicitThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "bound-plan-thread",
+		Title:       "Bound plan",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, thread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan propose options", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/plan text) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want bound plan turn", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	got := stub.turnStartCalls[0]
+	if got.threadID != thread.ID || got.message != "propose options" || got.collaborationMode != collaborationModePlan {
+		t.Fatalf("turn start call = %#v, want bound plan prompt", got)
+	}
+}
+
+func TestPlanCommandUnknownHeadUsesBoundThreadAsPromptText(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "bound-plan-thread-unknown-head",
+		Title:       "Bound plan unknown head",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, thread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan first second third", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/plan first second third) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID {
+		t.Fatalf("response = %#v, want bound thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.threadID != thread.ID || got.message != "first second third" {
+		t.Fatalf("turn start call = %#v, want full prompt on bound thread", got)
+	}
+}
+
+func TestPlanCommandUnknownHeadWithoutImplicitRouteShowsUsage(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan first second third", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/plan no route) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "Usage: /plan <text>") {
+		t.Fatalf("response = %#v, want /plan usage", response)
+	}
+	if len(stub.turnStartCalls) != 0 {
+		t.Fatalf("turnStartCalls = %#v, want no explicit first-token start", stub.turnStartCalls)
+	}
+}
+
+func TestPlanCommandUUIDLikeHeadStaysExplicit(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	bound := model.Thread{
+		ID:          "bound-plan-thread-with-uuid-command",
+		Title:       "Bound plan",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, bound); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, bound.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	explicitID := "019dd663-d19b-7740-ad85-36ddb517ef39"
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan "+explicitID+" propose options", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/plan uuid text) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "Unknown thread: "+explicitID) {
+		t.Fatalf("response = %#v, want explicit unknown UUID-like thread", response)
+	}
+}
+
+func TestPlanCommandKnownThreadHeadStaysExplicit(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	bound := model.Thread{
+		ID:          "bound-plan-thread-with-known-command",
+		Title:       "Bound plan",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	explicit := model.Thread{
+		ID:          "explicit-plan-thread",
+		Title:       "Explicit plan",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/other-project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, bound); err != nil {
+		t.Fatalf("UpsertThread(bound) failed: %v", err)
+	}
+	if err := service.store.UpsertThread(ctx, explicit); err != nil {
+		t.Fatalf("UpsertThread(explicit) failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, bound.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan "+explicit.ID+" propose options", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/plan known-thread text) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != explicit.ID {
+		t.Fatalf("response = %#v, want explicit thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.threadID != explicit.ID || got.message != "propose options" {
+		t.Fatalf("turn start call = %#v, want explicit plan prompt", got)
+	}
+}
+
+func TestTelegramTurnLifecycleLogsSuccessfulStart(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	logs := captureServiceLogs(service)
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "diag-success-thread",
+		Title:       "Diagnostics",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{threadReads: map[string]map[string]any{
+		thread.ID: diagnosticThreadReadPayload(thread, "existing-turn", "completed"),
+	}}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThreadTurn(ctx, 123456789, 0, thread.ID, "", "keep this prompt private", collaborationModePlan)
+	if err != nil {
+		t.Fatalf("sendInputToThreadTurn failed: %v", err)
+	}
+	if response == nil || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want started-turn", response)
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"event":"telegram_turn_input_start"`)
+	requireLogContains(t, got, `"method":"ThreadResume"`)
+	requireLogContains(t, got, `"method":"TurnStart"`)
+	requireLogContains(t, got, `"event":"telegram_origin_turn_marked"`)
+	requireLogContains(t, got, `"collaboration_mode":"plan"`)
+	requireLogContains(t, got, `"model":"gpt-test"`)
+	requireLogContains(t, got, `"text_len":24`)
+	requireLogContains(t, got, `"text_sha256"`)
+	if strings.Contains(got, "keep this prompt private") {
+		t.Fatalf("diagnostic log leaked prompt body: %s", got)
+	}
+}
+
+func TestSnapshotHasPassiveChangeAllowsTerminalFinalAfterInterrupted(t *testing.T) {
+	t.Parallel()
+
+	previous := &model.ThreadSnapshotState{
+		LastSeenTurnID:     "turn-terminal",
+		LastSeenTurnStatus: "interrupted",
+		LastCompletionFP:   "old-interrupted-fp",
+	}
+	current := &appserver.ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:          "thread-terminal",
+			Title:       "Terminal correction",
+			ProjectName: "Codex",
+			Status:      "idle",
+		},
+		LatestTurnID:     "turn-terminal",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Done.",
+		LatestFinalFP:    "final-fp",
+	}
+
+	if !snapshotHasPassiveChange(previous, current) {
+		t.Fatal("snapshotHasPassiveChange = false, want final correction after interrupted terminal state")
+	}
+}
+
+func TestSnapshotHasPassiveChangeIgnoresRepeatedTerminalSnapshot(t *testing.T) {
+	t.Parallel()
+
+	current := appserver.ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:          "thread-terminal-repeat",
+			Title:       "Terminal repeat",
+			ProjectName: "Codex",
+			Status:      "idle",
+		},
+		LatestTurnID:     "turn-terminal-repeat",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Done.",
+		LatestFinalFP:    "final-fp-repeat",
+	}
+	previous := appserver.CompactSnapshot(nil, current, time.Now().UTC())
+
+	if snapshotHasPassiveChange(&previous, &current) {
+		t.Fatal("snapshotHasPassiveChange = true, want repeated terminal snapshot ignored")
+	}
+}
+
+func TestTelegramTurnLifecycleLogsThreadResumeFailure(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	logs := captureServiceLogs(service)
+	thread := model.Thread{ID: "diag-resume-fail", Title: "Diagnostics", CWD: "/Users/example/project", Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{threadResumeErr: errors.New("resume failed")}
+	service.live = stub
+	service.liveConnected = true
+
+	_, err := service.sendInputToThreadTurn(ctx, 123456789, 0, thread.ID, "", "hello", "")
+	if err == nil {
+		t.Fatal("sendInputToThreadTurn succeeded, want resume failure")
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"method":"ThreadResume"`)
+	requireLogContains(t, got, `"outcome":"error"`)
+	requireLogContains(t, got, `"error":"resume failed"`)
+}
+
+func TestTelegramTurnLifecycleLogsTurnStartFailure(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	logs := captureServiceLogs(service)
+	thread := model.Thread{ID: "diag-turn-start-fail", Title: "Diagnostics", CWD: "/Users/example/project", Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{turnStartErr: errors.New("start failed")}
+	service.live = stub
+	service.liveConnected = true
+
+	_, err := service.sendInputToThreadTurn(ctx, 123456789, 0, thread.ID, "", "hello", "")
+	if err == nil {
+		t.Fatal("sendInputToThreadTurn succeeded, want turn start failure")
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"method":"ThreadResume"`)
+	requireLogContains(t, got, `"method":"TurnStart"`)
+	requireLogContains(t, got, `"outcome":"error"`)
+	requireLogContains(t, got, `"error":"start failed"`)
+}
+
+func TestTelegramTurnLifecycleLogsRefreshFailuresAroundStart(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	logs := captureServiceLogs(service)
+	thread := model.Thread{ID: "diag-refresh-fail", Title: "Diagnostics", CWD: "/Users/example/project", Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{threadReadErr: errors.New("thread read failed")}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThreadTurn(ctx, 123456789, 0, thread.ID, "", "hello", "")
+	if err != nil {
+		t.Fatalf("sendInputToThreadTurn failed: %v", err)
+	}
+	if response == nil || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want started-turn despite refresh failures", response)
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"operation":"refresh_thread_before_start"`)
+	requireLogContains(t, got, `"operation":"refresh_thread_after_start"`)
+	requireLogContains(t, got, `"event":"thread_refresh_failed"`)
+	requireLogContains(t, got, `"method":"TurnStart"`)
+}
+
+func TestLiveEventLoopExitRecordsRepairReason(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	logs := captureServiceLogs(service)
+	ch := make(chan appserver.Event)
+	close(ch)
+	live := &stubSession{}
+	service.live = live
+	service.liveEvents = ch
+	service.liveConnected = true
+
+	service.liveEventLoop(ctx, live, ch, 0)
+
+	value, err := service.store.GetState(ctx, "repair.last_reason")
+	if err != nil {
+		t.Fatalf("GetState(repair.last_reason) failed: %v", err)
+	}
+	if value != "live_event_loop_closed" {
+		t.Fatalf("repair.last_reason = %q, want live_event_loop_closed", value)
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"event":"appserver_live_event_loop_closed"`)
+	requireLogContains(t, got, `"event":"repair_requested"`)
+}
+
+func TestEnsureSessionsSuppressesDuplicateConcurrentStarts(t *testing.T) {
+	service := newTestService(t)
+	service.cfg.RequestTimeout = 2 * time.Second
+	live := newStartCountingSession()
+	poll := newStartCountingSession()
+	service.live = live
+	service.poll = poll
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			if index%2 == 0 {
+				service.ensureSessions(ctx)
+				return
+			}
+			service.reconcileSessions(ctx)
+		}(i)
+	}
+
+	live.waitStarted(t, "live")
+	live.release()
+	poll.waitStarted(t, "poll")
+	poll.release()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent ensure/reconcile did not finish")
+	}
+	if got := live.StartCalls(); got != 1 {
+		t.Fatalf("live Start calls = %d, want 1", got)
+	}
+	if got := poll.StartCalls(); got != 1 {
+		t.Fatalf("poll Start calls = %d, want 1", got)
+	}
+}
+
+func TestStaleLiveEventLoopDoesNotClearNewLiveState(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	logs := captureServiceLogs(service)
+	oldLive := &stubSession{}
+	oldEvents := make(chan appserver.Event)
+	newLive := &stubSession{}
+	newEvents := make(chan appserver.Event)
+
+	service.mu.Lock()
+	service.live = oldLive
+	service.liveEvents = oldEvents
+	service.liveConnected = true
+	service.liveGeneration = 1
+	service.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.liveEventLoop(ctx, oldLive, oldEvents, 1)
+	}()
+
+	service.mu.Lock()
+	service.live = newLive
+	service.liveEvents = newEvents
+	service.liveConnected = true
+	service.liveGeneration = 2
+	service.mu.Unlock()
+	close(oldEvents)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("old live event loop did not exit")
+	}
+	service.mu.RLock()
+	currentLive := service.live
+	currentEvents := service.liveEvents
+	currentGeneration := service.liveGeneration
+	liveConnected := service.liveConnected
+	service.mu.RUnlock()
+	if !liveConnected || currentLive != newLive || currentEvents != newEvents || currentGeneration != 2 {
+		t.Fatalf("new live state was disturbed: connected=%t live=%p events_match=%t generation=%d", liveConnected, currentLive, currentEvents == newEvents, currentGeneration)
+	}
+	value, err := service.store.GetState(ctx, "control.repair_request")
+	if err != nil {
+		t.Fatalf("GetState(control.repair_request) failed: %v", err)
+	}
+	if strings.TrimSpace(value) != "" {
+		t.Fatalf("repair request = %q, want empty for stale loop", value)
+	}
+	requireLogContains(t, logs.String(), `"event":"appserver_live_event_loop_stale"`)
+}
+
+func TestTransportErrorDiagnosticSanitizesPrivateFields(t *testing.T) {
+	service := newTestService(t)
+	ctx := context.Background()
+	logs := captureServiceLogs(service)
+	stub := &stubSession{stderrTail: []string{
+		"token=supersecret12345 in /Users/example/private/session.sock",
+	}}
+
+	service.handleLiveEvent(ctx, stub, appserver.Event{
+		Channel: "transport_error",
+		Params: map[string]any{
+			"error": "secret=abc123456789 at /Users/example/private/state.sqlite",
+		},
+	})
+
+	got := logs.String()
+	requireLogContains(t, got, `"event":"appserver_transport_error"`)
+	requireLogContains(t, got, `redacted`)
+	if strings.Contains(got, "abc123456789") || strings.Contains(got, "supersecret12345") || strings.Contains(got, ".sock") || strings.Contains(got, ".sqlite") {
+		t.Fatalf("diagnostic log leaked private data: %s", got)
+	}
+}
+
+func TestDiagnosticLogsAreRateLimited(t *testing.T) {
+	service := newTestService(t)
+	logs := captureServiceLogs(service)
+
+	for i := 0; i < 300; i++ {
+		service.logLifecycle("looping_event", lifecycleFields{"index": i})
+	}
+
+	lineCount := strings.Count(strings.TrimSpace(logs.String()), "\n")
+	if strings.TrimSpace(logs.String()) != "" {
+		lineCount++
+	}
+	if lineCount > diagnosticEventLimit("looping_event") {
+		t.Fatalf("diagnostic log lines = %d, want <= %d", lineCount, diagnosticEventLimit("looping_event"))
+	}
+}
+
+func TestObserverSyncResultLogsAreDebounced(t *testing.T) {
+	service := newTestService(t)
+	logs := captureServiceLogs(service)
+	snapshot := appserver.ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:          "thread-observer-debounce",
+			Title:       "Observer debounce",
+			ProjectName: "Codex",
+			Status:      "idle",
+		},
+		LatestTurnID:     "turn-observer-debounce",
+		LatestTurnStatus: "interrupted",
+		DetailItems: []model.DetailItem{
+			{Kind: model.DetailItemCommentary, Text: "Working."},
+		},
+	}
+
+	for i := 0; i < 10; i++ {
+		snapshot.DetailItems = append(snapshot.DetailItems, model.DetailItem{Kind: model.DetailItemTool, Text: "tool"})
+		service.logObserverSyncResult("thread_read", snapshot)
+	}
+
+	got := logs.String()
+	if count := strings.Count(got, `"event":"observer_sync_result"`); count != 1 {
+		t.Fatalf("observer_sync_result logs = %d, want 1; logs:\n%s", count, got)
+	}
+	requireLogContains(t, got, `"thread_id":"thread-observer-debounce"`)
+}
+
+func TestGenericThreadReadDiagnosticsAreDebounced(t *testing.T) {
+	service := newTestService(t)
+	logs := captureServiceLogs(service)
+
+	for i := 0; i < 10; i++ {
+		service.logAppServerCall("ThreadRead", time.Now(), nil, &stubSession{}, lifecycleFields{
+			"operation":     "thread_read",
+			"thread_id":     "thread-read-debounce",
+			"include_turns": true,
+		})
+	}
+
+	got := logs.String()
+	if count := strings.Count(got, `"event":"appserver_call"`); count != 1 {
+		t.Fatalf("appserver_call logs = %d, want 1; logs:\n%s", count, got)
+	}
+	requireLogContains(t, got, `"method":"ThreadRead"`)
+	requireLogContains(t, got, `"thread_id":"thread-read-debounce"`)
+}
+
+func TestThreadReadSkippedLogsAreDebounced(t *testing.T) {
+	service := newTestService(t)
+	logs := captureServiceLogs(service)
+
+	for i := 0; i < 10; i++ {
+		service.logThreadReadSkipped("thread-1", "thread_not_loaded")
+	}
+	service.logThreadReadSkipped("thread-2", "thread_not_loaded")
+
+	got := logs.String()
+	if count := strings.Count(got, `"event":"thread_read_skipped"`); count != 2 {
+		t.Fatalf("thread_read_skipped logs = %d, want 2; logs:\n%s", count, got)
+	}
+	requireLogContains(t, got, `"thread_id":"thread-1"`)
+	requireLogContains(t, got, `"thread_id":"thread-2"`)
+	requireLogContains(t, got, `"debounce":"10m0s"`)
+}
+
 func TestReplyPlanFlagStartsPlanCollaborationMode(t *testing.T) {
 	t.Parallel()
 
@@ -1002,9 +1904,9 @@ func TestPlanModeCommandCanRouteByReply(t *testing.T) {
 	service.live = stub
 	service.liveConnected = true
 
-	response, err := service.handleCommand(ctx, 123456789, 0, "/plan_mode plan this reply-routed task", 812)
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan plan this reply-routed task", 812)
 	if err != nil {
-		t.Fatalf("handleCommand(/plan_mode) failed: %v", err)
+		t.Fatalf("handleCommand(/plan) failed: %v", err)
 	}
 	if response == nil || response.ThreadID != thread.ID {
 		t.Fatalf("response = %#v, want routed thread", response)
@@ -1015,6 +1917,140 @@ func TestPlanModeCommandCanRouteByReply(t *testing.T) {
 	got := stub.turnStartCalls[0]
 	if got.collaborationMode != collaborationModePlan || got.message != "plan this reply-routed task" {
 		t.Fatalf("turn start call = %#v, want reply-routed plan text", got)
+	}
+}
+
+func TestContextCardBoundThreadIncludesFullThreadID(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "full-context-thread-id",
+		Title:       "Context title",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, thread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+
+	text, err := service.contextCard(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("contextCard failed: %v", err)
+	}
+	for _, want := range []string{
+		"Mode: Bound thread",
+		"Thread: [Codex] Context title",
+		"Thread ID: full-context-thread-id",
+		"CWD: /Users/example/project",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("context card missing %q in:\n%s", want, text)
+		}
+	}
+}
+
+func TestSummaryPanelGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "summary-thread-full-id",
+		Title:       "Summary",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "active",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:             thread,
+		LatestTurnID:       "summary-turn-full-id",
+		LatestTurnStatus:   "inProgress",
+		LatestProgressText: "Working",
+		LatestProgressFP:   "progress-fp",
+	}
+
+	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
+	token := callbackTokenForButton(buttons, "Get thread id")
+	if token == "" {
+		t.Fatalf("Get thread id button not found in %#v", buttons)
+	}
+
+	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(get_thread_id) failed: %v", err)
+	}
+	if response == nil || response.Text != "Thread ID:\nsummary-thread-full-id\n\nTurn ID:\nsummary-turn-full-id" {
+		t.Fatalf("response = %#v, want copyable thread/turn ids", response)
+	}
+	if response.ThreadID != thread.ID || response.TurnID != "summary-turn-full-id" {
+		t.Fatalf("response route = thread %q turn %q, want full ids", response.ThreadID, response.TurnID)
+	}
+}
+
+func TestFinalSummaryPanelHasGetThreadIDButton(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "final-thread-full-id",
+		Title:       "Final",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "final-turn-full-id",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Done.",
+		LatestFinalFP:    "final-fp",
+	}
+
+	_, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, nil)
+	if token := callbackTokenForButton(buttons, "Get thread id"); token == "" {
+		t.Fatalf("Get thread id button not found in final summary buttons %#v", buttons)
+	}
+}
+
+func TestFinalCardGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "final-card-thread-full-id",
+		Title:       "Final card",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "final-card-turn-full-id",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Done.",
+		LatestFinalFP:    "final-card-fp",
+	}
+
+	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
+	token := callbackTokenForButton(buttons, "Get thread id")
+	if token == "" {
+		t.Fatalf("Get thread id button not found in final card buttons %#v", buttons)
+	}
+
+	response, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(final get_thread_id) failed: %v", err)
+	}
+	if response == nil || response.Text != "Thread ID:\nfinal-card-thread-full-id\n\nTurn ID:\nfinal-card-turn-full-id" {
+		t.Fatalf("response = %#v, want copyable final card ids", response)
 	}
 }
 
@@ -1294,6 +2330,43 @@ func newTestService(t *testing.T) *Service {
 	return service
 }
 
+func captureServiceLogs(service *Service) *bytes.Buffer {
+	var logs bytes.Buffer
+	service.SetLogger(log.New(&logs, "", 0))
+	return &logs
+}
+
+func requireLogContains(t *testing.T, logs, needle string) {
+	t.Helper()
+	if !strings.Contains(logs, needle) {
+		t.Fatalf("diagnostic log missing %q in:\n%s", needle, logs)
+	}
+}
+
+func diagnosticThreadReadPayload(thread model.Thread, turnID, status string) map[string]any {
+	return map[string]any{
+		"thread": map[string]any{
+			"id":     thread.ID,
+			"title":  thread.Title,
+			"cwd":    thread.CWD,
+			"status": thread.Status,
+			"turns": []any{
+				map[string]any{
+					"id":     turnID,
+					"status": status,
+					"items": []any{
+						map[string]any{
+							"id":      "user-item",
+							"type":    "userMessage",
+							"content": []any{map[string]any{"text": "hello"}},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func callbackTokenForButton(rows [][]model.ButtonSpec, label string) string {
 	for _, row := range rows {
 		for _, button := range row {
@@ -1305,16 +2378,85 @@ func callbackTokenForButton(rows [][]model.ButtonSpec, label string) string {
 	return ""
 }
 
+type startCountingSession struct {
+	stubSession
+	mu       sync.Mutex
+	started  chan struct{}
+	unblock  chan struct{}
+	once     sync.Once
+	starts   int
+	signaled bool
+}
+
+func newStartCountingSession() *startCountingSession {
+	return &startCountingSession{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+}
+
+func (s *startCountingSession) Start(ctx context.Context) error {
+	s.mu.Lock()
+	s.starts++
+	if !s.signaled {
+		close(s.started)
+		s.signaled = true
+	}
+	s.mu.Unlock()
+	select {
+	case <-s.unblock:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *startCountingSession) ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+func (s *startCountingSession) waitStarted(t *testing.T, role string) {
+	t.Helper()
+	select {
+	case <-s.started:
+	case <-time.After(time.Second):
+		t.Fatalf("%s session did not start", role)
+	}
+}
+
+func (s *startCountingSession) release() {
+	s.once.Do(func() {
+		close(s.unblock)
+	})
+}
+
+func (s *startCountingSession) StartCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.starts
+}
+
 type stubSession struct {
 	threadReads         map[string]map[string]any
 	threadListResult    map[string]any
 	threadListCalls     int
 	models              []appserver.ModelOption
 	collaborationModes  []appserver.CollaborationModeOption
+	threadReadErr       error
+	threadResumeErr     error
+	turnStartErr        error
 	turnSteerErr        error
+	turnSteerErrs       []error
+	threadResumeCalls   []threadResumeCall
 	turnSteerCalls      []turnCall
 	turnStartCalls      []turnCall
 	respondRequestCalls []respondRequestCall
+	stderrTail          []string
+}
+
+type threadResumeCall struct {
+	threadID string
+	cwd      string
 }
 
 type turnCall struct {
@@ -1342,18 +2484,28 @@ func (s *stubSession) ThreadList(ctx context.Context, limit int, cursor string) 
 	return s.threadListResult, nil
 }
 func (s *stubSession) ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error) {
+	if s.threadReadErr != nil {
+		return nil, s.threadReadErr
+	}
 	if payload, ok := s.threadReads[threadID]; ok {
 		return payload, nil
 	}
 	return nil, nil
 }
 func (s *stubSession) ThreadResume(ctx context.Context, threadID, cwd string) (map[string]any, error) {
+	s.threadResumeCalls = append(s.threadResumeCalls, threadResumeCall{threadID: threadID, cwd: cwd})
+	if s.threadResumeErr != nil {
+		return nil, s.threadResumeErr
+	}
 	return nil, nil
 }
 func (s *stubSession) ThreadStart(ctx context.Context, cwd string) (map[string]any, error) {
 	return nil, nil
 }
 func (s *stubSession) TurnStart(ctx context.Context, threadID, message, cwd string, options appserver.TurnStartOptions) (map[string]any, error) {
+	if s.turnStartErr != nil {
+		return nil, s.turnStartErr
+	}
 	s.turnStartCalls = append(s.turnStartCalls, turnCall{
 		threadID:          threadID,
 		message:           message,
@@ -1366,6 +2518,13 @@ func (s *stubSession) TurnStart(ctx context.Context, threadID, message, cwd stri
 }
 func (s *stubSession) TurnSteer(ctx context.Context, threadID, turnID, message string) (map[string]any, error) {
 	s.turnSteerCalls = append(s.turnSteerCalls, turnCall{threadID: threadID, turnID: turnID, message: message})
+	if len(s.turnSteerErrs) > 0 {
+		err := s.turnSteerErrs[0]
+		s.turnSteerErrs = s.turnSteerErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	if s.turnSteerErr != nil {
 		return nil, s.turnSteerErr
 	}
@@ -1390,4 +2549,4 @@ func (s *stubSession) RespondServerRequest(ctx context.Context, requestID string
 	s.respondRequestCalls = append(s.respondRequestCalls, respondRequestCall{requestID: requestID, result: result})
 	return nil
 }
-func (s *stubSession) StderrTail() []string { return nil }
+func (s *stubSession) StderrTail() []string { return s.stderrTail }

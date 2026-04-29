@@ -99,6 +99,11 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 	if sourceMode == model.PanelSourceTelegramInput && samePanelTurn(existingPanel, snapshot.LatestTurnID) {
 		effectiveForceNew = false
 	}
+	protectTelegramOriginPanel := sourceMode == model.PanelSourceGlobalObserver &&
+		existingPanel != nil &&
+		existingPanel.SourceMode == model.PanelSourceTelegramInput &&
+		samePanelTurn(existingPanel, snapshot.LatestTurnID) &&
+		s.isTelegramOriginTurn(ctx, thread.ID, snapshot.LatestTurnID)
 	panel, err := s.ensureCurrentPanel(ctx, sender, target, *thread, snapshot, pending, effectiveForceNew, sourceMode, panelMode)
 	if err != nil || panel == nil {
 		return
@@ -129,6 +134,10 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 		return
 	}
 	if err := s.updateCurrentPanel(ctx, sender, panel, *thread, snapshot, pending); err != nil {
+		if protectTelegramOriginPanel {
+			s.setError(ctx, err)
+			return
+		}
 		panel, recreateErr := s.createCurrentPanel(ctx, sender, target, *thread, snapshot, pending, sourceMode)
 		if recreateErr != nil || panel == nil {
 			s.setError(ctx, err)
@@ -279,6 +288,9 @@ func (s *Service) createCurrentPanel(ctx context.Context, sender Sender, target 
 	toolText, toolHash := s.renderToolPanel(ctx, thread, snapshot)
 	outputText, outputHash := s.renderOutputPanel(ctx, thread, snapshot)
 
+	s.logTelegramRenderedMessagesContainsNil(thread.ID, snapshot.LatestTurnID, "summary", 0, []model.RenderedMessage{summaryMessage})
+	s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "tool", 0, toolText)
+	s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "output", 0, outputText)
 	summaryIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{summaryMessage}, summaryButtons)
 	if err != nil {
 		return nil, err
@@ -339,6 +351,7 @@ func (s *Service) maybeSendUserRequestNotice(ctx context.Context, sender Sender,
 	}
 	if panel.UserMessageID != 0 {
 		message := firstRenderedMessage(s.renderUserRequestNoticeCard(ctx, thread, snapshot))
+		s.logTelegramRenderedMessagesContainsNil(thread.ID, snapshot.LatestTurnID, "user", panel.UserMessageID, []model.RenderedMessage{message})
 		if err := sender.EditRenderedMessage(ctx, panel.ChatID, panel.TopicID, panel.UserMessageID, message, nil); err != nil {
 			s.setError(ctx, fmt.Errorf("edit user notice card: %w", err))
 			return nil
@@ -389,6 +402,7 @@ func (s *Service) sendRunNotice(ctx context.Context, sender Sender, target model
 		return 0, "", nil
 	}
 	text, fp := s.renderRunNotice(ctx, thread, snapshot, sourceMode)
+	s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "new_run", 0, text)
 	messageID, err := sender.SendMessage(ctx, target.ChatID, target.TopicID, text, nil)
 	if err != nil {
 		return 0, "", err
@@ -447,6 +461,7 @@ func (s *Service) sendPlanPromptNotice(ctx context.Context, sender Sender, targe
 		return 0, "", nil
 	}
 	message, buttons, _ := s.renderPlanPromptCard(ctx, thread, prompt)
+	s.logTelegramRenderedMessagesContainsNil(thread.ID, prompt.TurnID, "plan", 0, []model.RenderedMessage{message})
 	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, buttons)
 	if err != nil {
 		return 0, "", err
@@ -514,6 +529,7 @@ func (s *Service) sendUserRequestNotice(ctx context.Context, sender Sender, targ
 		return 0, "", nil
 	}
 	messages := s.renderUserRequestNoticeCard(ctx, thread, snapshot)
+	s.logTelegramRenderedMessagesContainsNil(thread.ID, snapshot.LatestTurnID, "user", 0, messages)
 	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, messages, nil)
 	if err != nil {
 		return 0, "", err
@@ -536,6 +552,7 @@ func (s *Service) sendUserRequestNotice(ctx context.Context, sender Sender, targ
 
 func (s *Service) sendUserPlaceholderNotice(ctx context.Context, sender Sender, target model.ObserverTarget, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (int64, string, error) {
 	message := s.renderUserPlaceholderCard(ctx, thread, snapshot)
+	s.logTelegramRenderedMessagesContainsNil(thread.ID, snapshot.LatestTurnID, "user", 0, []model.RenderedMessage{message})
 	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, nil)
 	if err != nil {
 		return 0, "", err
@@ -594,6 +611,17 @@ func (s *Service) markTelegramOriginTurn(ctx context.Context, threadID, turnID s
 	return s.store.SetState(ctx, key, model.PanelSourceTelegramInput)
 }
 
+func (s *Service) markTelegramOriginTurnFromTelegram(ctx context.Context, threadID, turnID string, chatID, topicID int64) error {
+	err := s.markTelegramOriginTurn(ctx, threadID, turnID)
+	s.logLifecycle("telegram_origin_turn_marked", lifecycleFields{
+		"chat_key":  model.ChatKey(chatID, topicID),
+		"thread_id": threadID,
+		"turn_id":   turnID,
+		"error":     err,
+	})
+	return err
+}
+
 func (s *Service) isTelegramOriginTurn(ctx context.Context, threadID, turnID string) bool {
 	key := telegramOriginTurnKey(threadID, turnID)
 	if key == "" {
@@ -624,6 +652,7 @@ func (s *Service) updateCurrentPanel(ctx context.Context, sender Sender, panel *
 	}
 	summaryMessage, summaryButtons, summaryHash := s.renderSummaryPanel(ctx, thread, snapshot, pending)
 	if summaryHash != panel.LastSummaryHash {
+		s.logTelegramRenderedMessagesContainsNil(thread.ID, snapshot.LatestTurnID, "summary", panel.SummaryMessageID, []model.RenderedMessage{summaryMessage})
 		if err := sender.EditRenderedMessage(ctx, panel.ChatID, panel.TopicID, panel.SummaryMessageID, summaryMessage, summaryButtons); err != nil {
 			return err
 		}
@@ -632,6 +661,7 @@ func (s *Service) updateCurrentPanel(ctx context.Context, sender Sender, panel *
 
 	toolText, toolHash := s.renderToolPanel(ctx, thread, snapshot)
 	if toolHash != panel.LastToolHash {
+		s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "tool", panel.ToolMessageID, toolText)
 		if err := sender.EditMessage(ctx, panel.ChatID, panel.TopicID, panel.ToolMessageID, toolText, nil); err != nil {
 			return err
 		}
@@ -640,6 +670,7 @@ func (s *Service) updateCurrentPanel(ctx context.Context, sender Sender, panel *
 
 	outputText, outputHash := s.renderOutputPanel(ctx, thread, snapshot)
 	if outputHash != panel.LastOutputHash {
+		s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "output", panel.OutputMessageID, outputText)
 		if err := sender.EditMessage(ctx, panel.ChatID, panel.TopicID, panel.OutputMessageID, outputText, nil); err != nil {
 			return err
 		}
@@ -662,6 +693,7 @@ func (s *Service) maybeUpdateRunNotice(ctx context.Context, sender Sender, panel
 	if fp == panel.LastRunNoticeFP {
 		return nil
 	}
+	s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "new_run", panel.RunNoticeMessageID, text)
 	if err := sender.EditMessage(ctx, panel.ChatID, panel.TopicID, panel.RunNoticeMessageID, text, nil); err != nil {
 		s.setError(ctx, fmt.Errorf("edit run notice: %w", err))
 		return nil
@@ -679,7 +711,10 @@ func (s *Service) renderSummaryPanel(ctx context.Context, thread model.Thread, s
 		{
 			s.callbackButton(ctx, "Show", "show_thread", thread.ID, snapshot.LatestTurnID, "", nil),
 			s.callbackButton(ctx, "Bind here", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil),
+		},
+		{
 			s.callbackButton(ctx, "Show context", "show_context", thread.ID, snapshot.LatestTurnID, "", nil),
+			s.callbackButton(ctx, "Get thread id", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
 		},
 	}
 	if pending != nil {
@@ -726,18 +761,22 @@ func (s *Service) renderSummaryPanelMarkdown(ctx context.Context, thread model.T
 	} else {
 		displayEntries := chronologicalAgentEntries(entries)
 		for _, message := range displayEntries {
+			text := strings.TrimSpace(cleanTelegramNilLiteral(message.Text))
+			if text == "" {
+				continue
+			}
 			segments = append(segments,
 				tgformat.Plain(fmt.Sprintf("\n\n%s\n", summaryAgentLabel(message))),
-				tgformat.Markdown(strings.TrimSpace(message.Text)),
+				tgformat.Markdown(text),
 			)
 		}
 	}
 	if pending != nil {
 		switch pending.PromptKind {
 		case "approval":
-			segments = append(segments, tgformat.Plain("\n\n[Approval]\n"), tgformat.Markdown(strings.TrimSpace(pending.Question)))
+			segments = append(segments, tgformat.Plain("\n\n[Approval]\n"), tgformat.Markdown(strings.TrimSpace(cleanTelegramNilLiteral(pending.Question))))
 		case "user_input":
-			segments = append(segments, tgformat.Plain("\n\n[Question]\n"), tgformat.Markdown(strings.TrimSpace(pending.Question)))
+			segments = append(segments, tgformat.Plain("\n\n[Question]\n"), tgformat.Markdown(strings.TrimSpace(cleanTelegramNilLiteral(pending.Question))))
 		}
 	} else if snapshot != nil && snapshot.PlanPrompt != nil {
 		segments = append(segments, tgformat.Plain("\n\n[Plan]\nWaiting for input. Reply to the [Plan] message or use /reply."))
@@ -783,7 +822,7 @@ func chronologicalAgentEntries(entries []appserver.AgentMessageEntry) []appserve
 
 func (s *Service) renderToolPanel(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (string, string) {
 	header := s.visualHeader(ctx, "Tool", thread, snapshot.LatestTurnID)
-	label := strings.TrimSpace(snapshot.LatestToolLabel)
+	label := strings.TrimSpace(cleanTelegramNilLiteral(snapshot.LatestToolLabel))
 	if label == "" {
 		text := strings.Join([]string{header, "No tool activity yet."}, "\n")
 		return text, hashStrings(text)
@@ -802,6 +841,7 @@ func (s *Service) renderToolPanel(ctx context.Context, thread model.Thread, snap
 func (s *Service) renderOutputPanel(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (string, string) {
 	header := s.visualHeader(ctx, "Output", thread, snapshot.LatestTurnID)
 	output := strings.ReplaceAll(snapshot.LatestToolOutput, "\r\n", "\n")
+	output = cleanTelegramNilLiteral(output)
 	output = strings.TrimSpace(output)
 	if output == "" {
 		text := strings.Join([]string{header, "No tool output yet."}, "\n")
@@ -999,7 +1039,7 @@ func formatSummaryAgentMessage(entry appserver.AgentMessageEntry) string {
 }
 
 func summaryAgentLabel(entry appserver.AgentMessageEntry) string {
-	phase := strings.TrimSpace(strings.ToLower(entry.Phase))
+	phase := strings.ToLower(cleanPayloadString(entry.Phase))
 	switch phase {
 	case "":
 		return "[agent]"
@@ -1043,11 +1083,11 @@ func trimOutputTail(output string, limit int) string {
 }
 
 func readableStatus(turnStatus, threadStatus string) string {
-	if strings.TrimSpace(turnStatus) != "" {
-		return turnStatus
+	if status := cleanPayloadString(turnStatus); status != "" {
+		return status
 	}
-	if strings.TrimSpace(threadStatus) != "" {
-		return threadStatus
+	if status := cleanPayloadString(threadStatus); status != "" {
+		return status
 	}
 	return "idle"
 }
@@ -1102,7 +1142,7 @@ func effectivePlanPrompt(pending *model.PendingApproval, snapshot *appserver.Thr
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
+		if trimmed := cleanPayloadString(value); trimmed != "" {
 			return trimmed
 		}
 	}

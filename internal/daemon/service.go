@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,21 +64,30 @@ type Service struct {
 	liveFactory func() Session
 	pollFactory func() Session
 
-	mu            sync.RWMutex
-	live          Session
-	poll          Session
-	liveEvents    <-chan appserver.Event
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	panelMu       sync.Mutex
-	sender        Sender
-	started       bool
-	startedAt     time.Time
-	ready         bool
-	phase         string
-	lastError     string
-	liveConnected bool
-	pollConnected bool
+	sessionMu      sync.Mutex
+	mu             sync.RWMutex
+	live           Session
+	poll           Session
+	liveEvents     <-chan appserver.Event
+	liveGeneration uint64
+	pollGeneration uint64
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	panelMu        sync.Mutex
+	sender         Sender
+	logger         *log.Logger
+	diagnosticMu   sync.Mutex
+	diagnosticWin  time.Time
+	diagnosticN    int
+	diagnosticBy   map[string]int
+	diagnosticLast map[string]time.Time
+	started        bool
+	startedAt      time.Time
+	ready          bool
+	phase          string
+	lastError      string
+	liveConnected  bool
+	pollConnected  bool
 }
 
 const (
@@ -84,6 +95,11 @@ const (
 	collaborationModePlan     = "plan"
 	codexModelStateKey        = "codex.model"
 	codexReasoningStateKey    = "codex.reasoning_effort"
+)
+
+var (
+	codexThreadIDPattern        = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	codexThreadIDExtractPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 )
 
 func New(cfg config.Config) (*Service, error) {
@@ -95,9 +111,12 @@ func New(cfg config.Config) (*Service, error) {
 		return nil, err
 	}
 	service := &Service{
-		cfg:   cfg,
-		store: store,
-		phase: "created",
+		cfg:            cfg,
+		store:          store,
+		logger:         discardDiagnosticLogger(),
+		diagnosticBy:   map[string]int{},
+		diagnosticLast: map[string]time.Time{},
+		phase:          "created",
 	}
 	service.liveFactory = func() Session {
 		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout)
@@ -114,8 +133,6 @@ func (s *Service) Close() error {
 	s.mu.Lock()
 	cancel := s.cancel
 	started := s.started
-	live := s.live
-	poll := s.poll
 	s.started = false
 	s.cancel = nil
 	s.mu.Unlock()
@@ -123,6 +140,19 @@ func (s *Service) Close() error {
 		cancel()
 	}
 	s.wg.Wait()
+	s.sessionMu.Lock()
+	s.mu.Lock()
+	live := s.live
+	poll := s.poll
+	s.live = nil
+	s.poll = nil
+	s.liveEvents = nil
+	s.liveConnected = false
+	s.pollConnected = false
+	s.liveGeneration++
+	s.pollGeneration++
+	s.mu.Unlock()
+	s.sessionMu.Unlock()
 	if live != nil {
 		_ = live.Close()
 	}
@@ -293,11 +323,13 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 	case "show_thread":
 		return s.showThread(ctx, chatID, topicID, route.ThreadID, true)
 	case "show_context":
-		text, err := s.StatusSnapshot(ctx, chatID, topicID)
+		text, err := s.contextCard(ctx, chatID, topicID)
 		if err != nil {
 			return nil, err
 		}
 		return &DirectResponse{Text: text}, nil
+	case "get_thread_id":
+		return threadIDResponse(route.ThreadID, route.TurnID), nil
 	case "bind_here":
 		if err := s.store.SetBinding(ctx, chatID, topicID, route.ThreadID, model.BindingModeBound); err != nil {
 			return nil, err
@@ -365,7 +397,11 @@ func (s *Service) RequestRepair(ctx context.Context, reason string) error {
 	if strings.TrimSpace(reason) == "" {
 		reason = "manual"
 	}
-	return s.store.SetState(ctx, "control.repair_request", fmt.Sprintf("%s|%s", time.Now().UTC().Format(time.RFC3339Nano), reason))
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_ = s.store.SetState(ctx, "repair.last_reason", reason)
+	_ = s.store.SetState(ctx, "repair.last_at", now)
+	s.logLifecycle("repair_requested", lifecycleFields{"reason": reason})
+	return s.store.SetState(ctx, "control.repair_request", fmt.Sprintf("%s|%s", now, reason))
 }
 
 func (s *Service) IsAllowed(userID, chatID int64) bool {
@@ -387,12 +423,17 @@ func (s *Service) spawn(ctx context.Context, fn func(context.Context)) {
 }
 
 func (s *Service) ensureSessions(ctx context.Context) {
-	s.ensureLiveSession(ctx)
-	s.ensurePollSession(ctx)
+	s.ensureSessionLifecycle(ctx)
 	s.bootstrapTrackedState(ctx)
 }
 
 func (s *Service) ensureLiveSession(ctx context.Context) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	s.ensureLiveSessionLocked(ctx)
+}
+
+func (s *Service) ensureLiveSessionLocked(ctx context.Context) {
 	s.mu.RLock()
 	client := s.live
 	connected := s.liveConnected
@@ -402,19 +443,47 @@ func (s *Service) ensureLiveSession(ctx context.Context) {
 	}
 	sessionCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	defer cancel()
+	started := time.Now()
+	s.logLifecycle("appserver_session_start", lifecycleFields{"role": "live"})
 	if err := client.Start(sessionCtx); err != nil {
+		_ = s.store.SetState(ctx, "appserver.live.last_error", sanitizeDiagnosticString(err.Error()))
+		s.logLifecycle("appserver_session_start_failed", lifecycleFields{
+			"role":        "live",
+			"duration_ms": time.Since(started).Milliseconds(),
+			"error":       err,
+			"stderr_tail": sanitizedStderrTail(client),
+		})
 		s.setError(ctx, err)
 		return
 	}
+	events := client.Subscribe()
 	s.mu.Lock()
 	s.liveConnected = true
-	s.liveEvents = client.Subscribe()
+	s.liveEvents = events
+	s.liveGeneration++
+	generation := s.liveGeneration
 	s.mu.Unlock()
 	_ = s.store.SetState(ctx, "appserver.live_connected", "true")
-	s.spawn(ctx, s.liveEventLoop)
+	_ = s.store.SetState(ctx, "appserver.live.generation", strconv.FormatUint(generation, 10))
+	_ = s.store.SetState(ctx, "appserver.live.last_started_at", time.Now().UTC().Format(time.RFC3339Nano))
+	_ = s.store.SetState(ctx, "appserver.live.last_error", "")
+	s.logLifecycle("appserver_session_started", lifecycleFields{
+		"role":        "live",
+		"generation":  generation,
+		"duration_ms": time.Since(started).Milliseconds(),
+	})
+	s.spawn(ctx, func(loopCtx context.Context) {
+		s.liveEventLoop(loopCtx, client, events, generation)
+	})
 }
 
 func (s *Service) ensurePollSession(ctx context.Context) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	s.ensurePollSessionLocked(ctx)
+}
+
+func (s *Service) ensurePollSessionLocked(ctx context.Context) {
 	s.mu.RLock()
 	client := s.poll
 	connected := s.pollConnected
@@ -424,30 +493,78 @@ func (s *Service) ensurePollSession(ctx context.Context) {
 	}
 	sessionCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	defer cancel()
+	started := time.Now()
+	s.logLifecycle("appserver_session_start", lifecycleFields{"role": "poll"})
 	if err := client.Start(sessionCtx); err != nil {
+		_ = s.store.SetState(ctx, "appserver.poll.last_error", sanitizeDiagnosticString(err.Error()))
+		s.logLifecycle("appserver_session_start_failed", lifecycleFields{
+			"role":        "poll",
+			"duration_ms": time.Since(started).Milliseconds(),
+			"error":       err,
+			"stderr_tail": sanitizedStderrTail(client),
+		})
 		s.setError(ctx, err)
 		return
 	}
 	s.mu.Lock()
 	s.pollConnected = true
+	s.pollGeneration++
+	generation := s.pollGeneration
 	s.mu.Unlock()
 	_ = s.store.SetState(ctx, "appserver.poll_connected", "true")
+	_ = s.store.SetState(ctx, "appserver.poll.generation", strconv.FormatUint(generation, 10))
+	_ = s.store.SetState(ctx, "appserver.poll.last_started_at", time.Now().UTC().Format(time.RFC3339Nano))
+	_ = s.store.SetState(ctx, "appserver.poll.last_error", "")
+	s.logLifecycle("appserver_session_started", lifecycleFields{
+		"role":        "poll",
+		"generation":  generation,
+		"duration_ms": time.Since(started).Milliseconds(),
+	})
 }
 
-func (s *Service) liveEventLoop(ctx context.Context) {
-	s.mu.RLock()
-	ch := s.liveEvents
-	live := s.live
-	s.mu.RUnlock()
+func (s *Service) ensureSessionLifecycle(ctx context.Context) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	s.ensureLiveSessionLocked(ctx)
+	s.ensurePollSessionLocked(ctx)
+}
+
+func (s *Service) liveEventLoop(ctx context.Context, live Session, ch <-chan appserver.Event, generation uint64) {
 	if ch == nil || live == nil {
 		return
 	}
+	s.logLifecycle("appserver_live_event_loop_started", lifecycleFields{
+		"generation": generation,
+	})
 	defer func() {
 		s.mu.Lock()
-		s.liveConnected = false
-		s.liveEvents = nil
+		currentGeneration := s.liveGeneration
+		identityMatch := s.live == live
+		eventsMatch := s.liveEvents == ch
+		current := identityMatch && eventsMatch && currentGeneration == generation
+		if current {
+			s.liveConnected = false
+			s.liveEvents = nil
+		}
 		s.mu.Unlock()
+		if !current {
+			s.logLifecycle("appserver_live_event_loop_stale", lifecycleFields{
+				"generation":         generation,
+				"current_generation": currentGeneration,
+				"identity_match":     identityMatch,
+				"events_match":       eventsMatch,
+				"ctx_canceled":       ctx.Err() != nil,
+				"stderr_tail":        sanitizedStderrTail(live),
+			})
+			return
+		}
 		_ = s.store.SetState(context.Background(), "appserver.live_connected", "false")
+		_ = s.store.SetState(context.Background(), "appserver.live.last_closed_at", time.Now().UTC().Format(time.RFC3339Nano))
+		s.logLifecycle("appserver_live_event_loop_closed", lifecycleFields{
+			"generation":   generation,
+			"ctx_canceled": ctx.Err() != nil,
+			"stderr_tail":  sanitizedStderrTail(live),
+		})
 		if ctx.Err() == nil {
 			_ = s.RequestRepair(context.Background(), "live_event_loop_closed")
 		}
@@ -460,14 +577,42 @@ func (s *Service) liveEventLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
+			if !s.liveEventLoopCurrent(live, ch, generation) {
+				return
+			}
 			s.handleLiveEvent(ctx, live, event)
 		}
 	}
 }
 
+func (s *Service) liveEventLoopCurrent(live Session, ch <-chan appserver.Event, generation uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.live == live && s.liveEvents == ch && s.liveGeneration == generation
+}
+
 func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appserver.Event) {
 	if event.Channel == "transport_error" {
-		s.setError(ctx, fmt.Errorf("app-server transport error: %v", event.Params))
+		err := fmt.Errorf("app-server transport error: %v", event.Params)
+		_ = s.store.SetState(ctx, "appserver.live.last_error", sanitizeDiagnosticString(err.Error()))
+		s.logLifecycle("appserver_transport_error", lifecycleFields{
+			"params":      event.Params,
+			"stderr_tail": sanitizedStderrTail(live),
+		})
+		s.noteSessionError(ctx, "transport_error", err)
+		return
+	}
+	if event.Channel == "transport_closed" {
+		err := fmt.Errorf("app-server transport closed: %v", event.Params)
+		_ = s.store.SetState(ctx, "appserver.live.last_closed_at", time.Now().UTC().Format(time.RFC3339Nano))
+		_ = s.store.SetState(ctx, "appserver.live.last_error", sanitizeDiagnosticString(err.Error()))
+		s.logLifecycle("appserver_transport_closed", lifecycleFields{
+			"params":      event.Params,
+			"stderr_tail": sanitizedStderrTail(live),
+		})
+		if ctx.Err() == nil {
+			s.noteSessionError(ctx, "transport_closed", err)
+		}
 		return
 	}
 	threadID := threadIDFromEvent(event)
@@ -574,11 +719,17 @@ func (s *Service) controlLoop(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
-		s.reconcileSessions(ctx)
 		value, _ := s.store.GetState(ctx, "control.repair_request")
 		if strings.TrimSpace(value) != "" {
-			s.repairSessions(ctx)
+			at, reason := parseRepairRequest(value)
+			s.repairSessions(ctx, reason)
+			s.logLifecycle("repair_completed", lifecycleFields{
+				"reason":       reason,
+				"requested_at": at,
+			})
 			_ = s.store.SetState(ctx, "control.repair_request", "")
+		} else {
+			s.reconcileSessions(ctx)
 		}
 		select {
 		case <-ctx.Done():
@@ -589,19 +740,11 @@ func (s *Service) controlLoop(ctx context.Context) {
 }
 
 func (s *Service) reconcileSessions(ctx context.Context) {
-	s.mu.RLock()
-	liveConnected := s.liveConnected
-	pollConnected := s.pollConnected
-	s.mu.RUnlock()
-	if !liveConnected {
-		s.ensureLiveSession(ctx)
-	}
-	if !pollConnected {
-		s.ensurePollSession(ctx)
-	}
+	s.ensureSessionLifecycle(ctx)
 }
 
-func (s *Service) repairSessions(ctx context.Context) {
+func (s *Service) repairSessions(ctx context.Context, reason string) {
+	s.sessionMu.Lock()
 	s.mu.Lock()
 	oldLive := s.live
 	oldPoll := s.poll
@@ -610,19 +753,37 @@ func (s *Service) repairSessions(ctx context.Context) {
 	s.live = s.liveFactory()
 	s.poll = s.pollFactory()
 	s.liveEvents = nil
+	s.liveGeneration++
+	liveGeneration := s.liveGeneration
+	s.pollGeneration++
+	pollGeneration := s.pollGeneration
 	s.lastError = ""
 	s.mu.Unlock()
+	s.logLifecycle("appserver_session_repair_start", lifecycleFields{
+		"reason":          reason,
+		"live_generation": liveGeneration,
+		"poll_generation": pollGeneration,
+	})
 	if oldLive != nil {
-		_ = oldLive.Close()
+		started := time.Now()
+		err := oldLive.Close()
+		s.logAppServerCall("Close", started, err, oldLive, lifecycleFields{"role": "live", "operation": "repair"})
 	}
 	if oldPoll != nil {
-		_ = oldPoll.Close()
+		started := time.Now()
+		err := oldPoll.Close()
+		s.logAppServerCall("Close", started, err, oldPoll, lifecycleFields{"role": "poll", "operation": "repair"})
 	}
 	rechecked, _ := s.store.MarkAllPendingApprovals(ctx, "needs_recheck")
 	_ = s.store.SetState(ctx, "repair.last_rechecked", strconv.FormatInt(rechecked, 10))
 	_ = s.store.SetState(ctx, "appserver.live_connected", "false")
 	_ = s.store.SetState(ctx, "appserver.poll_connected", "false")
-	s.ensureSessions(ctx)
+	_ = s.store.SetState(ctx, "appserver.live.generation", strconv.FormatUint(liveGeneration, 10))
+	_ = s.store.SetState(ctx, "appserver.poll.generation", strconv.FormatUint(pollGeneration, 10))
+	s.ensureLiveSessionLocked(ctx)
+	s.ensurePollSessionLocked(ctx)
+	s.sessionMu.Unlock()
+	s.bootstrapTrackedState(ctx)
 }
 
 func (s *Service) bootstrapTrackedState(ctx context.Context) {
@@ -725,14 +886,37 @@ func (s *Service) pollTracked(ctx context.Context) {
 			}
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, maxDuration(10*time.Second, s.cfg.ObserverPollInterval*2))
+		started := time.Now()
 		payload, err := poll.ThreadRead(requestCtx, thread.ID, true)
 		cancel()
+		s.logAppServerCall("ThreadRead", started, err, poll, lifecycleFields{
+			"operation":      "poll_tracked",
+			"thread_id":      thread.ID,
+			"include_turns":  true,
+			"fallback_next":  err != nil,
+			"poll_catchup":   catchup,
+			"poll_snapshot":  snapshot != nil,
+			"poll_connected": true,
+		})
 		if err != nil {
 			requestCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
+			started = time.Now()
 			payload, err = poll.ThreadRead(requestCtx, thread.ID, false)
 			cancel()
+			s.logAppServerCall("ThreadRead", started, err, poll, lifecycleFields{
+				"operation":      "poll_tracked",
+				"thread_id":      thread.ID,
+				"include_turns":  false,
+				"poll_catchup":   catchup,
+				"poll_snapshot":  snapshot != nil,
+				"poll_connected": true,
+			})
 		}
 		if err != nil {
+			if isThreadNotLoadedError(err) {
+				s.logThreadReadSkipped(thread.ID, "thread_not_loaded")
+				continue
+			}
 			s.noteSessionError(ctx, "thread_read", err)
 			continue
 		}
@@ -740,6 +924,10 @@ func (s *Service) pollTracked(ctx context.Context) {
 		current.Thread.Raw, _ = json.Marshal(payload)
 		current.Thread = mergeThreadMetadata(current.Thread, thread)
 		_ = applySessionTailToolOverlay(current.Thread, &current)
+		_ = applySessionTailFinalOverlay(current.Thread, &current)
+		if s.applyTelegramOriginTerminalGate(ctx, "poll_tracked", &current, snapshot) {
+			continue
+		}
 		_ = s.store.UpsertThread(ctx, current.Thread)
 		nextSnapshot := appserver.CompactSnapshot(snapshot, current, time.Now().UTC())
 		if current.LatestTurnStatus == "inProgress" || current.SessionTailActiveTool || current.WaitingOnApproval || current.WaitingOnReply {
@@ -748,6 +936,8 @@ func (s *Service) pollTracked(ctx context.Context) {
 			nextSnapshot.NextPollAfter = model.TimeString(time.Now().UTC().Add(30 * time.Second).Format(time.RFC3339Nano))
 		}
 		_ = s.store.UpsertSnapshot(ctx, current.Thread.ID, nextSnapshot)
+		s.logObserverSyncResult("poll_tracked", current)
+		s.maybeLogTelegramOriginTerminal(ctx, current)
 		if catchup || s.threadNeedsLiveSync(ctx, current.Thread.ID) || snapshotHasPassiveChange(snapshot, &current) {
 			s.syncThreadPanel(ctx, current.Thread.ID)
 		}
@@ -772,6 +962,7 @@ func (s *Service) processDeliveryBatch(ctx context.Context) {
 			_ = s.store.FailDelivery(ctx, item.ID, item.RetryCount+1, time.Now().UTC().Add(s.cfg.DeliveryRetryBase), err.Error(), true)
 			continue
 		}
+		s.logTelegramRenderContainsNil(payload.ThreadID, payload.TurnID, "delivery", 0, payload.Text)
 		messageID, err := sender.SendMessage(ctx, item.ChatID, item.TopicID, payload.Text, payload.Buttons)
 		if err != nil {
 			attempt := item.RetryCount + 1
@@ -810,7 +1001,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 	case "/start":
 		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <thread> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -884,22 +1075,24 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		s.kickBootstrap()
 		return &DirectResponse{Text: fmt.Sprintf("Bound this chat to %s.", decision.ThreadID)}, nil
 	case "/reply":
-		decision, text, collaborationMode, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, "", true)
+		decision, text, collaborationMode, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, "", true, false)
 		if err != nil {
 			return nil, err
 		}
 		if !ok || decision.ThreadID == "" {
 			return &DirectResponse{Text: "Usage: /reply [--plan] <thread> <text>"}, nil
 		}
+		s.logTelegramInbound("command_reply", chatID, topicID, replyToMessageID, decision, text, collaborationMode)
 		return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, collaborationMode)
 	case "/plan", "/plan_mode":
-		decision, text, _, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, collaborationModePlan, false)
+		decision, text, _, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, collaborationModePlan, false, true)
 		if err != nil {
 			return nil, err
 		}
 		if !ok || decision.ThreadID == "" {
-			return &DirectResponse{Text: "Usage: /plan <thread> <text> or reply with /plan <text>."}, nil
+			return &DirectResponse{Text: "Usage: /plan <text>, /plan <thread_id> <text>, or reply with /plan <text>."}, nil
 		}
+		s.logTelegramInbound("command_plan", chatID, topicID, replyToMessageID, decision, text, collaborationModePlan)
 		return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, collaborationModePlan)
 	case "/repair":
 		if err := s.RequestRepair(ctx, "telegram"); err != nil {
@@ -931,6 +1124,7 @@ func (s *Service) handlePlainText(ctx context.Context, chatID, topicID int64, te
 	if decision.ThreadID == "" {
 		return &DirectResponse{Text: "No bound thread. Use /threads, /projects, /bind <thread>, or reply to a thread card."}, nil
 	}
+	s.logTelegramInbound("plain_text", chatID, topicID, replyToMessageID, decision, text, "")
 	if strings.TrimSpace(decision.RequestID) != "" {
 		return s.respondUserInputRequest(ctx, decision.RequestID, text)
 	}
@@ -1174,7 +1368,7 @@ func containsString(values []string, needle string) bool {
 	return false
 }
 
-func (s *Service) resolveInputCommand(ctx context.Context, chatID, topicID int64, rest string, replyToMessageID int64, defaultCollaborationMode string, allowModeFlag bool) (model.RouteDecision, string, string, bool, error) {
+func (s *Service) resolveInputCommand(ctx context.Context, chatID, topicID int64, rest string, replyToMessageID int64, defaultCollaborationMode string, allowModeFlag bool, preferImplicitRouteForUnknownHead bool) (model.RouteDecision, string, string, bool, error) {
 	rest = strings.TrimSpace(rest)
 	if rest == "" {
 		return model.RouteDecision{}, "", "", false, nil
@@ -1197,7 +1391,7 @@ func (s *Service) resolveInputCommand(ctx context.Context, chatID, topicID int64
 		}
 	}
 	if remainder != "" {
-		if thread, _ := s.store.GetThread(ctx, first); thread != nil || replyToMessageID == 0 {
+		if s.shouldTreatInputHeadAsExplicitThread(ctx, first, replyToMessageID, preferImplicitRouteForUnknownHead) {
 			decision, err := s.resolveRoute(ctx, chatID, topicID, first, replyToMessageID)
 			return decision, strings.TrimSpace(remainder), collaborationMode, strings.TrimSpace(remainder) != "", err
 		}
@@ -1208,6 +1402,9 @@ func (s *Service) resolveInputCommand(ctx context.Context, chatID, topicID int64
 		if decision.ThreadID != "" {
 			return decision, rest, collaborationMode, true, nil
 		}
+		if preferImplicitRouteForUnknownHead {
+			return decision, "", collaborationMode, false, nil
+		}
 		decision, err = s.resolveRoute(ctx, chatID, topicID, first, replyToMessageID)
 		return decision, strings.TrimSpace(remainder), collaborationMode, strings.TrimSpace(remainder) != "", err
 	}
@@ -1216,6 +1413,20 @@ func (s *Service) resolveInputCommand(ctx context.Context, chatID, topicID int64
 		return model.RouteDecision{}, "", "", false, err
 	}
 	return decision, first, collaborationMode, decision.ThreadID != "", nil
+}
+
+func (s *Service) shouldTreatInputHeadAsExplicitThread(ctx context.Context, head string, replyToMessageID int64, preferImplicitRouteForUnknownHead bool) bool {
+	head = strings.TrimSpace(head)
+	if head == "" {
+		return false
+	}
+	if thread, _ := s.store.GetThread(ctx, head); thread != nil {
+		return true
+	}
+	if codexThreadIDPattern.MatchString(head) {
+		return true
+	}
+	return replyToMessageID == 0 && !preferImplicitRouteForUnknownHead
 }
 
 func consumeCollaborationModeFlag(rest string) (string, string, bool) {
@@ -1244,6 +1455,14 @@ func (s *Service) sendInputToThread(ctx context.Context, chatID, topicID int64, 
 }
 
 func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int64, threadID, routeTurnID, text, collaborationMode string) (*DirectResponse, error) {
+	s.logLifecycle("telegram_turn_input_start", lifecycleFields{
+		"chat_key":           model.ChatKey(chatID, topicID),
+		"thread_id":          threadID,
+		"route_turn_id":      routeTurnID,
+		"text_len":           len([]rune(text)),
+		"text_sha256":        shortTextHash(text),
+		"collaboration_mode": collaborationMode,
+	})
 	thread, _ := s.store.GetThread(ctx, threadID)
 	if thread == nil {
 		return &DirectResponse{Text: fmt.Sprintf("Unknown thread: %s", threadID)}, nil
@@ -1253,37 +1472,111 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 	connected := s.liveConnected
 	s.mu.RUnlock()
 	if !connected || live == nil {
+		s.logLifecycle("telegram_turn_input_rejected", lifecycleFields{
+			"thread_id": threadID,
+			"reason":    "live_session_not_ready",
+		})
 		return &DirectResponse{Text: "Live app-server session is not ready yet. Try /status or /repair."}, nil
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	defer cancel()
+	started := time.Now()
 	_, err := live.ThreadResume(requestCtx, threadID, thread.CWD)
+	s.logAppServerCall("ThreadResume", started, err, live, lifecycleFields{
+		"thread_id": threadID,
+	})
 	if err != nil {
 		return nil, err
 	}
-	if refreshed, refreshErr := s.refreshThread(ctx, live, threadID); refreshErr == nil && refreshed != nil {
+	if refreshed, refreshErr := s.refreshThreadForOperation(ctx, live, threadID, "refresh_thread_before_start"); refreshErr == nil && refreshed != nil {
 		thread = refreshed
+	} else if refreshErr != nil {
+		s.logLifecycle("thread_refresh_failed", lifecycleFields{
+			"operation": "refresh_thread_before_start",
+			"thread_id": threadID,
+			"error":     refreshErr,
+		})
 	}
 	var result map[string]any
 	var steerErr error
 	steerState, _ := s.resolveArmedSteer(ctx, chatID, topicID)
 	if steerState != nil && steerState.ThreadID == threadID && strings.TrimSpace(steerState.TurnID) != "" {
+		started = time.Now()
 		result, steerErr = live.TurnSteer(requestCtx, threadID, steerState.TurnID, text)
+		s.logAppServerCall("TurnSteer", started, steerErr, live, lifecycleFields{
+			"thread_id": threadID,
+			"turn_id":   steerState.TurnID,
+			"route":     "armed",
+		})
 		if steerErr == nil {
 			_ = s.store.ClearSteerState(ctx, chatID, topicID)
 		}
 	}
 	if result == nil && strings.TrimSpace(routeTurnID) != "" {
+		started = time.Now()
 		result, steerErr = live.TurnSteer(requestCtx, threadID, routeTurnID, text)
+		s.logAppServerCall("TurnSteer", started, steerErr, live, lifecycleFields{
+			"thread_id": threadID,
+			"turn_id":   routeTurnID,
+			"route":     "reply",
+		})
 	}
 	if result == nil && strings.TrimSpace(routeTurnID) == "" && threadLooksActiveForInput(thread) && strings.TrimSpace(thread.ActiveTurnID) != "" {
+		started = time.Now()
 		result, steerErr = live.TurnSteer(requestCtx, threadID, thread.ActiveTurnID, text)
+		s.logAppServerCall("TurnSteer", started, steerErr, live, lifecycleFields{
+			"thread_id": threadID,
+			"turn_id":   thread.ActiveTurnID,
+			"route":     "active_turn",
+		})
 	}
-	if result == nil && (threadLooksActiveForInput(thread) || steerFailureImpliesActive(steerErr)) {
+	if result == nil {
+		if foundTurnID := activeTurnIDFromSteerMismatch(steerErr); foundTurnID != "" {
+			thread.ActiveTurnID = foundTurnID
+			thread.Status = "active"
+			started = time.Now()
+			result, steerErr = live.TurnSteer(requestCtx, threadID, foundTurnID, text)
+			s.logAppServerCall("TurnSteer", started, steerErr, live, lifecycleFields{
+				"thread_id": threadID,
+				"turn_id":   foundTurnID,
+				"route":     "active_turn_mismatch_retry",
+			})
+		}
+	}
+	if result == nil && steerFailureMeansNoActiveTurn(steerErr) {
+		if refreshed, refreshErr := s.refreshThreadForOperation(ctx, live, threadID, "refresh_thread_after_no_active_steer"); refreshErr == nil && refreshed != nil {
+			thread = refreshed
+		} else if refreshErr != nil {
+			s.logLifecycle("thread_refresh_failed", lifecycleFields{
+				"operation": "refresh_thread_after_no_active_steer",
+				"thread_id": threadID,
+				"turn_id":   thread.ActiveTurnID,
+				"error":     refreshErr,
+			})
+		}
+	}
+	if result == nil && !steerFailureMeansNoActiveTurn(steerErr) && (threadLooksActiveForInput(thread) || steerFailureImpliesActive(steerErr)) {
+		s.logLifecycle("telegram_turn_input_rejected", lifecycleFields{
+			"thread_id": threadID,
+			"turn_id":   thread.ActiveTurnID,
+			"reason":    "thread_still_active",
+			"steer_err": steerErr,
+		})
 		return &DirectResponse{Text: activeThreadReplyText(thread, steerErr), ThreadID: threadID, TurnID: thread.ActiveTurnID}, nil
 	}
 	if result == nil {
-		result, err = live.TurnStart(requestCtx, threadID, text, thread.CWD, s.turnStartOptions(ctx, collaborationMode, thread))
+		options := s.turnStartOptions(ctx, collaborationMode, thread)
+		started = time.Now()
+		result, err = live.TurnStart(requestCtx, threadID, text, thread.CWD, options)
+		s.logAppServerCall("TurnStart", started, err, live, lifecycleFields{
+			"thread_id":           threadID,
+			"returned_turn_id":    appserverThreadTurnID(result),
+			"model":               options.Model,
+			"reasoning_effort":    options.ReasoningEffort,
+			"collaboration_mode":  options.CollaborationMode,
+			"used_thread_model":   options.Model != "" && options.Model == strings.TrimSpace(thread.PreferredModel),
+			"request_message_len": len([]rune(text)),
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -1294,9 +1587,19 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 		turn = routeTurnID
 	}
 	if strings.TrimSpace(turn) != "" {
-		_ = s.markTelegramOriginTurn(ctx, threadID, turn)
+		_ = s.markTelegramOriginTurnFromTelegram(ctx, threadID, turn, chatID, topicID)
 	}
-	_, _ = s.refreshThread(ctx, live, threadID)
+	if _, refreshErr := s.refreshThreadForOperation(ctx, live, threadID, "refresh_thread_after_start"); refreshErr != nil {
+		s.logLifecycle("thread_refresh_failed", lifecycleFields{
+			"operation": "refresh_thread_after_start",
+			"thread_id": threadID,
+			"turn_id":   turn,
+			"error":     refreshErr,
+		})
+	}
+	if strings.TrimSpace(turn) != "" {
+		s.ensureStartedTurnSnapshot(ctx, thread, turn)
+	}
 	explicitTarget := model.ObserverTarget{
 		ChatKey: model.ChatKey(chatID, topicID),
 		ChatID:  chatID,
@@ -1304,6 +1607,11 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 		Enabled: true,
 	}
 	s.syncThreadPanelToTarget(ctx, explicitTarget, threadID, true, model.PanelSourceTelegramInput)
+	s.logLifecycle("telegram_turn_input_dispatched", lifecycleFields{
+		"chat_key":  model.ChatKey(chatID, topicID),
+		"thread_id": threadID,
+		"turn_id":   turn,
+	})
 	return &DirectResponse{ThreadID: threadID, TurnID: turn}, nil
 }
 
@@ -1321,6 +1629,36 @@ func (s *Service) turnStartOptions(ctx context.Context, collaborationMode string
 	return options
 }
 
+func (s *Service) ensureStartedTurnSnapshot(ctx context.Context, thread *model.Thread, turnID string) {
+	turnID = strings.TrimSpace(turnID)
+	if thread == nil || turnID == "" {
+		return
+	}
+	previous, err := s.store.GetSnapshot(ctx, thread.ID)
+	if err == nil && previous != nil && strings.TrimSpace(previous.LastSeenTurnID) == turnID {
+		return
+	}
+	startedThread := *thread
+	startedThread.Status = "inProgress"
+	startedThread.ActiveTurnID = turnID
+	if startedThread.UpdatedAt == 0 {
+		startedThread.UpdatedAt = time.Now().UTC().Unix()
+	}
+	current := appserver.ThreadReadSnapshot{
+		Thread:           startedThread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+	}
+	nextSnapshot := appserver.CompactSnapshot(previous, current, time.Now().UTC())
+	nextSnapshot.NextPollAfter = model.TimeString(time.Now().UTC().Add(s.cfg.ObserverPollInterval).Format(time.RFC3339Nano))
+	_ = s.store.UpsertThread(ctx, startedThread)
+	_ = s.store.UpsertSnapshot(ctx, startedThread.ID, nextSnapshot)
+	s.logLifecycle("telegram_started_turn_snapshot_seeded", lifecycleFields{
+		"thread_id": startedThread.ID,
+		"turn_id":   turnID,
+	})
+}
+
 func threadLooksActiveForInput(thread *model.Thread) bool {
 	if thread == nil {
 		return false
@@ -1332,12 +1670,42 @@ func steerFailureImpliesActive(err error) bool {
 	if err == nil {
 		return false
 	}
+	if steerFailureMeansNoActiveTurn(err) {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "active turn") ||
 		strings.Contains(msg, "activeturn") ||
 		strings.Contains(msg, "already active") ||
 		strings.Contains(msg, "in-flight") ||
 		strings.Contains(msg, "not steerable")
+}
+
+func steerFailureMeansNoActiveTurn(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no active turn") ||
+		strings.Contains(msg, "no active run") ||
+		strings.Contains(msg, "turn is not active")
+}
+
+func activeTurnIDFromSteerMismatch(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "expected active turn id") || !strings.Contains(lower, "found") {
+		return ""
+	}
+	matches := codexThreadIDExtractPattern.FindAllString(msg, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	// The app-server error lists expected first and authoritative active turn last.
+	return matches[len(matches)-1]
 }
 
 func activeThreadReplyText(thread *model.Thread, steerErr error) string {
@@ -1384,10 +1752,15 @@ func (s *Service) interruptTurn(ctx context.Context, chatID, topicID int64, thre
 	}
 	if thread != nil {
 		requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
-		_, _ = live.ThreadResume(requestCtx, threadID, thread.CWD)
+		started := time.Now()
+		_, err := live.ThreadResume(requestCtx, threadID, thread.CWD)
 		cancel()
+		s.logAppServerCall("ThreadResume", started, err, live, lifecycleFields{
+			"operation": "interrupt_turn",
+			"thread_id": threadID,
+		})
 	}
-	if refreshed, err := s.refreshThread(ctx, live, threadID); err == nil && refreshed != nil {
+	if refreshed, err := s.refreshThreadForOperation(ctx, live, threadID, "interrupt_turn_before_stop"); err == nil && refreshed != nil {
 		thread = refreshed
 	}
 	if thread != nil && strings.TrimSpace(thread.ActiveTurnID) != "" {
@@ -1400,9 +1773,19 @@ func (s *Service) interruptTurn(ctx context.Context, chatID, topicID int64, thre
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	defer cancel()
+	started := time.Now()
 	if err := live.TurnInterrupt(requestCtx, threadID, turnID); err != nil {
+		s.logAppServerCall("TurnInterrupt", started, err, live, lifecycleFields{
+			"thread_id": threadID,
+			"turn_id":   turnID,
+		})
 		return nil, err
 	}
+	_ = s.markTelegramOriginExplicitInterrupt(ctx, threadID, turnID)
+	s.logAppServerCall("TurnInterrupt", started, nil, live, lifecycleFields{
+		"thread_id": threadID,
+		"turn_id":   turnID,
+	})
 	label := threadID
 	if thread != nil {
 		label = thread.Label()
@@ -1564,11 +1947,11 @@ func (s *Service) contextCard(ctx context.Context, chatID, topicID int64) (strin
 	lines = append(lines, fmt.Sprintf("Panel mode: %s", s.panelMode(ctx)))
 	switch {
 	case contextState.Binding != nil && contextState.Thread != nil && contextState.ObserverEnabled:
-		lines = append(lines, "Mode: Bound thread + global observer sink", fmt.Sprintf("Thread: %s", contextState.Thread.Label()), fmt.Sprintf("CWD: %s", contextState.Thread.CWD), "/observe off")
+		lines = append(lines, "Mode: Bound thread + global observer sink", fmt.Sprintf("Thread: %s", contextState.Thread.Label()), fmt.Sprintf("Thread ID: %s", contextState.Binding.ThreadID), fmt.Sprintf("CWD: %s", contextState.Thread.CWD), "/observe off")
 	case contextState.ObserverEnabled:
 		lines = append(lines, "Mode: Global observer sink", "Passive monitoring is enabled here.", "/observe off")
 	case contextState.Binding != nil && contextState.Thread != nil:
-		lines = append(lines, "Mode: Bound thread", fmt.Sprintf("Thread: %s", contextState.Thread.Label()), fmt.Sprintf("CWD: %s", contextState.Thread.CWD))
+		lines = append(lines, "Mode: Bound thread", fmt.Sprintf("Thread: %s", contextState.Thread.Label()), fmt.Sprintf("Thread ID: %s", contextState.Binding.ThreadID), fmt.Sprintf("CWD: %s", contextState.Thread.CWD))
 	case contextState.Binding != nil:
 		lines = append(lines, "Mode: Bound thread", fmt.Sprintf("Thread ID: %s", contextState.Binding.ThreadID))
 	default:
@@ -1582,6 +1965,23 @@ func (s *Service) contextCard(ctx context.Context, chatID, topicID int64) (strin
 		}
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+func threadIDResponse(threadID, turnID string) *DirectResponse {
+	threadID = strings.TrimSpace(threadID)
+	turnID = strings.TrimSpace(turnID)
+	if threadID == "" {
+		return &DirectResponse{Text: "Thread ID is not available for this message."}
+	}
+	responseTurnID := turnID
+	if turnID == "" {
+		turnID = "-"
+	}
+	return &DirectResponse{
+		Text:     fmt.Sprintf("Thread ID:\n%s\n\nTurn ID:\n%s", threadID, turnID),
+		ThreadID: threadID,
+		TurnID:   responseTurnID,
+	}
 }
 
 func (s *Service) panelMode(ctx context.Context) string {
@@ -1897,12 +2297,6 @@ func snapshotHasPassiveChange(previous *model.ThreadSnapshotState, current *apps
 	if previous == nil {
 		return threadLooksActiveForPolling(current.Thread) || current.WaitingOnApproval || current.WaitingOnReply
 	}
-	if strings.TrimSpace(previous.LastSeenTurnID) != "" &&
-		previous.LastSeenTurnID == strings.TrimSpace(current.LatestTurnID) &&
-		isTerminalStatus(previous.LastSeenTurnStatus) &&
-		isTerminalStatus(current.LatestTurnStatus) {
-		return false
-	}
 	return len(appserver.DiffSnapshot(previous, *current)) > 0
 }
 
@@ -1929,7 +2323,17 @@ func (s *Service) threadNeedsCatchupPolling(ctx context.Context, thread model.Th
 	if snapshot.LastSeenTurnID != "" && thread.ActiveTurnID != "" && snapshot.LastSeenTurnID != thread.ActiveTurnID {
 		return true
 	}
+	if s.threadHasDeferredEmptyInterrupted(ctx, thread, snapshot) {
+		return true
+	}
 	return false
+}
+
+func isThreadNotLoadedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "thread not loaded")
 }
 
 func (s *Service) catchupWindow() time.Duration {
@@ -1961,7 +2365,7 @@ func mergeThreadMetadata(current, fallback model.Thread) model.Thread {
 	if strings.TrimSpace(current.LastPreview) == "" {
 		current.LastPreview = fallback.LastPreview
 	}
-	if strings.TrimSpace(current.ActiveTurnID) == "" {
+	if strings.TrimSpace(current.ActiveTurnID) == "" && !isTerminalStatus(current.Status) {
 		current.ActiveTurnID = fallback.ActiveTurnID
 	}
 	if strings.TrimSpace(current.PreferredModel) == "" {
@@ -2000,11 +2404,30 @@ func (s *Service) globalObserverSinceUnix(ctx context.Context) int64 {
 }
 
 func (s *Service) refreshThread(ctx context.Context, client Session, threadID string) (*model.Thread, error) {
+	return s.refreshThreadForOperation(ctx, client, threadID, "thread_read")
+}
+
+func (s *Service) refreshThreadForOperation(ctx context.Context, client Session, threadID, operation string) (*model.Thread, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	started := time.Now()
 	payload, err := client.ThreadRead(requestCtx, threadID, true)
+	s.logAppServerCall("ThreadRead", started, err, client, lifecycleFields{
+		"operation":      operation,
+		"thread_id":      threadID,
+		"include_turns":  true,
+		"fallback_next":  err != nil,
+		"poll_connected": false,
+	})
 	if err != nil {
+		started = time.Now()
 		payload, err = client.ThreadRead(requestCtx, threadID, false)
+		s.logAppServerCall("ThreadRead", started, err, client, lifecycleFields{
+			"operation":      operation,
+			"thread_id":      threadID,
+			"include_turns":  false,
+			"poll_connected": false,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -2019,12 +2442,19 @@ func (s *Service) refreshThread(ctx context.Context, client Session, threadID st
 	}
 	current.Thread = thread
 	_ = applySessionTailToolOverlay(current.Thread, &current)
+	_ = applySessionTailFinalOverlay(current.Thread, &current)
 	thread = current.Thread
-	if err := s.store.UpsertThread(ctx, thread); err != nil {
-		return nil, err
-	}
 	previous, err := s.store.GetSnapshot(ctx, threadID)
 	if err != nil {
+		return nil, err
+	}
+	if s.applyTelegramOriginTerminalGate(ctx, operation, &current, previous) {
+		if existing, _ := s.store.GetThread(ctx, threadID); existing != nil {
+			return existing, nil
+		}
+		return &thread, nil
+	}
+	if err := s.store.UpsertThread(ctx, thread); err != nil {
 		return nil, err
 	}
 	nextSnapshot := appserver.CompactSnapshot(previous, current, time.Now().UTC())
@@ -2034,6 +2464,8 @@ func (s *Service) refreshThread(ctx context.Context, client Session, threadID st
 	if err := s.store.UpsertSnapshot(ctx, threadID, nextSnapshot); err != nil {
 		return nil, err
 	}
+	s.logObserverSyncResult(operation, current)
+	s.maybeLogTelegramOriginTerminal(ctx, current)
 	return &thread, nil
 }
 
@@ -2065,6 +2497,10 @@ func (s *Service) noteSessionError(ctx context.Context, operation string, err er
 	if err == nil {
 		return
 	}
+	s.logLifecycle("appserver_session_error", lifecycleFields{
+		"operation": operation,
+		"error":     err,
+	})
 	s.setError(ctx, fmt.Errorf("%s: %w", operation, err))
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
@@ -2076,7 +2512,7 @@ func (s *Service) setError(ctx context.Context, err error) {
 	if err == nil {
 		return
 	}
-	message := err.Error()
+	message := sanitizeDiagnosticString(err.Error())
 	s.mu.Lock()
 	s.lastError = message
 	s.mu.Unlock()
