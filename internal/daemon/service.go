@@ -485,7 +485,7 @@ func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appse
 		return
 	}
 	if strings.EqualFold(event.Method, "serverRequest/resolved") {
-		if requestID := fmt.Sprintf("%v", event.Params["requestId"]); requestID != "" {
+		if requestID := payloadMapString(event.Params, "requestId"); requestID != "" {
 			_ = s.store.UpdatePendingApprovalStatus(ctx, requestID, "resolved")
 			if pending, err := s.store.GetPendingApproval(ctx, requestID); err == nil && pending != nil && pending.ThreadID != "" {
 				s.syncThreadPanel(ctx, pending.ThreadID)
@@ -1017,10 +1017,7 @@ func (s *Service) codexReasoningMenu(ctx context.Context) (*DirectResponse, erro
 }
 
 func (s *Service) setCodexModel(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
-	value := strings.TrimSpace(fmt.Sprintf("%v", payload["value"]))
-	if value == "<nil>" {
-		value = ""
-	}
+	value := payloadMapString(payload, "value")
 	if value != "" {
 		models, err := s.codexModels(ctx)
 		if err != nil {
@@ -1039,10 +1036,7 @@ func (s *Service) setCodexModel(ctx context.Context, chatID, topicID, messageID 
 }
 
 func (s *Service) setCodexReasoningEffort(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
-	value := normalizeReasoningEffort(fmt.Sprintf("%v", payload["value"]))
-	if value == "<nil>" {
-		value = ""
-	}
+	value := normalizeReasoningEffort(payloadMapString(payload, "value"))
 	if value != "" && !containsString(allReasoningEfforts(), value) {
 		return &DirectResponse{CallbackText: "Reasoning option is stale.", Text: "This reasoning effort is not supported. Use /effort to refresh."}, nil
 	}
@@ -1451,7 +1445,7 @@ func (s *Service) answerChoice(ctx context.Context, chatID, topicID int64, route
 	if strings.TrimSpace(route.PayloadJSON) != "" {
 		_ = json.Unmarshal([]byte(route.PayloadJSON), &payload)
 	}
-	text := strings.TrimSpace(fmt.Sprintf("%v", payload["text"]))
+	text := payloadMapString(payload, "text")
 	if text == "" {
 		return &DirectResponse{CallbackText: "Answer option is empty."}, nil
 	}
@@ -1688,8 +1682,8 @@ func userInputResponsePayload(payloadJSON, text string) map[string]any {
 		if question == nil {
 			continue
 		}
-		id := strings.TrimSpace(fmt.Sprintf("%v", question["id"]))
-		if id == "" || id == "<nil>" {
+		id := payloadMapString(question, "id")
+		if id == "" {
 			continue
 		}
 		answers[id] = map[string]any{"answers": []string{text}}

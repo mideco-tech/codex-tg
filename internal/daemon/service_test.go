@@ -1142,6 +1142,80 @@ func TestReasoningMenuUsesSelectedModelEfforts(t *testing.T) {
 	}
 }
 
+func TestSettingsCallbacksMissingValueUseAuto(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+
+	modelResponse, err := service.setCodexModel(ctx, 123456789, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("setCodexModel(nil payload) failed: %v", err)
+	}
+	if modelResponse == nil || strings.Contains(modelResponse.Text, "<nil>") {
+		t.Fatalf("model response = %#v, want no <nil>", modelResponse)
+	}
+	modelValue, err := service.store.GetState(ctx, codexModelStateKey)
+	if err != nil {
+		t.Fatalf("GetState(model) failed: %v", err)
+	}
+	if modelValue != "" {
+		t.Fatalf("stored model = %q, want Auto/blank", modelValue)
+	}
+
+	reasoningResponse, err := service.setCodexReasoningEffort(ctx, 123456789, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("setCodexReasoningEffort(nil payload) failed: %v", err)
+	}
+	if reasoningResponse == nil || strings.Contains(reasoningResponse.Text, "<nil>") {
+		t.Fatalf("reasoning response = %#v, want no <nil>", reasoningResponse)
+	}
+	reasoningValue, err := service.store.GetState(ctx, codexReasoningStateKey)
+	if err != nil {
+		t.Fatalf("GetState(reasoning) failed: %v", err)
+	}
+	if reasoningValue != "" {
+		t.Fatalf("stored reasoning = %q, want Auto/blank", reasoningValue)
+	}
+}
+
+func TestAnswerChoiceMissingTextDoesNotSendNil(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.answerChoice(ctx, 123456789, 0, &model.CallbackRoute{
+		ThreadID:    "thread-missing-text",
+		TurnID:      "turn-missing-text",
+		PayloadJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("answerChoice(missing text) failed: %v", err)
+	}
+	if response == nil || response.CallbackText != "Answer option is empty." {
+		t.Fatalf("response = %#v, want empty answer callback", response)
+	}
+	if len(stub.turnSteerCalls) != 0 || len(stub.turnStartCalls) != 0 || len(stub.respondRequestCalls) != 0 {
+		t.Fatalf("unexpected calls for missing answer text: steer=%#v start=%#v respond=%#v", stub.turnSteerCalls, stub.turnStartCalls, stub.respondRequestCalls)
+	}
+}
+
+func TestUserInputResponsePayloadSkipsNilQuestionID(t *testing.T) {
+	t.Parallel()
+
+	response := userInputResponsePayload(`{"questions":[{"id":"<nil>","question":"Pick one."},{"question":"Missing id."}]}`, "Yes")
+	if _, ok := response["answers"]; ok {
+		t.Fatalf("response = %#v, want fallback text payload without <nil> answer id", response)
+	}
+	if response["text"] != "Yes" || response["value"] != "Yes" || response["response"] != "Yes" || response["input"] != "Yes" {
+		t.Fatalf("response = %#v, want fallback text/value/response/input", response)
+	}
+}
+
 func TestPlainReplyToRealPlanPromptUsesServerRequest(t *testing.T) {
 	t.Parallel()
 

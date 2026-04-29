@@ -1124,15 +1124,12 @@ func extractChoiceOptions(payload map[string]any) []string {
 		for _, item := range items {
 			switch typed := item.(type) {
 			case string:
-				if text := strings.TrimSpace(typed); text != "" {
+				if text := cleanPayloadString(typed); text != "" {
 					out = append(out, text)
 				}
 			case map[string]any:
-				for _, field := range []string{"label", "text", "value"} {
-					if text := strings.TrimSpace(fmt.Sprintf("%v", typed[field])); text != "" {
-						out = append(out, text)
-						break
-					}
+				if text := firstPayloadString(typed, "label", "text", "value"); text != "" {
+					out = append(out, text)
 				}
 			}
 		}
@@ -1154,8 +1151,8 @@ func extractChoiceOptions(payload map[string]any) []string {
 				if option == nil {
 					continue
 				}
-				label := strings.TrimSpace(fmt.Sprintf("%v", option["label"]))
-				if label == "" || label == "<nil>" || seen[label] {
+				label := firstPayloadString(option, "label", "text", "value")
+				if label == "" || seen[label] {
 					continue
 				}
 				seen[label] = true
