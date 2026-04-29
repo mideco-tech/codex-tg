@@ -15,7 +15,12 @@ This file now serves two purposes:
 - `/projects`
 - `/show <thread>`
 - `/bind <thread>`
-- `/reply <thread> <text>`
+- `/reply [--plan] <thread> <text>`
+- `/plan <thread> <text>`
+- `/plan_mode <thread> <text>`
+- `/settings`
+- `/model`
+- `/effort`
 - `/new [project] <prompt>`
 - `/context`
 - `/whereami`
@@ -29,6 +34,9 @@ This file now serves two purposes:
 ## Aliases and adjacent commands
 
 - `/whereami` is an alias of `/context`
+- `/models` is an alias of `/model`
+- `/reasoning` and `/reasoning_effort` are aliases of `/effort`
+- `/codex_settings` is an alias of `/settings`
 - `/away` and `/back` exist in the Python product surface but are not part of the minimal Go cutover slice yet
 
 ## Target Telegram observer/UI v2 deltas
@@ -43,7 +51,11 @@ This file now serves two purposes:
 - Final answers are delivered separately and expose `Получить полный лог`.
 - Plan Mode / waiting-input states create a separate routeable `[Plan]` prompt-card.
 - `[Plan]` buttons are structured-only: they come from Codex `choices/options/suggestions/responses`, never from bridge heuristics.
+- Telegram-originated Plan Mode starts use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
+- `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
+- After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
+- Replies to active turns steer the active turn. If steering is rejected while the thread still looks active, the bridge must not create a parallel `turn/start`.
 - All observer/card messages carry a visual identity header: `emoji [Project] [Thread] [T:thread] [R:run] [Kind]`.
 - Emoji markers are stable visual hints; route correctness remains based on DB message routes and callback tokens.
 - Foreign GUI/CLI runs create separate `New run` and `[User]` cards before the live trio.
@@ -86,6 +98,11 @@ Target v2 callback surface:
 - `answer_choice`
 - `observe_all`
 - `observe_off`
+- `settings_overview`
+- `settings_model_menu`
+- `settings_reasoning_menu`
+- `settings_model_set`
+- `settings_reasoning_set`
 
 ## Routing precedence
 
@@ -103,6 +120,7 @@ Additional route rules:
 - free-text routing still needs an unambiguous target even if the current chat also receives global observer panels
 - reply-to `[Plan]` routes before binding and carries `thread_id`, `turn_id`, and `request_id` when available
 - real `request_id` Plan answers use App Server server-request response; synthetic Plan answers use `turn/steer`
+- `/reply --plan`, `/plan`, and `/plan_mode` carry an explicit Plan Mode start intent when they create a new turn
 
 ## Observer targets
 
@@ -129,7 +147,7 @@ Observer/UI v2 presentation contract:
 
 - run notice:
   - appears before `[User]` and summary/tool/output for new runs
-  - carries source markers, run status, source mode, and route metadata
+  - carries source markers, source mode, and route metadata, but not run status
   - is deleted best-effort after finalization
 - user notice:
   - appears after `New run` for GUI/CLI runs and before summary/tool/output
@@ -137,13 +155,16 @@ Observer/UI v2 presentation contract:
   - may start as a placeholder and edit into the actual prompt
 - summary-panel update:
   - carries project/thread source markers
+  - owns live run status while active
   - carries action buttons such as `Stop` and `Steer`
 - tool/output message:
   - carries source markers
   - carries no buttons
+  - is deleted best-effort after finalization
 - final-answer message:
   - carries source markers
   - carries on-demand `Получить полный лог`
+  - contains final answer/status without replaying completed commentary/tool/output transcript
 
 Minimal event payload expected by the Telegram layer:
 

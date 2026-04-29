@@ -6,6 +6,9 @@
 ## Decisions
 
 - A waiting Plan Mode prompt is rendered as a separate `[Plan]` prompt-card, not as a Final Card state and not as a passive tool/output message.
+- Telegram-originated Plan Mode runs must be started with App Server `turn/start` `collaborationMode.mode = plan`; prompt wording alone is not treated as Plan Mode.
+- Telegram exposes explicit Plan start commands through `/plan <thread> <text>`, `/plan_mode <thread> <text>`, and `/reply --plan <thread> <text>`.
+- The collaboration-mode `model` and `reasoning_effort` are configurable through Telegram button menus backed by SQLite state, with app-server defaults used when no explicit selection exists. The menu lifecycle is specified in ADR-011.
 - The `[Plan]` prompt-card is reply-first: the operator should be able to reply to that card with the next instruction without first using a command.
 - Buttons on the `[Plan]` prompt-card are structured actions only. They must not encode arbitrary free-text prompts.
 - Plan prompt routing is scoped to the exact `threadId`, `turnId`, and `requestId` when `requestId` is available.

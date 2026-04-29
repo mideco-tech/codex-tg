@@ -26,6 +26,9 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - `Tools file` and `Get full log` are explicit on-demand exports. Automatic per-tool document spam is forbidden.
 - Document exports should use in-memory multipart upload. Temp files are allowed only as fallback and must be cleaned up.
 - Plan Mode waiting input is a separate routeable `[Plan]` prompt-card. Buttons are allowed only for structured choices provided by Codex.
+- Telegram-originated Plan Mode starts must pass App Server `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
+- `/model` and `/effort` are Telegram button menus for collaboration-mode model settings. Persist selections in SQLite, not env-only local config. After a selection, remove the inline choice buttons from the edited message.
+- Replies to active turns should steer the active turn. If steering is rejected while the thread still looks active, do not start a parallel turn.
 - Every observer-visible message must include the shared identity header: emoji marker, project, thread, `T:`, `R:`, and kind.
 - Emoji markers are visual hints only. Persisted message routes and callback tokens are the routing authority.
 

@@ -27,9 +27,11 @@ type Session interface {
 	ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error)
 	ThreadResume(ctx context.Context, threadID, cwd string) (map[string]any, error)
 	ThreadStart(ctx context.Context, cwd string) (map[string]any, error)
-	TurnStart(ctx context.Context, threadID, message, cwd string) (map[string]any, error)
+	TurnStart(ctx context.Context, threadID, message, cwd string, options appserver.TurnStartOptions) (map[string]any, error)
 	TurnSteer(ctx context.Context, threadID, turnID, message string) (map[string]any, error)
 	TurnInterrupt(ctx context.Context, threadID, turnID string) error
+	ModelList(ctx context.Context, includeHidden bool) ([]appserver.ModelOption, error)
+	CollaborationModeList(ctx context.Context) ([]appserver.CollaborationModeOption, error)
 	RespondServerRequest(ctx context.Context, requestID string, result map[string]any) error
 	StderrTail() []string
 }
@@ -77,7 +79,12 @@ type Service struct {
 	pollConnected bool
 }
 
-const observerRecentThreadLimit = 50
+const (
+	observerRecentThreadLimit = 50
+	collaborationModePlan     = "plan"
+	codexModelStateKey        = "codex.model"
+	codexReasoningStateKey    = "codex.reasoning_effort"
+)
 
 func New(cfg config.Config) (*Service, error) {
 	if err := cfg.Paths.Ensure(); err != nil {
@@ -273,6 +280,16 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 		return s.handleDetailsCallback(ctx, chatID, topicID, messageID, route, payload)
 	case "details_tools_file":
 		return s.sendDetailsToolsFile(ctx, chatID, topicID, route, payload)
+	case "settings_overview":
+		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Settings", s.codexSettingsOverview)
+	case "settings_model_menu":
+		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Model", s.codexModelMenu)
+	case "settings_reasoning_menu":
+		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Reasoning", s.codexReasoningMenu)
+	case "settings_model_set":
+		return s.setCodexModel(ctx, chatID, topicID, messageID, payload)
+	case "settings_reasoning_set":
+		return s.setCodexReasoningEffort(ctx, chatID, topicID, messageID, payload)
 	case "show_thread":
 		return s.showThread(ctx, chatID, topicID, route.ThreadID, true)
 	case "show_context":
@@ -793,7 +810,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 	case "/start":
 		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/show <thread>\n/bind <thread>\n/reply <thread> <text>\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <thread> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -834,6 +851,12 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 			return nil, err
 		}
 		return &DirectResponse{Text: fmt.Sprintf("Panel mode switched to %s.", mode)}, nil
+	case "/settings", "/codex_settings":
+		return s.codexSettingsOverview(ctx)
+	case "/model", "/models":
+		return s.codexModelMenu(ctx)
+	case "/effort", "/reasoning", "/reasoning_effort":
+		return s.codexReasoningMenu(ctx)
 	case "/threads":
 		return s.threadsOverview(ctx, rest)
 	case "/projects":
@@ -861,11 +884,23 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		s.kickBootstrap()
 		return &DirectResponse{Text: fmt.Sprintf("Bound this chat to %s.", decision.ThreadID)}, nil
 	case "/reply":
-		replyParts := strings.SplitN(rest, " ", 2)
-		if len(replyParts) < 2 {
-			return &DirectResponse{Text: "Usage: /reply <thread> <text>"}, nil
+		decision, text, collaborationMode, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, "", true)
+		if err != nil {
+			return nil, err
 		}
-		return s.sendInputToThread(ctx, chatID, topicID, replyParts[0], replyParts[1])
+		if !ok || decision.ThreadID == "" {
+			return &DirectResponse{Text: "Usage: /reply [--plan] <thread> <text>"}, nil
+		}
+		return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, collaborationMode)
+	case "/plan", "/plan_mode":
+		decision, text, _, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, collaborationModePlan, false)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || decision.ThreadID == "" {
+			return &DirectResponse{Text: "Usage: /plan <thread> <text> or reply with /plan <text>."}, nil
+		}
+		return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, collaborationModePlan)
 	case "/repair":
 		if err := s.RequestRepair(ctx, "telegram"); err != nil {
 			return nil, err
@@ -899,14 +934,322 @@ func (s *Service) handlePlainText(ctx context.Context, chatID, topicID int64, te
 	if strings.TrimSpace(decision.RequestID) != "" {
 		return s.respondUserInputRequest(ctx, decision.RequestID, text)
 	}
-	return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text)
+	return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, "")
+}
+
+func (s *Service) codexSettingsOverview(ctx context.Context) (*DirectResponse, error) {
+	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
+	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	lines := []string{
+		"Codex settings",
+		fmt.Sprintf("Model: %s", settingValueLabel(modelValue, "Auto")),
+		fmt.Sprintf("Reasoning effort: %s", settingValueLabel(reasoningValue, "Auto")),
+		"",
+		"Used for Telegram-started Plan Mode turns.",
+	}
+	buttons := [][]model.ButtonSpec{
+		{
+			s.callbackButton(ctx, "Model", "settings_model_menu", "settings", "", "", nil),
+			s.callbackButton(ctx, "Reasoning", "settings_reasoning_menu", "settings", "", "", nil),
+		},
+	}
+	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
+}
+
+func (s *Service) codexModelMenu(ctx context.Context) (*DirectResponse, error) {
+	current, _ := s.store.GetState(ctx, codexModelStateKey)
+	models, err := s.codexModels(ctx)
+	if err != nil {
+		return &DirectResponse{Text: fmt.Sprintf("Could not load Codex models: %v", err)}, nil
+	}
+	lines := []string{
+		"Codex model",
+		fmt.Sprintf("Current: %s", settingValueLabel(current, "Auto")),
+	}
+	buttons := [][]model.ButtonSpec{
+		{s.callbackButton(ctx, selectedButtonLabel("Auto", current == ""), "settings_model_set", "settings", "", "", map[string]any{"value": ""})},
+	}
+	for _, option := range models {
+		label := option.ID
+		if label == "" {
+			continue
+		}
+		buttons = append(buttons, []model.ButtonSpec{
+			s.callbackButton(ctx, selectedButtonLabel(shortButtonLabel(label), option.ID == current), "settings_model_set", "settings", "", "", map[string]any{"value": option.ID}),
+		})
+	}
+	buttons = append(buttons, []model.ButtonSpec{
+		s.callbackButton(ctx, "Reasoning", "settings_reasoning_menu", "settings", "", "", nil),
+		s.callbackButton(ctx, "Settings", "settings_overview", "settings", "", "", nil),
+	})
+	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
+}
+
+func (s *Service) codexReasoningMenu(ctx context.Context) (*DirectResponse, error) {
+	current, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
+	efforts := allReasoningEfforts()
+	if models, err := s.codexModels(ctx); err == nil {
+		if selected, ok := selectedModelOption(models, modelValue); ok && len(selected.SupportedReasoningEffort) > 0 {
+			efforts = selected.SupportedReasoningEffort
+		}
+	}
+	lines := []string{
+		"Codex reasoning effort",
+		fmt.Sprintf("Current: %s", settingValueLabel(current, "Auto")),
+		fmt.Sprintf("Model: %s", settingValueLabel(modelValue, "Auto")),
+	}
+	buttons := [][]model.ButtonSpec{
+		{s.callbackButton(ctx, selectedButtonLabel("Auto", current == ""), "settings_reasoning_set", "settings", "", "", map[string]any{"value": ""})},
+	}
+	for index := 0; index < len(efforts); index += 2 {
+		row := []model.ButtonSpec{}
+		for _, effort := range efforts[index:min(index+2, len(efforts))] {
+			row = append(row, s.callbackButton(ctx, selectedButtonLabel(effort, effort == current), "settings_reasoning_set", "settings", "", "", map[string]any{"value": effort}))
+		}
+		buttons = append(buttons, row)
+	}
+	buttons = append(buttons, []model.ButtonSpec{
+		s.callbackButton(ctx, "Model", "settings_model_menu", "settings", "", "", nil),
+		s.callbackButton(ctx, "Settings", "settings_overview", "settings", "", "", nil),
+	})
+	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
+}
+
+func (s *Service) setCodexModel(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
+	value := strings.TrimSpace(fmt.Sprintf("%v", payload["value"]))
+	if value == "<nil>" {
+		value = ""
+	}
+	if value != "" {
+		models, err := s.codexModels(ctx)
+		if err != nil {
+			return &DirectResponse{Text: fmt.Sprintf("Could not validate Codex model: %v", err)}, nil
+		}
+		if _, ok := selectedModelOption(models, value); !ok {
+			return &DirectResponse{CallbackText: "Model option is stale.", Text: "This model is not available anymore. Use /model to refresh."}, nil
+		}
+	}
+	if err := s.store.SetState(ctx, codexModelStateKey, value); err != nil {
+		return nil, err
+	}
+	return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Model saved.", func(ctx context.Context) (*DirectResponse, error) {
+		return s.codexSettingsSaved(ctx, "Model saved.")
+	})
+}
+
+func (s *Service) setCodexReasoningEffort(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
+	value := normalizeReasoningEffort(fmt.Sprintf("%v", payload["value"]))
+	if value == "<nil>" {
+		value = ""
+	}
+	if value != "" && !containsString(allReasoningEfforts(), value) {
+		return &DirectResponse{CallbackText: "Reasoning option is stale.", Text: "This reasoning effort is not supported. Use /effort to refresh."}, nil
+	}
+	if err := s.store.SetState(ctx, codexReasoningStateKey, value); err != nil {
+		return nil, err
+	}
+	return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Reasoning saved.", func(ctx context.Context) (*DirectResponse, error) {
+		return s.codexSettingsSaved(ctx, "Reasoning effort saved.")
+	})
+}
+
+func (s *Service) codexSettingsSaved(ctx context.Context, status string) (*DirectResponse, error) {
+	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
+	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	lines := []string{
+		"Codex settings",
+		fmt.Sprintf("Model: %s", settingValueLabel(modelValue, "Auto")),
+		fmt.Sprintf("Reasoning effort: %s", settingValueLabel(reasoningValue, "Auto")),
+	}
+	if strings.TrimSpace(status) != "" {
+		lines = append(lines, "", status)
+	}
+	lines = append(lines, "Use /settings to change this again.")
+	return &DirectResponse{Text: strings.Join(lines, "\n")}, nil
+}
+
+func (s *Service) editOrSendSettingsResponse(ctx context.Context, chatID, topicID, messageID int64, callbackText string, renderer func(context.Context) (*DirectResponse, error)) (*DirectResponse, error) {
+	response, err := renderer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return &DirectResponse{CallbackText: callbackText}, nil
+	}
+	response.CallbackText = callbackText
+	s.mu.RLock()
+	sender := s.sender
+	s.mu.RUnlock()
+	if sender != nil && messageID != 0 && strings.TrimSpace(response.Text) != "" {
+		if err := sender.EditMessage(ctx, chatID, topicID, messageID, response.Text, response.Buttons); err == nil {
+			return &DirectResponse{CallbackText: callbackText}, nil
+		}
+	}
+	return response, nil
+}
+
+func (s *Service) codexModels(ctx context.Context) ([]appserver.ModelOption, error) {
+	client := s.settingsClient()
+	if client == nil {
+		return nil, errors.New("app-server session is not ready yet")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+	defer cancel()
+	return client.ModelList(requestCtx, false)
+}
+
+func (s *Service) settingsClient() Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.liveConnected && s.live != nil {
+		return s.live
+	}
+	if s.pollConnected && s.poll != nil {
+		return s.poll
+	}
+	return nil
+}
+
+func selectedModelOption(models []appserver.ModelOption, value string) (appserver.ModelOption, bool) {
+	value = strings.TrimSpace(value)
+	var first appserver.ModelOption
+	for index, option := range models {
+		if index == 0 {
+			first = option
+		}
+		if value != "" && option.ID == value {
+			return option, true
+		}
+		if value == "" && option.IsDefault {
+			return option, true
+		}
+	}
+	if value == "" && first.ID != "" {
+		return first, true
+	}
+	return appserver.ModelOption{}, false
+}
+
+func allReasoningEfforts() []string {
+	return []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+}
+
+func normalizeReasoningEffort(value string) string {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	switch normalized {
+	case "", "<nil>":
+		return ""
+	case "x-high", "x_high", "extra-high", "extra_high":
+		return "xhigh"
+	default:
+		return normalized
+	}
+}
+
+func settingValueLabel(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func selectedButtonLabel(label string, selected bool) string {
+	if selected {
+		return shortButtonLabel("* " + label)
+	}
+	return shortButtonLabel(label)
+}
+
+func shortButtonLabel(label string) string {
+	label = strings.TrimSpace(label)
+	const limit = 60
+	if len(label) <= limit {
+		return label
+	}
+	return strings.TrimSpace(label[:limit-3]) + "..."
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) resolveInputCommand(ctx context.Context, chatID, topicID int64, rest string, replyToMessageID int64, defaultCollaborationMode string, allowModeFlag bool) (model.RouteDecision, string, string, bool, error) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return model.RouteDecision{}, "", "", false, nil
+	}
+	collaborationMode := defaultCollaborationMode
+	if allowModeFlag {
+		if next, mode, ok := consumeCollaborationModeFlag(rest); ok {
+			rest = next
+			collaborationMode = mode
+		}
+	}
+	first, remainder := splitCommandHead(rest)
+	if first == "" {
+		return model.RouteDecision{}, "", "", false, nil
+	}
+	if allowModeFlag && remainder != "" {
+		if next, mode, ok := consumeCollaborationModeFlag(remainder); ok {
+			remainder = next
+			collaborationMode = mode
+		}
+	}
+	if remainder != "" {
+		if thread, _ := s.store.GetThread(ctx, first); thread != nil || replyToMessageID == 0 {
+			decision, err := s.resolveRoute(ctx, chatID, topicID, first, replyToMessageID)
+			return decision, strings.TrimSpace(remainder), collaborationMode, strings.TrimSpace(remainder) != "", err
+		}
+		decision, err := s.resolveRoute(ctx, chatID, topicID, "", replyToMessageID)
+		if err != nil {
+			return model.RouteDecision{}, "", "", false, err
+		}
+		if decision.ThreadID != "" {
+			return decision, rest, collaborationMode, true, nil
+		}
+		decision, err = s.resolveRoute(ctx, chatID, topicID, first, replyToMessageID)
+		return decision, strings.TrimSpace(remainder), collaborationMode, strings.TrimSpace(remainder) != "", err
+	}
+	decision, err := s.resolveRoute(ctx, chatID, topicID, "", replyToMessageID)
+	if err != nil {
+		return model.RouteDecision{}, "", "", false, err
+	}
+	return decision, first, collaborationMode, decision.ThreadID != "", nil
+}
+
+func consumeCollaborationModeFlag(rest string) (string, string, bool) {
+	head, tail := splitCommandHead(rest)
+	switch strings.ToLower(strings.TrimSpace(head)) {
+	case "--plan", "-p":
+		return strings.TrimSpace(tail), collaborationModePlan, true
+	default:
+		return rest, "", false
+	}
+}
+
+func splitCommandHead(rest string) (string, string) {
+	parts := strings.SplitN(strings.TrimSpace(rest), " ", 2)
+	if len(parts) == 0 {
+		return "", ""
+	}
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return parts[0], strings.TrimSpace(parts[1])
 }
 
 func (s *Service) sendInputToThread(ctx context.Context, chatID, topicID int64, threadID, text string) (*DirectResponse, error) {
-	return s.sendInputToThreadTurn(ctx, chatID, topicID, threadID, "", text)
+	return s.sendInputToThreadTurn(ctx, chatID, topicID, threadID, "", text, "")
 }
 
-func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int64, threadID, routeTurnID, text string) (*DirectResponse, error) {
+func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int64, threadID, routeTurnID, text, collaborationMode string) (*DirectResponse, error) {
 	thread, _ := s.store.GetThread(ctx, threadID)
 	if thread == nil {
 		return &DirectResponse{Text: fmt.Sprintf("Unknown thread: %s", threadID)}, nil
@@ -924,19 +1267,29 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 	if err != nil {
 		return nil, err
 	}
+	if refreshed, refreshErr := s.refreshThread(ctx, live, threadID); refreshErr == nil && refreshed != nil {
+		thread = refreshed
+	}
 	var result map[string]any
+	var steerErr error
 	steerState, _ := s.resolveArmedSteer(ctx, chatID, topicID)
 	if steerState != nil && steerState.ThreadID == threadID && strings.TrimSpace(steerState.TurnID) != "" {
-		result, err = live.TurnSteer(requestCtx, threadID, steerState.TurnID, text)
-		if err == nil {
+		result, steerErr = live.TurnSteer(requestCtx, threadID, steerState.TurnID, text)
+		if steerErr == nil {
 			_ = s.store.ClearSteerState(ctx, chatID, topicID)
 		}
 	}
-	if (result == nil || err != nil) && strings.TrimSpace(routeTurnID) != "" {
-		result, err = live.TurnSteer(requestCtx, threadID, routeTurnID, text)
+	if result == nil && strings.TrimSpace(routeTurnID) != "" {
+		result, steerErr = live.TurnSteer(requestCtx, threadID, routeTurnID, text)
 	}
-	if result == nil || err != nil {
-		result, err = live.TurnStart(requestCtx, threadID, text, thread.CWD)
+	if result == nil && strings.TrimSpace(routeTurnID) == "" && threadLooksActiveForInput(thread) && strings.TrimSpace(thread.ActiveTurnID) != "" {
+		result, steerErr = live.TurnSteer(requestCtx, threadID, thread.ActiveTurnID, text)
+	}
+	if result == nil && (threadLooksActiveForInput(thread) || steerFailureImpliesActive(steerErr)) {
+		return &DirectResponse{Text: activeThreadReplyText(thread, steerErr), ThreadID: threadID, TurnID: thread.ActiveTurnID}, nil
+	}
+	if result == nil {
+		result, err = live.TurnStart(requestCtx, threadID, text, thread.CWD, s.turnStartOptions(ctx, collaborationMode, thread))
 		if err != nil {
 			return nil, err
 		}
@@ -958,6 +1311,58 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 	}
 	s.syncThreadPanelToTarget(ctx, explicitTarget, threadID, true, model.PanelSourceTelegramInput)
 	return &DirectResponse{ThreadID: threadID, TurnID: turn}, nil
+}
+
+func (s *Service) turnStartOptions(ctx context.Context, collaborationMode string, thread *model.Thread) appserver.TurnStartOptions {
+	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
+	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	options := appserver.TurnStartOptions{
+		CollaborationMode: strings.TrimSpace(collaborationMode),
+		Model:             strings.TrimSpace(modelValue),
+		ReasoningEffort:   normalizeReasoningEffort(reasoningValue),
+	}
+	if options.Model == "" && thread != nil {
+		options.Model = strings.TrimSpace(thread.PreferredModel)
+	}
+	return options
+}
+
+func threadLooksActiveForInput(thread *model.Thread) bool {
+	if thread == nil {
+		return false
+	}
+	return threadLooksActiveForPolling(*thread)
+}
+
+func steerFailureImpliesActive(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "active turn") ||
+		strings.Contains(msg, "activeturn") ||
+		strings.Contains(msg, "already active") ||
+		strings.Contains(msg, "in-flight") ||
+		strings.Contains(msg, "not steerable")
+}
+
+func activeThreadReplyText(thread *model.Thread, steerErr error) string {
+	label := "Thread"
+	turnID := ""
+	if thread != nil {
+		label = thread.Label()
+		turnID = strings.TrimSpace(thread.ActiveTurnID)
+	}
+	if steerErr != nil {
+		if turnID != "" {
+			return fmt.Sprintf("%s is already active, but Codex did not accept input for active turn %s: %v. I did not start a parallel turn.", label, turnID, steerErr)
+		}
+		return fmt.Sprintf("%s is already active, but Codex did not accept input: %v. I did not start a parallel turn.", label, steerErr)
+	}
+	if turnID != "" {
+		return fmt.Sprintf("%s is already active. Reply to the current live turn card to steer turn %s, or wait for completion. I did not start a parallel turn.", label, turnID)
+	}
+	return fmt.Sprintf("%s is already active, but the active turn id is not available yet. Wait for completion or use /stop. I did not start a parallel turn.", label)
 }
 
 func (s *Service) stopThread(ctx context.Context, chatID, topicID int64, explicitThreadID string, replyToMessageID int64) (*DirectResponse, error) {
@@ -1051,7 +1456,7 @@ func (s *Service) answerChoice(ctx context.Context, chatID, topicID int64, route
 		return &DirectResponse{CallbackText: "Answer option is empty."}, nil
 	}
 	if strings.TrimSpace(route.RequestID) == "" {
-		response, err := s.sendInputToThreadTurn(ctx, chatID, topicID, route.ThreadID, route.TurnID, text)
+		response, err := s.sendInputToThreadTurn(ctx, chatID, topicID, route.ThreadID, route.TurnID, text, "")
 		if err != nil {
 			return nil, err
 		}
@@ -1476,7 +1881,11 @@ func threadLooksActiveForPolling(thread model.Thread) bool {
 	if status == "" {
 		return false
 	}
-	if strings.Contains(status, "waitingon") || strings.Contains(status, "inprogress") {
+	if status == "active" ||
+		strings.HasPrefix(status, "active[") ||
+		strings.Contains(status, "waitingon") ||
+		strings.Contains(status, "inprogress") ||
+		strings.Contains(status, "running") {
 		return true
 	}
 	switch status {

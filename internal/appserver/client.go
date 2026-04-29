@@ -11,9 +11,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mideco-tech/codex-tg/internal/version"
 )
 
 type Event struct {
@@ -21,6 +24,29 @@ type Event struct {
 	Method  string         `json:"method,omitempty"`
 	Params  map[string]any `json:"params,omitempty"`
 	ID      any            `json:"id,omitempty"`
+}
+
+type TurnStartOptions struct {
+	CollaborationMode string
+	Model             string
+	ReasoningEffort   string
+}
+
+type ModelOption struct {
+	ID                       string
+	DisplayName              string
+	Description              string
+	DefaultReasoningEffort   string
+	SupportedReasoningEffort []string
+	IsDefault                bool
+	Hidden                   bool
+}
+
+type CollaborationModeOption struct {
+	Name            string
+	Mode            string
+	Model           string
+	ReasoningEffort string
 }
 
 type rpcResponse struct {
@@ -107,7 +133,8 @@ func (c *Client) Start(ctx context.Context) error {
 		"capabilities": map[string]any{"experimentalApi": true},
 		"clientInfo": map[string]any{
 			"name":    "codex-tg",
-			"version": "0.1.0",
+			"title":   "codex-tg Telegram bridge",
+			"version": version.Version,
 		},
 	}); err != nil {
 		return err
@@ -295,7 +322,23 @@ func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) (map[st
 	return asMap(result), nil
 }
 
-func (c *Client) TurnStart(ctx context.Context, threadID, message, cwd string) (map[string]any, error) {
+func (c *Client) TurnStart(ctx context.Context, threadID, message, cwd string, options TurnStartOptions) (map[string]any, error) {
+	resolved, err := c.resolveTurnStartOptions(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	params, err := turnStartParams(threadID, message, cwd, resolved)
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.Request(ctx, "turn/start", params)
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func turnStartParams(threadID, message, cwd string, options TurnStartOptions) (map[string]any, error) {
 	params := map[string]any{
 		"threadId": threadID,
 		"input": []map[string]any{
@@ -305,11 +348,205 @@ func (c *Client) TurnStart(ctx context.Context, threadID, message, cwd string) (
 	if strings.TrimSpace(cwd) != "" {
 		params["cwd"] = cwd
 	}
-	result, err := c.Request(ctx, "turn/start", params)
+	mode := normalizeCollaborationMode(options.CollaborationMode)
+	if mode != "" {
+		model := strings.TrimSpace(options.Model)
+		if model == "" {
+			return nil, fmt.Errorf("codex model is required for collaboration mode %q", mode)
+		}
+		settings := map[string]any{
+			"model":                  model,
+			"reasoning_effort":       normalizeReasoningEffort(options.ReasoningEffort),
+			"developer_instructions": nil,
+		}
+		if settings["reasoning_effort"] == "" {
+			settings["reasoning_effort"] = nil
+		}
+		params["collaborationMode"] = map[string]any{
+			"mode":     mode,
+			"settings": settings,
+		}
+	}
+	return params, nil
+}
+
+func (c *Client) resolveTurnStartOptions(ctx context.Context, options TurnStartOptions) (TurnStartOptions, error) {
+	options.CollaborationMode = normalizeCollaborationMode(options.CollaborationMode)
+	options.Model = strings.TrimSpace(options.Model)
+	options.ReasoningEffort = normalizeReasoningEffort(options.ReasoningEffort)
+	if options.CollaborationMode == "" {
+		return options, nil
+	}
+	if options.Model == "" {
+		model, err := c.defaultModel(ctx)
+		if err != nil {
+			return options, fmt.Errorf("codex model is required for collaboration mode %q; choose one with /model or fix model/list: %w", options.CollaborationMode, err)
+		}
+		options.Model = model
+	}
+	if options.ReasoningEffort == "" {
+		if effort, err := c.collaborationModeReasoningEffort(ctx, options.CollaborationMode); err == nil {
+			options.ReasoningEffort = effort
+		}
+	}
+	return options, nil
+}
+
+func (c *Client) defaultModel(ctx context.Context) (string, error) {
+	models, err := c.ModelList(ctx, false)
+	if err != nil {
+		return "", err
+	}
+	first := ""
+	for _, model := range models {
+		if model.ID == "" {
+			continue
+		}
+		if first == "" {
+			first = model.ID
+		}
+		if model.IsDefault {
+			return model.ID, nil
+		}
+	}
+	if first != "" {
+		return first, nil
+	}
+	return "", errors.New("model/list returned no models")
+}
+
+func (c *Client) collaborationModeReasoningEffort(ctx context.Context, mode string) (string, error) {
+	modes, err := c.CollaborationModeList(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, preset := range modes {
+		if normalizeCollaborationMode(preset.Mode) != mode {
+			continue
+		}
+		return normalizeReasoningEffort(preset.ReasoningEffort), nil
+	}
+	return "", nil
+}
+
+func (c *Client) ModelList(ctx context.Context, includeHidden bool) ([]ModelOption, error) {
+	params := map[string]any{"limit": 50}
+	if includeHidden {
+		params["includeHidden"] = true
+	}
+	result, err := c.Request(ctx, "model/list", params)
 	if err != nil {
 		return nil, err
 	}
-	return asMap(result), nil
+	return modelOptionsFromResult(result), nil
+}
+
+func (c *Client) CollaborationModeList(ctx context.Context) ([]CollaborationModeOption, error) {
+	result, err := c.Request(ctx, "collaborationMode/list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	return collaborationModeOptionsFromResult(result), nil
+}
+
+func modelOptionsFromResult(result any) []ModelOption {
+	data, _ := asMap(result)["data"].([]any)
+	out := make([]ModelOption, 0, len(data))
+	for _, item := range data {
+		model := asMap(item)
+		id := strings.TrimSpace(stringValue(model["model"], stringValue(model["id"], "")))
+		if id == "" {
+			continue
+		}
+		out = append(out, ModelOption{
+			ID:                       id,
+			DisplayName:              strings.TrimSpace(stringValue(model["displayName"], "")),
+			Description:              strings.TrimSpace(stringValue(model["description"], "")),
+			DefaultReasoningEffort:   normalizeReasoningEffort(stringValue(model["defaultReasoningEffort"], "")),
+			SupportedReasoningEffort: supportedReasoningEfforts(model["supportedReasoningEfforts"]),
+			IsDefault:                boolValue(model["isDefault"]),
+			Hidden:                   boolValue(model["hidden"]),
+		})
+	}
+	return out
+}
+
+func collaborationModeOptionsFromResult(result any) []CollaborationModeOption {
+	data, _ := asMap(result)["data"].([]any)
+	out := make([]CollaborationModeOption, 0, len(data))
+	for _, item := range data {
+		preset := asMap(item)
+		out = append(out, CollaborationModeOption{
+			Name:            strings.TrimSpace(stringValue(preset["name"], "")),
+			Mode:            normalizeCollaborationMode(stringValue(preset["mode"], "")),
+			Model:           strings.TrimSpace(stringValue(preset["model"], "")),
+			ReasoningEffort: normalizeReasoningEffort(firstStringValue(preset["reasoning_effort"], preset["reasoningEffort"])),
+		})
+	}
+	return out
+}
+
+func supportedReasoningEfforts(value any) []string {
+	items, _ := value.([]any)
+	out := make([]string, 0, len(items))
+	seen := map[string]struct{}{}
+	for _, item := range items {
+		option := asMap(item)
+		effort := normalizeReasoningEffort(firstStringValue(option["reasoning_effort"], option["reasoningEffort"], item))
+		if effort == "" {
+			continue
+		}
+		if _, ok := seen[effort]; ok {
+			continue
+		}
+		seen[effort] = struct{}{}
+		out = append(out, effort)
+	}
+	return out
+}
+
+func normalizeCollaborationMode(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "plan", "plan_mode", "plan-mode":
+		return "plan"
+	case "default":
+		return "default"
+	default:
+		return ""
+	}
+}
+
+func normalizeReasoningEffort(value string) string {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	switch normalized {
+	case "":
+		return ""
+	case "x-high", "x_high", "extra-high", "extra_high":
+		return "xhigh"
+	default:
+		return normalized
+	}
+}
+
+func firstStringValue(values ...any) string {
+	for _, value := range values {
+		if text := strings.TrimSpace(stringValue(value, "")); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, _ := strconv.ParseBool(typed)
+		return parsed
+	default:
+		return false
+	}
 }
 
 func (c *Client) ThreadStart(ctx context.Context, cwd string) (map[string]any, error) {

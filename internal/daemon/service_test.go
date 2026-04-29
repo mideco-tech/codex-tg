@@ -783,6 +783,365 @@ func TestPlainReplyToSyntheticPlanPromptFallsBackToTurnStart(t *testing.T) {
 	}
 }
 
+func TestReplyToActiveThreadSteersActiveTurn(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:           "active-reply-thread",
+		Title:        "Active reply",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		Status:       "active",
+		ActiveTurnID: "turn-active",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThread(ctx, 123456789, 0, thread.ID, "Add this while running")
+	if err != nil {
+		t.Fatalf("sendInputToThread failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID || response.TurnID != "turn-active" {
+		t.Fatalf("response = %#v, want active turn steer", response)
+	}
+	if len(stub.turnSteerCalls) != 1 {
+		t.Fatalf("turnSteerCalls = %#v, want one steer", stub.turnSteerCalls)
+	}
+	if got := stub.turnSteerCalls[0]; got.threadID != thread.ID || got.turnID != "turn-active" || got.message != "Add this while running" {
+		t.Fatalf("turn steer call = %#v, want active turn input", got)
+	}
+	if len(stub.turnStartCalls) != 0 {
+		t.Fatalf("turnStartCalls = %#v, want no parallel start", stub.turnStartCalls)
+	}
+}
+
+func TestReplyToActiveThreadDoesNotFallbackToTurnStartWhenSteerFails(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:           "active-not-steerable-thread",
+		Title:        "Active not steerable",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		Status:       "active",
+		ActiveTurnID: "turn-active",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{turnSteerErr: errors.New("active turn is not steerable")}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThreadTurn(ctx, 123456789, 0, thread.ID, "turn-active", "Do not fork this", "")
+	if err != nil {
+		t.Fatalf("sendInputToThreadTurn failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "I did not start a parallel turn.") {
+		t.Fatalf("response = %#v, want no parallel-turn warning", response)
+	}
+	if len(stub.turnSteerCalls) != 1 {
+		t.Fatalf("turnSteerCalls = %#v, want one failed steer", stub.turnSteerCalls)
+	}
+	if len(stub.turnStartCalls) != 0 {
+		t.Fatalf("turnStartCalls = %#v, want no fallback start", stub.turnStartCalls)
+	}
+}
+
+func TestReplyToActiveThreadWithoutTurnIDDoesNotStartParallelTurn(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "active-without-turn-thread",
+		Title:       "Active missing turn",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "active",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThread(ctx, 123456789, 0, thread.ID, "Do not start")
+	if err != nil {
+		t.Fatalf("sendInputToThread failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "active turn id is not available") {
+		t.Fatalf("response = %#v, want missing active turn warning", response)
+	}
+	if len(stub.turnSteerCalls) != 0 {
+		t.Fatalf("turnSteerCalls = %#v, want no steer without turn id", stub.turnSteerCalls)
+	}
+	if len(stub.turnStartCalls) != 0 {
+		t.Fatalf("turnStartCalls = %#v, want no parallel start", stub.turnStartCalls)
+	}
+}
+
+func TestPlanCommandStartsPlanCollaborationMode(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, codexReasoningStateKey, "high"); err != nil {
+		t.Fatalf("SetState(reasoning) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "plan-command-thread",
+		Title:       "Plan command",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan "+thread.ID+" propose options", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/plan) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want started plan turn", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	got := stub.turnStartCalls[0]
+	if got.collaborationMode != collaborationModePlan || got.model != "gpt-test" || got.reasoningEffort != "high" {
+		t.Fatalf("turn start options = %#v, want plan/gpt-test/high", got)
+	}
+}
+
+func TestReplyPlanFlagStartsPlanCollaborationMode(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, codexReasoningStateKey, "medium"); err != nil {
+		t.Fatalf("SetState(reasoning) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "reply-plan-thread",
+		Title:       "Reply plan",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/reply --plan "+thread.ID+" sketch the plan", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/reply --plan) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID {
+		t.Fatalf("response = %#v, want reply plan thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.collaborationMode != collaborationModePlan || got.message != "sketch the plan" {
+		t.Fatalf("turn start call = %#v, want plan input", got)
+	}
+}
+
+func TestPlanModeCommandCanRouteByReply(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "reply-routed-plan-thread",
+		Title:       "Reply routed plan",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.PutMessageRoute(ctx, model.MessageRoute{
+		ChatID:    123456789,
+		TopicID:   0,
+		MessageID: 812,
+		ThreadID:  thread.ID,
+		CreatedAt: model.NowString(),
+	}); err != nil {
+		t.Fatalf("PutMessageRoute failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan_mode plan this reply-routed task", 812)
+	if err != nil {
+		t.Fatalf("handleCommand(/plan_mode) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID {
+		t.Fatalf("response = %#v, want routed thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	got := stub.turnStartCalls[0]
+	if got.collaborationMode != collaborationModePlan || got.message != "plan this reply-routed task" {
+		t.Fatalf("turn start call = %#v, want reply-routed plan text", got)
+	}
+}
+
+func TestReplyCommandKeepsDefaultCollaborationMode(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, codexReasoningStateKey, "high"); err != nil {
+		t.Fatalf("SetState(reasoning) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "plain-reply-thread",
+		Title:       "Plain reply",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/reply "+thread.ID+" do the work", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/reply) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID {
+		t.Fatalf("response = %#v, want reply thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.collaborationMode != "" {
+		t.Fatalf("collaborationMode = %q, want empty default turn", got.collaborationMode)
+	}
+}
+
+func TestModelMenuPersistsSelectedModel(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{models: []appserver.ModelOption{
+		{ID: "gpt-default", IsDefault: true, SupportedReasoningEffort: []string{"low", "medium"}},
+		{ID: "gpt-menu", SupportedReasoningEffort: []string{"minimal", "low"}},
+	}}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/model", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/model) failed: %v", err)
+	}
+	token := callbackTokenForButton(response.Buttons, "gpt-menu")
+	if token == "" {
+		t.Fatalf("model menu buttons = %#v, want gpt-menu", response.Buttons)
+	}
+	callbackResponse, err := service.HandleCallback(ctx, 123456789, 0, 900, 123456789, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(model select) failed: %v", err)
+	}
+	if callbackResponse == nil || !strings.Contains(callbackResponse.Text, "Model saved.") {
+		t.Fatalf("callback response = %#v, want saved settings summary", callbackResponse)
+	}
+	if len(callbackResponse.Buttons) != 0 {
+		t.Fatalf("callback buttons = %#v, want choice buttons removed after selection", callbackResponse.Buttons)
+	}
+	value, err := service.store.GetState(ctx, codexModelStateKey)
+	if err != nil {
+		t.Fatalf("GetState(model) failed: %v", err)
+	}
+	if value != "gpt-menu" {
+		t.Fatalf("stored model = %q, want gpt-menu", value)
+	}
+}
+
+func TestReasoningMenuUsesSelectedModelEfforts(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-menu"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	stub := &stubSession{models: []appserver.ModelOption{
+		{ID: "gpt-default", IsDefault: true, SupportedReasoningEffort: []string{"low", "medium", "high"}},
+		{ID: "gpt-menu", SupportedReasoningEffort: []string{"minimal", "low"}},
+	}}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/effort", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/effort) failed: %v", err)
+	}
+	if callbackTokenForButton(response.Buttons, "minimal") == "" {
+		t.Fatalf("reasoning buttons = %#v, want minimal option", response.Buttons)
+	}
+	if callbackTokenForButton(response.Buttons, "high") != "" {
+		t.Fatalf("reasoning buttons = %#v, want no high option for selected model", response.Buttons)
+	}
+	token := callbackTokenForButton(response.Buttons, "minimal")
+	callbackResponse, err := service.HandleCallback(ctx, 123456789, 0, 901, 123456789, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(reasoning select) failed: %v", err)
+	}
+	if callbackResponse == nil || !strings.Contains(callbackResponse.Text, "Reasoning effort saved.") {
+		t.Fatalf("callback response = %#v, want saved settings summary", callbackResponse)
+	}
+	if len(callbackResponse.Buttons) != 0 {
+		t.Fatalf("callback buttons = %#v, want choice buttons removed after selection", callbackResponse.Buttons)
+	}
+	value, err := service.store.GetState(ctx, codexReasoningStateKey)
+	if err != nil {
+		t.Fatalf("GetState(reasoning) failed: %v", err)
+	}
+	if value != "minimal" {
+		t.Fatalf("stored reasoning = %q, want minimal", value)
+	}
+}
+
 func TestPlainReplyToRealPlanPromptUsesServerRequest(t *testing.T) {
 	t.Parallel()
 
@@ -861,10 +1220,23 @@ func newTestService(t *testing.T) *Service {
 	return service
 }
 
+func callbackTokenForButton(rows [][]model.ButtonSpec, label string) string {
+	for _, row := range rows {
+		for _, button := range row {
+			if strings.Contains(button.Text, label) {
+				return button.CallbackData
+			}
+		}
+	}
+	return ""
+}
+
 type stubSession struct {
 	threadReads         map[string]map[string]any
 	threadListResult    map[string]any
 	threadListCalls     int
+	models              []appserver.ModelOption
+	collaborationModes  []appserver.CollaborationModeOption
 	turnSteerErr        error
 	turnSteerCalls      []turnCall
 	turnStartCalls      []turnCall
@@ -872,10 +1244,13 @@ type stubSession struct {
 }
 
 type turnCall struct {
-	threadID string
-	turnID   string
-	message  string
-	cwd      string
+	threadID          string
+	turnID            string
+	message           string
+	cwd               string
+	collaborationMode string
+	model             string
+	reasoningEffort   string
 }
 
 type respondRequestCall struct {
@@ -904,8 +1279,15 @@ func (s *stubSession) ThreadResume(ctx context.Context, threadID, cwd string) (m
 func (s *stubSession) ThreadStart(ctx context.Context, cwd string) (map[string]any, error) {
 	return nil, nil
 }
-func (s *stubSession) TurnStart(ctx context.Context, threadID, message, cwd string) (map[string]any, error) {
-	s.turnStartCalls = append(s.turnStartCalls, turnCall{threadID: threadID, message: message, cwd: cwd})
+func (s *stubSession) TurnStart(ctx context.Context, threadID, message, cwd string, options appserver.TurnStartOptions) (map[string]any, error) {
+	s.turnStartCalls = append(s.turnStartCalls, turnCall{
+		threadID:          threadID,
+		message:           message,
+		cwd:               cwd,
+		collaborationMode: options.CollaborationMode,
+		model:             options.Model,
+		reasoningEffort:   options.ReasoningEffort,
+	})
 	return map[string]any{"turn": map[string]any{"id": "started-turn"}}, nil
 }
 func (s *stubSession) TurnSteer(ctx context.Context, threadID, turnID, message string) (map[string]any, error) {
@@ -917,6 +1299,18 @@ func (s *stubSession) TurnSteer(ctx context.Context, threadID, turnID, message s
 }
 func (s *stubSession) TurnInterrupt(ctx context.Context, threadID, turnID string) error {
 	return nil
+}
+func (s *stubSession) ModelList(ctx context.Context, includeHidden bool) ([]appserver.ModelOption, error) {
+	if s.models != nil {
+		return s.models, nil
+	}
+	return []appserver.ModelOption{
+		{ID: "gpt-default", IsDefault: true, SupportedReasoningEffort: []string{"low", "medium", "high"}},
+		{ID: "gpt-alt", SupportedReasoningEffort: []string{"minimal", "low"}},
+	}, nil
+}
+func (s *stubSession) CollaborationModeList(ctx context.Context) ([]appserver.CollaborationModeOption, error) {
+	return s.collaborationModes, nil
 }
 func (s *stubSession) RespondServerRequest(ctx context.Context, requestID string, result map[string]any) error {
 	s.respondRequestCalls = append(s.respondRequestCalls, respondRequestCall{requestID: requestID, result: result})

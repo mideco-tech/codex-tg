@@ -65,6 +65,7 @@ func ThreadFromPayload(payload map[string]any) model.Thread {
 	title := stringValue(threadPayload["name"], stringValue(threadPayload["title"], id))
 	preview := stringValue(threadPayload["preview"], "")
 	status := statusText(threadPayload["status"])
+	preferredModel := stringValue(threadPayload["model"], stringValue(payload["model"], ""))
 	raw, _ := json.Marshal(threadPayload)
 	updatedAt := int64Value(threadPayload["updatedAt"])
 	activeTurnID := stringValue(threadPayload["activeTurnId"], "")
@@ -82,17 +83,18 @@ func ThreadFromPayload(payload map[string]any) model.Thread {
 		}
 	}
 	return model.Thread{
-		ID:            id,
-		Title:         title,
-		CWD:           cwd,
-		ProjectName:   project,
-		DirectoryName: directory,
-		UpdatedAt:     updatedAt,
-		Status:        status,
-		LastPreview:   preview,
-		ActiveTurnID:  activeTurnID,
-		Archived:      false,
-		Raw:           raw,
+		ID:             id,
+		Title:          title,
+		CWD:            cwd,
+		ProjectName:    project,
+		DirectoryName:  directory,
+		UpdatedAt:      updatedAt,
+		Status:         status,
+		LastPreview:    preview,
+		ActiveTurnID:   activeTurnID,
+		PreferredModel: preferredModel,
+		Archived:       false,
+		Raw:            raw,
 	}
 }
 
