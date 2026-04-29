@@ -9,7 +9,7 @@ The public docs describe the intended observer/UI contract:
 - `/observe all` moves one global observer target.
 - `/observe off` disables passive monitoring.
 - foreign GUI/CLI runs render as `New run -> [User] -> [commentary] -> [Tool] -> [Output]`.
-- completed runs collapse the summary card into `[Final]` with Details.
+- completed runs collapse the summary card into `[Final]` with Details, leaving status on `[commentary]`/`[Final]` instead of `New run` or `[User]`.
 - `Tools file` and `Get full log` are explicit on-demand exports.
 
 When changing this behavior, update the ADRs and run both unit tests and a live Telegram E2E path if a bot token is available.

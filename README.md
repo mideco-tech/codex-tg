@@ -4,6 +4,8 @@ Telegram remote UI and observer for local OpenAI Codex App Server, built in Go.
 
 `codex-tg` turns a Telegram bot into a mobile control surface for local Codex threads: it watches Codex GUI/CLI activity, keeps thread identity visible, routes replies back to the right thread, and exposes high-signal controls such as Plan Mode prompts, Stop, Steer, Details, Tools file, and Get full log.
 
+Current release: `v0.1.1`.
+
 ![codex-tg Telegram Plan Mode demo](docs/assets/telegram-plan-mode-demo.png)
 
 The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/telegram-plan-mode-demo.md).
@@ -34,7 +36,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 - Thread-first routing over local `codex app-server` stdio.
 - Global observer for foreign GUI/CLI runs, with polling fallback through `thread/read`.
 - Stable visual identity per thread: emoji marker plus project/thread/run chips.
-- Explicit `New run -> [User] -> [commentary] -> [Tool] -> [Output] -> [Final]` chronology.
+- Explicit `New run -> [User] -> [commentary] -> [Tool] -> [Output] -> [Final]` chronology with status on the live commentary/final card.
 - Plan Mode `[Plan]` prompt-cards with reply-first routing and structured buttons when Codex provides choices.
 - Final Card with Details pagination and on-demand Tools file export.
 - On-demand full log archive from Codex session JSONL.
@@ -44,7 +46,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 ## Platform Status
 
 - Windows: actively tested with the local Codex App Server, Telegram Bot API, observer flows, and live E2E demo.
-- macOS: in progress.
+- macOS: verified on macOS 26.3.1 arm64 with Go 1.26.2, LaunchAgent daemon startup, local build, and Telegram readback/status check.
 - Linux: CI runs tests/builds on Ubuntu; full local daemon/runtime validation is still pending.
 
 ## Quickstart
@@ -76,7 +78,7 @@ In Telegram:
 /context
 ```
 
-Start or continue a Codex thread from Codex GUI/CLI. `codex-tg` should create a `New run` card, a `[User]` card, live progress cards, and a final answer card in Telegram.
+Start or continue a Codex thread from Codex GUI/CLI. `codex-tg` should create a `New run` card, a `[User]` card, live progress cards, and then collapse the completed run into a final answer card with Details.
 
 ## Runtime Commands
 
@@ -163,6 +165,7 @@ agent-observer plan-mode telegram-ui windows macos linux
 - [Security](docs/wiki/Security.md)
 - [Operations](docs/wiki/Operations.md)
 - [Demo](docs/wiki/Demo.md)
+- [Changelog](CHANGELOG.md)
 - [Contract matrix](docs/research/contract-matrix.md)
 - [Validation notes](docs/testing/validation-notes.md)
 - [ADRs](docs/adr/)

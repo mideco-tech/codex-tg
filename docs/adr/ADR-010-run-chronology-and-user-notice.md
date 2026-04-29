@@ -13,8 +13,11 @@ The Telegram observer is also a security surface: if a local GUI/CLI or another 
 - For GUI/CLI or poll-discovered runs, the order is always `New run`, `[User]`, `[commentary]`, `[Tool]`, `[Output]`.
 - If the user prompt is not available when a run is discovered, the bridge sends a lightweight `[User]` placeholder and later edits that placeholder into the actual prompt.
 - For Telegram-originated runs, the user request is already visible as the operator's Telegram message, so the bridge sends `New run` and the live trio without a duplicated `[User]`.
-- `New run` owns run status and source metadata and may be edited while the run is active.
+- `New run` is an orientation card with source metadata only. It does not own run status.
+- `[User]` is delivered once as request context. It does not show run status and is not updated for status-only changes.
+- The live `[commentary]` card owns run status while the run is active.
 - At terminal finalization, `New run`, `[Tool]`, and `[Output]` are deleted best-effort. `[User]` remains as historical request context, and `[commentary]` is edited into `[Final]`.
+- `[Final]` shows final-answer text and status only; completed commentary/tool/output history is available through Details.
 - DB message routes and callback tokens remain the routing source of truth.
 
 ## Consequences

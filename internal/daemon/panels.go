@@ -111,6 +111,23 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 	if isTerminalStatus(snapshot.LatestTurnStatus) && strings.TrimSpace(snapshot.LatestFinalFP) != "" && panel.LastFinalNoticeFP == snapshot.LatestFinalFP {
 		return
 	}
+	if legacyTerminalReplay && snapshot.LatestFinalFP != "" {
+		panel.LastFinalNoticeFP = snapshot.LatestFinalFP
+		if err := s.store.UpdateThreadPanelState(ctx, panel.ID, panel.CurrentTurnID, panel.Status, panel.LastSummaryHash, panel.LastToolHash, panel.LastOutputHash, panel.LastFinalNoticeFP); err != nil {
+			s.setError(ctx, err)
+		}
+		return
+	}
+	if shouldRenderFinalCardNow(panel, snapshot) {
+		if err := s.maybeSendUserRequestNotice(ctx, sender, panel, *thread, snapshot); err != nil {
+			s.setError(ctx, err)
+			return
+		}
+		if err := s.maybeRenderFinalCard(ctx, sender, target, panel, *thread, snapshot); err != nil {
+			s.setError(ctx, err)
+		}
+		return
+	}
 	if err := s.updateCurrentPanel(ctx, sender, panel, *thread, snapshot, pending); err != nil {
 		panel, recreateErr := s.createCurrentPanel(ctx, sender, target, *thread, snapshot, pending, sourceMode)
 		if recreateErr != nil || panel == nil {
@@ -122,14 +139,6 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 			s.setError(ctx, err)
 			return
 		}
-	}
-	if legacyTerminalReplay && snapshot.LatestFinalFP != "" {
-		panel.LastFinalNoticeFP = snapshot.LatestFinalFP
-		if err := s.store.UpdateThreadPanelState(ctx, panel.ID, panel.CurrentTurnID, panel.Status, panel.LastSummaryHash, panel.LastToolHash, panel.LastOutputHash, panel.LastFinalNoticeFP); err != nil {
-			s.setError(ctx, err)
-			return
-		}
-		return
 	}
 	if err := s.maybeRenderFinalCard(ctx, sender, target, panel, *thread, snapshot); err != nil {
 		s.setError(ctx, err)
@@ -224,6 +233,9 @@ func isLegacyTerminalReplay(panel *model.ThreadPanel, snapshot *appserver.Thread
 	if panel == nil || snapshot == nil {
 		return false
 	}
+	if panel.RunNoticeMessageID != 0 || panel.UserMessageID != 0 {
+		return false
+	}
 	if strings.TrimSpace(panel.SourceMode) != model.PanelSourceGlobalObserver {
 		return false
 	}
@@ -237,6 +249,17 @@ func isLegacyTerminalReplay(panel *model.ThreadPanel, snapshot *appserver.Thread
 		return false
 	}
 	return isTerminalStatus(panel.Status) && isTerminalStatus(snapshot.LatestTurnStatus)
+}
+
+func shouldRenderFinalCardNow(panel *model.ThreadPanel, snapshot *appserver.ThreadReadSnapshot) bool {
+	if panel == nil || snapshot == nil {
+		return false
+	}
+	if !isTerminalStatus(snapshot.LatestTurnStatus) || strings.TrimSpace(snapshot.LatestFinalText) == "" {
+		return false
+	}
+	finalFP := strings.TrimSpace(snapshot.LatestFinalFP)
+	return finalFP != "" && finalFP != strings.TrimSpace(panel.LastFinalNoticeFP)
 }
 
 func (s *Service) createCurrentPanel(ctx context.Context, sender Sender, target model.ObserverTarget, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, pending *model.PendingApproval, sourceMode string) (*model.ThreadPanel, error) {
@@ -392,7 +415,6 @@ func (s *Service) renderRunNotice(ctx context.Context, thread model.Thread, snap
 	}
 	text := strings.Join([]string{
 		s.visualDividerText(ctx, thread, snapshot.LatestTurnID),
-		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
 		fmt.Sprintf("Source: %s", source),
 	}, "\n")
 	return text, hashStrings(text)
@@ -532,19 +554,11 @@ func (s *Service) sendUserPlaceholderNotice(ctx context.Context, sender Sender, 
 }
 
 func (s *Service) renderUserRequestNoticeCard(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) []model.RenderedMessage {
-	header := strings.Join([]string{
-		s.visualHeader(ctx, "User", thread, snapshot.LatestTurnID),
-		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
-	}, "\n")
-	return tgformat.RenderMarkdownWithHeader(header, snapshot.LatestUserMessageText)
+	return tgformat.RenderMarkdownWithHeader(s.visualHeader(ctx, "User", thread, snapshot.LatestTurnID), snapshot.LatestUserMessageText)
 }
 
 func (s *Service) renderUserPlaceholderCard(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) model.RenderedMessage {
-	header := strings.Join([]string{
-		s.visualHeader(ctx, "User", thread, snapshot.LatestTurnID),
-		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
-	}, "\n")
-	return renderSingleMarkdownCard(header, "User prompt was not available from app-server snapshot.")
+	return renderSingleMarkdownCard(s.visualHeader(ctx, "User", thread, snapshot.LatestTurnID), "User prompt was not available from app-server snapshot.")
 }
 
 func shouldSendUserRequestNotice(sourceMode string, snapshot *appserver.ThreadReadSnapshot) bool {
@@ -639,6 +653,9 @@ func (s *Service) updateCurrentPanel(ctx context.Context, sender Sender, panel *
 
 func (s *Service) maybeUpdateRunNotice(ctx context.Context, sender Sender, panel *model.ThreadPanel, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) error {
 	if panel == nil || panel.RunNoticeMessageID == 0 || !shouldSendRunNotice(panel.SourceMode, snapshot) {
+		return nil
+	}
+	if isTerminalStatus(snapshot.LatestTurnStatus) {
 		return nil
 	}
 	text, fp := s.renderRunNotice(ctx, thread, snapshot, panel.SourceMode)

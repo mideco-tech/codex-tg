@@ -16,6 +16,7 @@ import (
 	"github.com/mideco-tech/codex-tg/internal/config"
 	"github.com/mideco-tech/codex-tg/internal/daemon"
 	"github.com/mideco-tech/codex-tg/internal/telegram"
+	"github.com/mideco-tech/codex-tg/internal/version"
 )
 
 func main() {
@@ -44,6 +45,9 @@ func run(args []string) error {
 		return runDoctor(cfg)
 	case "repair":
 		return runRepair(cfg)
+	case "version":
+		_, _ = fmt.Fprintf(os.Stdout, "ctr-go v%s\n", version.Version)
+		return nil
 	case "help", "--help", "-h":
 		printUsage(os.Stdout)
 		return nil
@@ -169,6 +173,7 @@ func printUsage(out *os.File) {
 	_, _ = fmt.Fprintln(out, "  ctr-go status")
 	_, _ = fmt.Fprintln(out, "  ctr-go doctor")
 	_, _ = fmt.Fprintln(out, "  ctr-go repair")
+	_, _ = fmt.Fprintln(out, "  ctr-go version")
 }
 
 func formatIDs(values []int64) string {
