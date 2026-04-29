@@ -1,9 +1,14 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1179,6 +1184,187 @@ func TestSettingsCallbacksMissingValueUseAuto(t *testing.T) {
 	}
 }
 
+func TestAppServerTransportMenuPersistsSelectionAndRemovesButtons(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/appserver_transport", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/appserver_transport) failed: %v", err)
+	}
+	token := callbackTokenForButton(response.Buttons, "unix")
+	if token == "" {
+		t.Fatalf("transport buttons = %#v, want unix option", response.Buttons)
+	}
+	callbackResponse, err := service.HandleCallback(ctx, 123456789, 0, 902, 123456789, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(transport select) failed: %v", err)
+	}
+	if callbackResponse == nil || !strings.Contains(callbackResponse.Text, "Transport saved.") {
+		t.Fatalf("callback response = %#v, want saved summary", callbackResponse)
+	}
+	if len(callbackResponse.Buttons) != 0 {
+		t.Fatalf("callback buttons = %#v, want choice buttons removed after selection", callbackResponse.Buttons)
+	}
+	mode, err := service.store.GetState(ctx, appServerTransportModeKey)
+	if err != nil {
+		t.Fatalf("GetState(transport mode) failed: %v", err)
+	}
+	if mode != appserver.TransportModeUnix {
+		t.Fatalf("stored transport mode = %q, want unix", mode)
+	}
+	bridgeEnabled, err := service.store.GetState(ctx, desktopBridgeEnabledKey)
+	if err != nil {
+		t.Fatalf("GetState(desktop bridge) failed: %v", err)
+	}
+	if bridgeEnabled != "false" {
+		t.Fatalf("desktop bridge enabled = %q, want false", bridgeEnabled)
+	}
+}
+
+func TestAppServerTransportCommandPersistsEndpoint(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/appserver_transport ws ws://127.0.0.1:9234", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/appserver_transport ws) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "Transport saved.") {
+		t.Fatalf("response = %#v, want saved summary", response)
+	}
+	mode, _ := service.store.GetState(ctx, appServerTransportModeKey)
+	endpoint, _ := service.store.GetState(ctx, appServerEndpointKey)
+	if mode != appserver.TransportModeWebSocket || endpoint != "ws://127.0.0.1:9234" {
+		t.Fatalf("state mode/endpoint = %q/%q, want ws endpoint", mode, endpoint)
+	}
+}
+
+func TestCodexStatusSnapshotShowsTransportAndRedactsEndpoints(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	privateEndpoint := "unix:///Users/private/.codex/app-server-control/app-server-control.sock"
+	if err := service.store.SetState(ctx, appServerEndpointKey, privateEndpoint); err != nil {
+		t.Fatalf("SetState(endpoint) failed: %v", err)
+	}
+	stub := &stubSession{
+		transportStatus: appserver.TransportStatus{
+			RequestedMode: appserver.TransportModeAuto,
+			ActiveMode:    appserver.TransportModeUnix,
+			Endpoint:      privateEndpoint,
+			ProbeErrors:   []string{"unix unix://<local-socket>: stat <local-socket>: no such file or directory"},
+		},
+		loadedThreads: []string{"thread-1", "thread-2"},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	text := service.CodexStatusSnapshot(ctx)
+	if !strings.Contains(text, "Codex app-server status") || !strings.Contains(text, "Active transport: unix unix://<local-socket>") {
+		t.Fatalf("status text = %q, want app-server unix status", text)
+	}
+	if !strings.Contains(text, "Loaded threads: 2") {
+		t.Fatalf("status text = %q, want loaded thread count", text)
+	}
+	if strings.Contains(text, "/Users/private") {
+		t.Fatalf("status leaked private endpoint: %s", text)
+	}
+}
+
+func TestDesktopBridgePairingBroadcastAndSteer(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("desktop bridge fake server uses unix sockets")
+	}
+
+	service := newTestService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	thread := model.Thread{ID: "bridge-thread", ActiveTurnID: "turn-1", CWD: "/tmp/project"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+	root, err := os.MkdirTemp("/tmp", "ctg-bridge-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	bridge := newDesktopBridge(service, DesktopBridgeOptions{
+		RuntimeDir: filepath.Join(root, "run"),
+		PairingDir: filepath.Join(root, "pair"),
+		ID:         "test-bridge",
+	})
+	if err := bridge.Start(ctx); err != nil {
+		t.Fatalf("bridge Start failed: %v", err)
+	}
+	defer bridge.Close()
+
+	pairingData, err := os.ReadFile(bridge.PairingPath())
+	if err != nil {
+		t.Fatalf("ReadFile(pairing) failed: %v", err)
+	}
+	var pairing map[string]any
+	if err := json.Unmarshal(pairingData, &pairing); err != nil {
+		t.Fatalf("pairing unmarshal failed: %v", err)
+	}
+	if pairing["socketPath"] != bridge.SocketPath() || pairing["extensionName"] != "codex-tg" {
+		t.Fatalf("pairing payload = %#v, want socketPath and extensionName", pairing)
+	}
+
+	conn, err := net.Dial("unix", bridge.SocketPath())
+	if err != nil {
+		t.Fatalf("Dial bridge failed: %v", err)
+	}
+	defer conn.Close()
+	scanner := bufio.NewScanner(conn)
+	if !scanner.Scan() {
+		t.Fatalf("missing initial bridge status: %v", scanner.Err())
+	}
+	if !strings.Contains(scanner.Text(), "client-status-changed") {
+		t.Fatalf("initial bridge line = %q", scanner.Text())
+	}
+	if status := bridge.Status(); status.ProtocolReady || status.StateLabel() != "registered/protocol unverified" {
+		t.Fatalf("initial bridge status = %#v, want connected but protocol unverified", status)
+	}
+
+	bridge.Broadcast(appserver.Event{Method: "thread/status/changed", Params: map[string]any{"threadId": "bridge-thread"}})
+	if !scanner.Scan() {
+		t.Fatalf("missing bridge broadcast: %v", scanner.Err())
+	}
+	if !strings.Contains(scanner.Text(), "thread-stream-state-changed") {
+		t.Fatalf("broadcast line = %q", scanner.Text())
+	}
+
+	_, err = conn.Write([]byte(`{"id":"1","event":"thread-follower-steer-turn","threadId":"bridge-thread","turnId":"turn-1","text":"from desktop"}` + "\n"))
+	if err != nil {
+		t.Fatalf("write steer failed: %v", err)
+	}
+	if !scanner.Scan() {
+		t.Fatalf("missing steer ack: %v", scanner.Err())
+	}
+	if !strings.Contains(scanner.Text(), `"ok":true`) {
+		t.Fatalf("steer ack = %q, want ok true", scanner.Text())
+	}
+	if status := bridge.Status(); !status.ProtocolReady || status.StateLabel() != "registered/connected" {
+		t.Fatalf("bridge status after steer = %#v, want protocol ready", status)
+	}
+	if len(stub.turnSteerCalls) != 1 {
+		t.Fatalf("turnSteerCalls = %#v, want one steer", stub.turnSteerCalls)
+	}
+	if got := stub.turnSteerCalls[0]; got.threadID != "bridge-thread" || got.turnID != "turn-1" || got.message != "from desktop" {
+		t.Fatalf("turn steer call = %#v", got)
+	}
+}
+
 func TestAnswerChoiceMissingTextDoesNotSendNil(t *testing.T) {
 	t.Parallel()
 
@@ -1311,6 +1497,8 @@ type stubSession struct {
 	threadListCalls     int
 	models              []appserver.ModelOption
 	collaborationModes  []appserver.CollaborationModeOption
+	transportStatus     appserver.TransportStatus
+	loadedThreads       []string
 	turnSteerErr        error
 	turnSteerCalls      []turnCall
 	turnStartCalls      []turnCall
@@ -1389,5 +1577,9 @@ func (s *stubSession) CollaborationModeList(ctx context.Context) ([]appserver.Co
 func (s *stubSession) RespondServerRequest(ctx context.Context, requestID string, result map[string]any) error {
 	s.respondRequestCalls = append(s.respondRequestCalls, respondRequestCall{requestID: requestID, result: result})
 	return nil
+}
+func (s *stubSession) TransportStatus() appserver.TransportStatus { return s.transportStatus }
+func (s *stubSession) ThreadLoadedList(ctx context.Context) ([]string, error) {
+	return append([]string(nil), s.loadedThreads...), nil
 }
 func (s *stubSession) StderrTail() []string { return nil }

@@ -9,7 +9,7 @@
 
 ## Consequences
 
-- `codex app-server` over stdio remains the only backend integration surface
+- `codex app-server` remains the only backend integration surface; ADR-012 expands the local transport choices beyond the original stdio-only implementation
 - the Go daemon owns bot polling, observer polling, delivery queue, and readiness
 - compatibility is product-level, not storage-level; Go owns its own schema
 - the Python oracle remains the behavior baseline, but Telegram observer/UI v2 may intentionally diverge where the product contract is changed by ADR

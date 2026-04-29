@@ -33,7 +33,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 
 ## Features
 
-- Thread-first routing over local `codex app-server` stdio.
+- Thread-first routing over local `codex app-server` transports: `auto`, `stdio`, loopback `ws`, local `unix`, and experimental `desktop_bridge`.
 - Global observer for foreign GUI/CLI runs, with polling fallback through `thread/read`.
 - Stable visual identity per thread: emoji marker plus project/thread/run chips.
 - Explicit `New run -> [User] -> [commentary] -> [Tool] -> [Output] -> [Final]` chronology with status on the live commentary/final card.
@@ -41,7 +41,16 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 - Final Card with Details pagination and on-demand Tools file export.
 - On-demand full log archive from Codex session JSONL.
 - SQLite-backed durable state for bindings, routes, callbacks, observer target, panels, and delivery metadata.
+- SQLite-backed App Server transport settings via `/settings`, `/appserver_transport`, and `/codex_status`.
 - Cross-platform Go daemon foundation for Windows, macOS, and Linux.
+
+## App Server Transport And GUI Visibility
+
+`codex-tg` executes Codex work only through `codex app-server`. The default `auto` mode probes a local `unix://` App Server control socket, then an explicit local endpoint, then falls back to the previous `stdio://` child-process mode.
+
+Telegram live updates work in all modes because the daemon is subscribed to its own App Server session. Codex Desktop GUI live visibility requires a shared App Server transport or the experimental Desktop Bridge attach path. In `stdio://` only mode, Desktop may discover persisted thread changes later, for example after refresh, focus, restart, or turn completion.
+
+Use `/settings` -> `App Server`, `/appserver_transport`, and `/codex_status` from Telegram to inspect or change the runtime mode. These settings are stored in SQLite daemon state, not in public env-only config.
 
 ## Platform Status
 
@@ -94,6 +103,7 @@ Telegram commands:
 - `/start`, `/help`
 - `/threads`, `/projects`, `/show`, `/bind`, `/reply`, `/plan`
 - `/settings`, `/model`, `/effort`
+- `/codex_status`, `/appserver_transport`
 - `/context`, `/whereami`
 - `/observe all`, `/observe off`
 - `/status`, `/repair`, `/stop`, `/approve`, `/deny`
@@ -178,5 +188,5 @@ Apache License 2.0. This keeps the project permissive for the community while al
 ## Operational Notes
 
 - Telegram long polling returns `409 Conflict` when another process consumes the same bot token.
-- Do not expose Codex App Server on a public interface. `codex-tg` is designed around local stdio.
+- Do not expose Codex App Server on a public interface. `ws://` transport is intentionally limited to loopback/local endpoints.
 - Keep bot tokens, Telegram sessions, SQLite databases, logs, and `.env` files out of git.

@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/eekstunt/telegramify-markdown-go v0.2.0
+	github.com/gorilla/websocket v1.5.3
 	modernc.org/sqlite v1.39.1
 )
 

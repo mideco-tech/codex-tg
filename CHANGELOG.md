@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added configurable App Server transport modes: `auto`, `stdio`, loopback `ws`, local `unix`, and experimental `desktop_bridge`.
+- Added `/settings` App Server menu, `/appserver_transport`, and `/codex_status` diagnostics backed by SQLite daemon state.
+- Added WebSocket and WebSocket-over-UDS JSON-RPC transports with auto-probe fallback to stdio.
+- Added experimental Desktop Bridge pairing and fake-client-testable JSONL message layer for bridge status, stream notifications, and `thread-follower-*` control requests.
+- Documented that Desktop GUI live visibility requires a shared transport or bridge; stdio-only remains Telegram-live but may only appear in Desktop after catch-up.
+
 ## v0.1.1 - 2026-04-29
 
 - Changed observer chronology so `New run` is an orientation card without run status.

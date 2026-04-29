@@ -33,6 +33,8 @@ type Session interface {
 	ModelList(ctx context.Context, includeHidden bool) ([]appserver.ModelOption, error)
 	CollaborationModeList(ctx context.Context) ([]appserver.CollaborationModeOption, error)
 	RespondServerRequest(ctx context.Context, requestID string, result map[string]any) error
+	TransportStatus() appserver.TransportStatus
+	ThreadLoadedList(ctx context.Context) ([]string, error)
 	StderrTail() []string
 }
 
@@ -77,6 +79,7 @@ type Service struct {
 	lastError     string
 	liveConnected bool
 	pollConnected bool
+	bridge        *DesktopBridge
 }
 
 const (
@@ -84,6 +87,10 @@ const (
 	collaborationModePlan     = "plan"
 	codexModelStateKey        = "codex.model"
 	codexReasoningStateKey    = "codex.reasoning_effort"
+	appServerTransportModeKey = "appserver.transport_mode"
+	appServerEndpointKey      = "appserver.endpoint"
+	desktopBridgeEnabledKey   = "desktop_bridge.enabled"
+	desktopBridgeModeKey      = "desktop_bridge.mode"
 )
 
 func New(cfg config.Config) (*Service, error) {
@@ -99,15 +106,38 @@ func New(cfg config.Config) (*Service, error) {
 		store: store,
 		phase: "created",
 	}
-	service.liveFactory = func() Session {
-		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout)
-	}
-	service.pollFactory = func() Session {
-		return appserver.NewClient(cfg.CodexBin, cfg.AppServerListen, cfg.DefaultCWD, cfg.RequestTimeout)
-	}
+	service.liveFactory = func() Session { return service.newAppServerClient(context.Background()) }
+	service.pollFactory = func() Session { return service.newAppServerClient(context.Background()) }
 	service.live = service.liveFactory()
 	service.poll = service.pollFactory()
 	return service, nil
+}
+
+func (s *Service) newAppServerClient(ctx context.Context) Session {
+	mode, endpoint, _ := s.appServerTransportSettings(ctx)
+	return appserver.NewClientWithOptions(appserver.ClientOptions{
+		CodexBin:       s.cfg.CodexBin,
+		ListenURL:      s.cfg.AppServerListen,
+		CWD:            s.cfg.DefaultCWD,
+		RequestTimeout: s.cfg.RequestTimeout,
+		TransportMode:  mode,
+		Endpoint:       endpoint,
+	})
+}
+
+func (s *Service) appServerTransportSettings(ctx context.Context) (string, string, bool) {
+	mode, _ := s.store.GetState(ctx, appServerTransportModeKey)
+	mode = appserver.NormalizeTransportMode(mode)
+	if mode == "" {
+		mode = appserver.TransportModeAuto
+	}
+	endpoint, _ := s.store.GetState(ctx, appServerEndpointKey)
+	bridgeRaw, _ := s.store.GetState(ctx, desktopBridgeEnabledKey)
+	bridgeEnabled, _ := strconv.ParseBool(strings.TrimSpace(bridgeRaw))
+	if mode == appserver.TransportModeDesktopBridge {
+		bridgeEnabled = true
+	}
+	return mode, strings.TrimSpace(endpoint), bridgeEnabled
 }
 
 func (s *Service) Close() error {
@@ -116,8 +146,10 @@ func (s *Service) Close() error {
 	started := s.started
 	live := s.live
 	poll := s.poll
+	bridge := s.bridge
 	s.started = false
 	s.cancel = nil
+	s.bridge = nil
 	s.mu.Unlock()
 	if started && cancel != nil {
 		cancel()
@@ -128,6 +160,9 @@ func (s *Service) Close() error {
 	}
 	if poll != nil {
 		_ = poll.Close()
+	}
+	if bridge != nil {
+		_ = bridge.Close()
 	}
 	return s.store.Close()
 }
@@ -167,6 +202,7 @@ func (s *Service) Start(ctx context.Context) error {
 	s.spawn(runCtx, s.pollLoop)
 	s.spawn(runCtx, s.deliveryLoop)
 	s.spawn(runCtx, s.controlLoop)
+	s.spawn(runCtx, s.desktopBridgeLoop)
 	return nil
 }
 
@@ -246,6 +282,97 @@ func (s *Service) StatusSnapshot(ctx context.Context, chatID, topicID int64) (st
 	return strings.Join(lines, "\n"), nil
 }
 
+func (s *Service) CodexStatusSnapshot(ctx context.Context) string {
+	mode, endpoint, bridgeEnabled := s.appServerTransportSettings(ctx)
+	status := s.primaryTransportStatus()
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	probes := appserver.ProbeTransports(probeCtx, "", endpoint)
+	cancel()
+
+	s.mu.RLock()
+	liveConnected := s.liveConnected
+	pollConnected := s.pollConnected
+	live := s.live
+	poll := s.poll
+	lastError := s.lastError
+	s.mu.RUnlock()
+
+	lines := []string{
+		"Codex app-server status",
+		fmt.Sprintf("Configured transport: %s", settingValueLabel(mode, appserver.TransportModeAuto)),
+		fmt.Sprintf("Configured endpoint: %s", settingValueLabel(appserver.RedactEndpoint(endpoint), "Auto")),
+		fmt.Sprintf("Live session: %s", boolLabel(liveConnected)),
+		fmt.Sprintf("Poll session: %s", boolLabel(pollConnected)),
+	}
+	if status.ActiveMode != "" {
+		lines = append(lines, fmt.Sprintf("Active transport: %s", appServerSettingLabel(status.ActiveMode, status.Endpoint, bridgeEnabled)))
+	}
+	if len(status.ProbeErrors) > 0 {
+		for _, probeErr := range status.ProbeErrors {
+			if sanitized := appserver.RedactTransportDiagnostic(probeErr); sanitized != "" {
+				lines = append(lines, fmt.Sprintf("Auto probe: %s", sanitized))
+			}
+		}
+	}
+	if len(probes) > 0 {
+		lines = append(lines, "Probes:")
+		for _, probe := range probes {
+			state := "not available"
+			detail := ""
+			if probe.Available {
+				state = "available"
+			} else if strings.TrimSpace(probe.Error) != "" {
+				detail = ": " + appserver.RedactTransportDiagnostic(probe.Error)
+			}
+			lines = append(lines, fmt.Sprintf("- %s %s -> %s%s", probe.Mode, appserver.RedactEndpoint(probe.Endpoint), state, detail))
+		}
+	}
+	loadedClient := live
+	if !liveConnected {
+		loadedClient = nil
+	}
+	if loadedClient == nil && pollConnected {
+		loadedClient = poll
+	}
+	if loadedClient != nil {
+		requestCtx, requestCancel := context.WithTimeout(ctx, 3*time.Second)
+		loaded, err := loadedClient.ThreadLoadedList(requestCtx)
+		requestCancel()
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("Loaded threads: unavailable (%s)", appserver.RedactTransportDiagnostic(err.Error())))
+		} else {
+			lines = append(lines, fmt.Sprintf("Loaded threads: %d", len(loaded)))
+		}
+	} else {
+		lines = append(lines, "Loaded threads: unavailable (no connected app-server session)")
+	}
+
+	bridgeStatus := s.desktopBridgeStatus()
+	if bridgeEnabled && !bridgeStatus.Enabled {
+		bridgeStatus.Enabled = true
+	}
+	if bridgeEnabled || bridgeStatus.Registered {
+		lines = append(lines, "Desktop Bridge:")
+		lines = append(lines, fmt.Sprintf("- enabled: %s", boolLabel(bridgeEnabled)))
+		lines = append(lines, fmt.Sprintf("- state: %s", bridgeStatus.StateLabel()))
+		lines = append(lines, fmt.Sprintf("- clients: %d", bridgeStatus.ConnectedClients))
+		if bridgeStatus.Protocol != "" {
+			lines = append(lines, fmt.Sprintf("- protocol: %s", bridgeStatus.Protocol))
+			lines = append(lines, fmt.Sprintf("- protocol ready: %s", boolLabel(bridgeStatus.ProtocolReady)))
+		}
+		if bridgeStatus.LastError != "" {
+			lines = append(lines, fmt.Sprintf("- last error: %s", appserver.RedactTransportDiagnostic(bridgeStatus.LastError)))
+		}
+	} else {
+		lines = append(lines, "Desktop Bridge: off")
+	}
+	lines = append(lines, fmt.Sprintf("GUI live visibility: %s", guiVisibilityExpectation(status, bridgeEnabled, bridgeStatus)))
+	if strings.TrimSpace(lastError) != "" {
+		lines = append(lines, fmt.Sprintf("Last error: %s", appserver.RedactTransportDiagnostic(lastError)))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (s *Service) HandleMessage(ctx context.Context, chatID, topicID, userID int64, text string, replyToMessageID int64) (*DirectResponse, error) {
 	if !s.IsAllowed(userID, chatID) {
 		return nil, nil
@@ -286,10 +413,14 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Model", s.codexModelMenu)
 	case "settings_reasoning_menu":
 		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Reasoning", s.codexReasoningMenu)
+	case "settings_appserver_menu":
+		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "App server", s.appServerSettingsMenu)
 	case "settings_model_set":
 		return s.setCodexModel(ctx, chatID, topicID, messageID, payload)
 	case "settings_reasoning_set":
 		return s.setCodexReasoningEffort(ctx, chatID, topicID, messageID, payload)
+	case "settings_transport_set":
+		return s.setAppServerTransport(ctx, chatID, topicID, messageID, payload)
 	case "show_thread":
 		return s.showThread(ctx, chatID, topicID, route.ThreadID, true)
 	case "show_context":
@@ -474,6 +605,7 @@ func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appse
 	if threadID != "" {
 		_ = s.store.MarkLiveEvent(ctx, threadID, model.NowString())
 	}
+	s.broadcastDesktopBridgeEvent(event)
 	if approval, ok := appserver.PendingApprovalFromServerRequest(event); ok {
 		_ = s.store.SavePendingApproval(ctx, *approval)
 		if approval.ThreadID != "" {
@@ -810,12 +942,15 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 	case "/start":
 		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <thread> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <thread> <text>\n/settings\n/model\n/effort\n/codex_status\n/appserver_transport [mode] [endpoint]\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
 			return nil, err
 		}
+		return &DirectResponse{Text: text}, nil
+	case "/codex_status":
+		text := s.CodexStatusSnapshot(ctx)
 		return &DirectResponse{Text: text}, nil
 	case "/context", "/whereami":
 		text, err := s.contextCard(ctx, chatID, topicID)
@@ -857,6 +992,8 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		return s.codexModelMenu(ctx)
 	case "/effort", "/reasoning", "/reasoning_effort":
 		return s.codexReasoningMenu(ctx)
+	case "/appserver_transport":
+		return s.handleAppServerTransportCommand(ctx, rest)
 	case "/threads":
 		return s.threadsOverview(ctx, rest)
 	case "/projects":
@@ -940,10 +1077,12 @@ func (s *Service) handlePlainText(ctx context.Context, chatID, topicID int64, te
 func (s *Service) codexSettingsOverview(ctx context.Context) (*DirectResponse, error) {
 	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
 	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	mode, endpoint, bridgeEnabled := s.appServerTransportSettings(ctx)
 	lines := []string{
 		"Codex settings",
 		fmt.Sprintf("Model: %s", settingValueLabel(modelValue, "Auto")),
 		fmt.Sprintf("Reasoning effort: %s", settingValueLabel(reasoningValue, "Auto")),
+		fmt.Sprintf("App server: %s", appServerSettingLabel(mode, endpoint, bridgeEnabled)),
 		"",
 		"Used for Telegram-started Plan Mode turns.",
 	}
@@ -951,6 +1090,9 @@ func (s *Service) codexSettingsOverview(ctx context.Context) (*DirectResponse, e
 		{
 			s.callbackButton(ctx, "Model", "settings_model_menu", "settings", "", "", nil),
 			s.callbackButton(ctx, "Reasoning", "settings_reasoning_menu", "settings", "", "", nil),
+		},
+		{
+			s.callbackButton(ctx, "App Server", "settings_appserver_menu", "settings", "", "", nil),
 		},
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
@@ -1016,6 +1158,36 @@ func (s *Service) codexReasoningMenu(ctx context.Context) (*DirectResponse, erro
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
 }
 
+func (s *Service) appServerSettingsMenu(ctx context.Context) (*DirectResponse, error) {
+	mode, endpoint, bridgeEnabled := s.appServerTransportSettings(ctx)
+	lines := []string{
+		"Codex app-server",
+		fmt.Sprintf("Transport: %s", settingValueLabel(mode, appserver.TransportModeAuto)),
+		fmt.Sprintf("Endpoint: %s", settingValueLabel(appserver.RedactEndpoint(endpoint), "Auto")),
+		fmt.Sprintf("Desktop Bridge: %s", boolLabel(bridgeEnabled)),
+	}
+	if status := s.primaryTransportStatus(); status.ActiveMode != "" {
+		lines = append(lines, fmt.Sprintf("Active: %s", appServerSettingLabel(status.ActiveMode, status.Endpoint, bridgeEnabled)))
+	}
+	buttons := [][]model.ButtonSpec{
+		{
+			s.callbackButton(ctx, selectedButtonLabel("Auto", mode == appserver.TransportModeAuto), "settings_transport_set", "settings", "", "", map[string]any{"value": appserver.TransportModeAuto}),
+			s.callbackButton(ctx, selectedButtonLabel("stdio", mode == appserver.TransportModeStdio), "settings_transport_set", "settings", "", "", map[string]any{"value": appserver.TransportModeStdio}),
+		},
+		{
+			s.callbackButton(ctx, selectedButtonLabel("unix", mode == appserver.TransportModeUnix), "settings_transport_set", "settings", "", "", map[string]any{"value": appserver.TransportModeUnix}),
+			s.callbackButton(ctx, selectedButtonLabel("ws", mode == appserver.TransportModeWebSocket), "settings_transport_set", "settings", "", "", map[string]any{"value": appserver.TransportModeWebSocket}),
+		},
+		{
+			s.callbackButton(ctx, selectedButtonLabel("desktop_bridge", mode == appserver.TransportModeDesktopBridge), "settings_transport_set", "settings", "", "", map[string]any{"value": appserver.TransportModeDesktopBridge}),
+		},
+		{
+			s.callbackButton(ctx, "Settings", "settings_overview", "settings", "", "", nil),
+		},
+	}
+	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
+}
+
 func (s *Service) setCodexModel(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
 	value := payloadMapString(payload, "value")
 	if value != "" {
@@ -1051,10 +1223,12 @@ func (s *Service) setCodexReasoningEffort(ctx context.Context, chatID, topicID, 
 func (s *Service) codexSettingsSaved(ctx context.Context, status string) (*DirectResponse, error) {
 	modelValue, _ := s.store.GetState(ctx, codexModelStateKey)
 	reasoningValue, _ := s.store.GetState(ctx, codexReasoningStateKey)
+	mode, endpoint, bridgeEnabled := s.appServerTransportSettings(ctx)
 	lines := []string{
 		"Codex settings",
 		fmt.Sprintf("Model: %s", settingValueLabel(modelValue, "Auto")),
 		fmt.Sprintf("Reasoning effort: %s", settingValueLabel(reasoningValue, "Auto")),
+		fmt.Sprintf("App server: %s", appServerSettingLabel(mode, endpoint, bridgeEnabled)),
 	}
 	if strings.TrimSpace(status) != "" {
 		lines = append(lines, "", status)
@@ -1083,6 +1257,58 @@ func (s *Service) editOrSendSettingsResponse(ctx context.Context, chatID, topicI
 	return response, nil
 }
 
+func (s *Service) setAppServerTransport(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
+	value := appserver.NormalizeTransportMode(payloadMapString(payload, "value"))
+	if value == "" {
+		return &DirectResponse{CallbackText: "Transport option is stale.", Text: "This app-server transport is not supported. Use /settings to refresh."}, nil
+	}
+	if err := s.store.SetState(ctx, appServerTransportModeKey, value); err != nil {
+		return nil, err
+	}
+	bridgeEnabled := value == appserver.TransportModeDesktopBridge
+	if err := s.store.SetState(ctx, desktopBridgeEnabledKey, strconv.FormatBool(bridgeEnabled)); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(value) == appserver.TransportModeDesktopBridge {
+		if err := s.store.SetState(ctx, desktopBridgeModeKey, appserver.TransportModeAuto); err != nil {
+			return nil, err
+		}
+	}
+	_ = s.RequestRepair(ctx, "appserver_transport_changed")
+	return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Transport saved.", func(ctx context.Context) (*DirectResponse, error) {
+		return s.codexSettingsSaved(ctx, "Transport saved. App-server sessions will restart.")
+	})
+}
+
+func (s *Service) handleAppServerTransportCommand(ctx context.Context, rest string) (*DirectResponse, error) {
+	fields := strings.Fields(strings.TrimSpace(rest))
+	if len(fields) == 0 {
+		return s.appServerSettingsMenu(ctx)
+	}
+	mode := appserver.NormalizeTransportMode(fields[0])
+	if mode == "" {
+		return &DirectResponse{Text: "Usage: /appserver_transport auto|stdio|unix|ws|desktop_bridge [endpoint]"}, nil
+	}
+	if err := s.store.SetState(ctx, appServerTransportModeKey, mode); err != nil {
+		return nil, err
+	}
+	if len(fields) > 1 {
+		endpoint := strings.TrimSpace(strings.Join(fields[1:], " "))
+		if strings.EqualFold(endpoint, "clear") || endpoint == "-" {
+			endpoint = ""
+		}
+		if err := s.store.SetState(ctx, appServerEndpointKey, endpoint); err != nil {
+			return nil, err
+		}
+	}
+	bridgeEnabled := mode == appserver.TransportModeDesktopBridge
+	if err := s.store.SetState(ctx, desktopBridgeEnabledKey, strconv.FormatBool(bridgeEnabled)); err != nil {
+		return nil, err
+	}
+	_ = s.RequestRepair(ctx, "appserver_transport_command")
+	return s.codexSettingsSaved(ctx, "Transport saved. App-server sessions will restart.")
+}
+
 func (s *Service) codexModels(ctx context.Context) ([]appserver.ModelOption, error) {
 	client := s.settingsClient()
 	if client == nil {
@@ -1103,6 +1329,26 @@ func (s *Service) settingsClient() Session {
 		return s.poll
 	}
 	return nil
+}
+
+func (s *Service) primaryTransportStatus() appserver.TransportStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.liveConnected && s.live != nil {
+		return s.live.TransportStatus()
+	}
+	if s.pollConnected && s.poll != nil {
+		return s.poll.TransportStatus()
+	}
+	if s.live != nil {
+		if status := s.live.TransportStatus(); status.ActiveMode != "" || status.RequestedMode != "" {
+			return status
+		}
+	}
+	if s.poll != nil {
+		return s.poll.TransportStatus()
+	}
+	return appserver.TransportStatus{}
 }
 
 func selectedModelOption(models []appserver.ModelOption, value string) (appserver.ModelOption, bool) {
@@ -1147,6 +1393,28 @@ func settingValueLabel(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func boolLabel(value bool) string {
+	if value {
+		return "on"
+	}
+	return "off"
+}
+
+func appServerSettingLabel(mode, endpoint string, bridgeEnabled bool) string {
+	mode = appserver.NormalizeTransportMode(mode)
+	if mode == "" {
+		mode = appserver.TransportModeAuto
+	}
+	parts := []string{mode}
+	if redacted := appserver.RedactEndpoint(endpoint); redacted != "" && redacted != "stdio://" {
+		parts = append(parts, redacted)
+	}
+	if bridgeEnabled && mode != appserver.TransportModeDesktopBridge {
+		parts = append(parts, "bridge:on")
+	}
+	return strings.Join(parts, " ")
 }
 
 func selectedButtonLabel(label string, selected bool) string {

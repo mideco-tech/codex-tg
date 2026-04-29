@@ -1,16 +1,11 @@
 package appserver
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,36 +50,44 @@ type rpcResponse struct {
 }
 
 type Client struct {
-	codexBin       string
-	listenURL      string
-	cwd            string
+	options        ClientOptions
 	requestTimeout time.Duration
 
-	mu             sync.Mutex
-	cmd            *exec.Cmd
-	stdin          io.WriteCloser
-	stdout         io.ReadCloser
-	stderr         io.ReadCloser
-	pending        map[uint64]chan rpcResponse
-	subscribers    []chan Event
-	nextID         uint64
-	stderrLines    []string
-	started        bool
-	readerDone     chan struct{}
-	stderrDone     chan struct{}
-	serverRequests map[string]map[string]any
+	mu              sync.Mutex
+	transport       rpcTransport
+	transportStatus TransportStatus
+	pending         map[uint64]chan rpcResponse
+	subscribers     []chan Event
+	nextID          uint64
+	started         bool
+	readerDone      chan struct{}
+	serverRequests  map[string]map[string]any
 }
 
 func NewClient(codexBin, listenURL, cwd string, requestTimeout time.Duration) *Client {
+	mode := modeFromEndpoint(strings.TrimSpace(listenURL))
+	if strings.TrimSpace(listenURL) == "" || strings.TrimSpace(listenURL) == "stdio://" {
+		mode = TransportModeStdio
+	}
+	return NewClientWithOptions(ClientOptions{
+		CodexBin:       codexBin,
+		ListenURL:      listenURL,
+		CWD:            cwd,
+		RequestTimeout: requestTimeout,
+		TransportMode:  mode,
+	})
+}
+
+func NewClientWithOptions(options ClientOptions) *Client {
+	if options.RequestTimeout <= 0 {
+		options.RequestTimeout = 30 * time.Second
+	}
 	return &Client{
-		codexBin:       codexBin,
-		listenURL:      listenURL,
-		cwd:            cwd,
-		requestTimeout: requestTimeout,
+		options:        options,
+		requestTimeout: options.RequestTimeout,
 		pending:        map[uint64]chan rpcResponse{},
 		serverRequests: map[string]map[string]any{},
 		readerDone:     make(chan struct{}),
-		stderrDone:     make(chan struct{}),
 	}
 }
 
@@ -94,41 +97,26 @@ func (c *Client) Start(ctx context.Context) error {
 		c.mu.Unlock()
 		return nil
 	}
-	cmd, err := c.buildCommand()
-	if err != nil {
-		c.mu.Unlock()
-		return err
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		c.mu.Unlock()
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		c.mu.Unlock()
-		return err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		c.mu.Unlock()
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		c.mu.Unlock()
-		return err
-	}
-	c.cmd = cmd
-	c.stdin = stdin
-	c.stdout = stdout
-	c.stderr = stderr
-	c.started = true
-	c.readerDone = make(chan struct{})
-	c.stderrDone = make(chan struct{})
 	c.mu.Unlock()
 
-	go c.readStdout()
-	go c.readStderr()
+	transport, status, err := c.connectTransport(ctx)
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	if c.started {
+		c.mu.Unlock()
+		_ = transport.Close()
+		return nil
+	}
+	c.transport = transport
+	c.transportStatus = status
+	c.started = true
+	c.readerDone = make(chan struct{})
+	c.mu.Unlock()
+
+	go c.readLoop()
 	if _, err := c.Request(ctx, "initialize", map[string]any{
 		"capabilities": map[string]any{"experimentalApi": true},
 		"clientInfo": map[string]any{
@@ -137,9 +125,45 @@ func (c *Client) Start(ctx context.Context) error {
 			"version": version.Version,
 		},
 	}); err != nil {
+		_ = c.Close()
 		return err
 	}
 	return c.Notify(ctx, "initialized", nil)
+}
+
+func (c *Client) connectTransport(ctx context.Context) (rpcTransport, TransportStatus, error) {
+	options := c.options
+	mode := NormalizeTransportMode(options.TransportMode)
+	if mode == "" {
+		mode = modeFromEndpoint(strings.TrimSpace(options.ListenURL))
+		if mode == TransportModeStdio && strings.TrimSpace(options.ListenURL) == "" {
+			mode = TransportModeAuto
+		}
+	}
+	status := TransportStatus{RequestedMode: mode}
+	switch mode {
+	case TransportModeAuto, TransportModeDesktopBridge:
+		transport, errorsOut, err := connectAutoTransport(ctx, options.CodexBin, options.ListenURL, options.CWD, options.Endpoint)
+		status.ProbeErrors = errorsOut
+		if err != nil {
+			return nil, status, err
+		}
+		status.ActiveMode = transport.Name()
+		status.Endpoint = transport.Endpoint()
+		return transport, status, nil
+	default:
+		transport, err := transportForMode(mode, options.CodexBin, options.ListenURL, options.CWD, options.Endpoint)
+		if err != nil {
+			return nil, status, err
+		}
+		if err := transport.Start(ctx); err != nil {
+			status.ProbeErrors = []string{err.Error()}
+			return nil, status, err
+		}
+		status.ActiveMode = transport.Name()
+		status.Endpoint = transport.Endpoint()
+		return transport, status, nil
+	}
 }
 
 func (c *Client) Close() error {
@@ -148,20 +172,13 @@ func (c *Client) Close() error {
 		c.mu.Unlock()
 		return nil
 	}
-	cmd := c.cmd
-	stdin := c.stdin
+	transport := c.transport
 	pending := c.pending
 	c.pending = map[uint64]chan rpcResponse{}
 	c.started = false
-	c.cmd = nil
-	c.stdin = nil
-	c.stdout = nil
-	c.stderr = nil
+	c.transport = nil
 	c.mu.Unlock()
 
-	if stdin != nil {
-		_ = stdin.Close()
-	}
 	for _, ch := range pending {
 		select {
 		case ch <- rpcResponse{Error: errors.New("app-server closed before response")}:
@@ -169,9 +186,8 @@ func (c *Client) Close() error {
 		}
 		close(ch)
 	}
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+	if transport != nil {
+		return transport.Close()
 	}
 	return nil
 }
@@ -186,7 +202,7 @@ func (c *Client) Subscribe() <-chan Event {
 
 func (c *Client) Request(ctx context.Context, method string, params map[string]any) (any, error) {
 	c.mu.Lock()
-	if !c.started || c.stdin == nil {
+	if !c.started || c.transport == nil {
 		c.mu.Unlock()
 		return nil, errors.New("app-server is not running")
 	}
@@ -194,7 +210,6 @@ func (c *Client) Request(ctx context.Context, method string, params map[string]a
 	id := c.nextID
 	reply := make(chan rpcResponse, 1)
 	c.pending[id] = reply
-	stdin := c.stdin
 	c.mu.Unlock()
 
 	message := map[string]any{
@@ -209,7 +224,7 @@ func (c *Client) Request(ctx context.Context, method string, params map[string]a
 	if err != nil {
 		return nil, err
 	}
-	if _, err := io.WriteString(stdin, string(payload)+"\n"); err != nil {
+	if err := c.send(ctx, payload); err != nil {
 		return nil, err
 	}
 
@@ -242,11 +257,10 @@ func (c *Client) Request(ctx context.Context, method string, params map[string]a
 
 func (c *Client) Notify(ctx context.Context, method string, params map[string]any) error {
 	c.mu.Lock()
-	if !c.started || c.stdin == nil {
+	if !c.started || c.transport == nil {
 		c.mu.Unlock()
 		return errors.New("app-server is not running")
 	}
-	stdin := c.stdin
 	c.mu.Unlock()
 	message := map[string]any{
 		"jsonrpc": "2.0",
@@ -259,17 +273,15 @@ func (c *Client) Notify(ctx context.Context, method string, params map[string]an
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(stdin, string(payload)+"\n")
-	return err
+	return c.send(ctx, payload)
 }
 
 func (c *Client) RespondServerRequest(ctx context.Context, requestID string, result map[string]any) error {
 	c.mu.Lock()
-	if !c.started || c.stdin == nil {
+	if !c.started || c.transport == nil {
 		c.mu.Unlock()
 		return errors.New("app-server is not running")
 	}
-	stdin := c.stdin
 	delete(c.serverRequests, requestID)
 	c.mu.Unlock()
 	payload, err := json.Marshal(map[string]any{
@@ -280,8 +292,17 @@ func (c *Client) RespondServerRequest(ctx context.Context, requestID string, res
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(stdin, string(payload)+"\n")
-	return err
+	return c.send(ctx, payload)
+}
+
+func (c *Client) send(ctx context.Context, payload []byte) error {
+	c.mu.Lock()
+	transport := c.transport
+	c.mu.Unlock()
+	if transport == nil {
+		return errors.New("app-server is not running")
+	}
+	return transport.Send(ctx, payload)
 }
 
 func (c *Client) ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error) {
@@ -593,72 +614,68 @@ func (c *Client) TurnSteer(ctx context.Context, threadID, turnID, message string
 func (c *Client) StderrTail() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]string, len(c.stderrLines))
-	copy(out, c.stderrLines)
-	return out
+	if c.transport == nil {
+		return nil
+	}
+	return c.transport.StderrTail()
 }
 
-func (c *Client) buildCommand() (*exec.Cmd, error) {
-	executable, err := exec.LookPath(c.codexBin)
+func (c *Client) TransportStatus() TransportStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	status := c.transportStatus
+	status.ProbeErrors = append([]string(nil), c.transportStatus.ProbeErrors...)
+	return status
+}
+
+func (c *Client) ThreadLoadedList(ctx context.Context) ([]string, error) {
+	result, err := c.Request(ctx, "thread/loaded/list", map[string]any{})
 	if err != nil {
-		executable = c.codexBin
+		return nil, err
 	}
-	if runtime.GOOS == "windows" {
-		ext := strings.ToLower(filepath.Ext(executable))
-		if ext == ".cmd" || ext == ".bat" {
-			command := fmt.Sprintf("%s app-server --listen %s", executable, c.listenURL)
-			cmd := exec.Command(os.Getenv("ComSpec"), "/d", "/c", command)
-			cmd.Dir = c.cwd
-			return cmd, nil
+	payload := asMap(result)
+	items, _ := payload["data"].([]any)
+	if items == nil {
+		items, _ = payload["threads"].([]any)
+	}
+	if items == nil {
+		items, _ = payload["items"].([]any)
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		text := strings.TrimSpace(stringValue(item, ""))
+		if text == "" {
+			text = strings.TrimSpace(stringValue(asMap(item)["id"], ""))
+		}
+		if text != "" {
+			out = append(out, text)
 		}
 	}
-	cmd := exec.Command(executable, "app-server", "--listen", c.listenURL)
-	cmd.Dir = c.cwd
-	return cmd, nil
+	return out, nil
 }
 
-func (c *Client) readStdout() {
+func (c *Client) readLoop() {
 	defer close(c.readerDone)
-	c.mu.Lock()
-	stdout := c.stdout
-	c.mu.Unlock()
-	if stdout == nil {
-		return
-	}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	for {
+		c.mu.Lock()
+		transport := c.transport
+		c.mu.Unlock()
+		if transport == nil {
+			return
+		}
+		line, err := transport.Recv(context.Background())
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"transport": transport.Name(), "error": err.Error()}})
+			}
+			return
+		}
 		var payload map[string]any
 		if err := json.Unmarshal(line, &payload); err != nil {
 			c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"line": string(line), "error": err.Error()}})
 			continue
 		}
 		c.handlePayload(payload)
-	}
-	if err := scanner.Err(); err != nil {
-		c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdout", "error": err.Error()}})
-	}
-}
-
-func (c *Client) readStderr() {
-	defer close(c.stderrDone)
-	c.mu.Lock()
-	stderr := c.stderr
-	c.mu.Unlock()
-	if stderr == nil {
-		return
-	}
-	scanner := bufio.NewScanner(stderr)
-	scanner.Buffer(make([]byte, 0, 512), 64*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		c.mu.Lock()
-		c.stderrLines = append(c.stderrLines, line)
-		if len(c.stderrLines) > 100 {
-			c.stderrLines = c.stderrLines[len(c.stderrLines)-100:]
-		}
-		c.mu.Unlock()
 	}
 }
 

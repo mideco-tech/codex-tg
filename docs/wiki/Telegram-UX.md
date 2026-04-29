@@ -29,9 +29,13 @@ When Codex asks for input, the bridge renders a separate routeable `[Plan]` prom
 
 ## Codex Settings
 
-`/settings`, `/model`, and `/effort` expose Telegram button menus for model selection and reasoning effort used by Telegram-started collaboration-mode turns. The selections are stored in SQLite daemon state and are not configured through public env vars.
+`/settings`, `/model`, and `/effort` expose Telegram button menus for model selection and reasoning effort used by Telegram-started collaboration-mode turns. `/settings` also includes an App Server menu for selecting `auto`, `stdio`, `unix`, `ws`, or experimental `desktop_bridge`.
 
-After a model or reasoning-effort selection, the menu message is edited into a compact settings summary without inline choice buttons. Use `/settings`, `/model`, or `/effort` to reopen the menus.
+The selections are stored in SQLite daemon state and are not configured through public env vars.
+
+After a model, reasoning-effort, or App Server transport selection, the menu message is edited into a compact settings summary without inline choice buttons. Use `/settings`, `/model`, `/effort`, or `/appserver_transport` to reopen or change the menus.
+
+`/codex_status` is the detailed transport diagnostic. It reports active transport, safe probe results, Desktop Bridge state, and whether Codex GUI live visibility is expected from the current mode.
 
 ## Exports
 

@@ -8,7 +8,8 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 
 ## Core Decisions
 
-- Backend integration surface is only `codex app-server` over stdio.
+- Backend integration surface is only `codex app-server` over local transports: `auto`, `stdio`, loopback `ws`, local `unix`, and experimental `desktop_bridge`.
+- `stdio` remains the fallback transport. Desktop Bridge is a visibility/control-plane adapter, not a second runtime backbone.
 - Durable identity is `threadId`; Telegram chat/topic is only an input and rendering surface.
 - Live observer events come from the daemon session; foreign GUI/CLI activity must also be covered by polling `thread/read`.
 - Startup must remain non-blocking; never put full thread sync into synchronous startup.
@@ -28,6 +29,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Plan Mode waiting input is a separate routeable `[Plan]` prompt-card. Buttons are allowed only for structured choices provided by Codex.
 - Telegram-originated Plan Mode starts must pass App Server `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
 - `/model` and `/effort` are Telegram button menus for collaboration-mode model settings. Persist selections in SQLite, not env-only local config. After a selection, remove the inline choice buttons from the edited message.
+- `/settings` includes an App Server menu for `auto`, `stdio`, `unix`, `ws`, and `desktop_bridge`. Persist selections in SQLite, not env-only local config. After a selection, remove the inline choice buttons from the edited message.
 - Replies to active turns should steer the active turn. If steering is rejected while the thread still looks active, do not start a parallel turn.
 - Every observer-visible message must include the shared identity header: emoji marker, project, thread, `T:`, `R:`, and kind.
 - Emoji markers are visual hints only. Persisted message routes and callback tokens are the routing authority.
@@ -42,7 +44,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 ## Repository Layout
 
 - `cmd/ctr-go/` daemon CLI entrypoint.
-- `internal/appserver/` JSON-RPC stdio client and snapshot normalization.
+- `internal/appserver/` JSON-RPC client transports and snapshot normalization.
 - `internal/config/` env-driven config.
 - `internal/daemon/` runtime orchestration, observer, panels, callbacks, log exports.
 - `internal/model/` shared types.

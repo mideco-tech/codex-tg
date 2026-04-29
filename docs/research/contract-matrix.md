@@ -21,6 +21,8 @@ This file now serves two purposes:
 - `/settings`
 - `/model`
 - `/effort`
+- `/codex_status`
+- `/appserver_transport`
 - `/new [project] <prompt>`
 - `/context`
 - `/whereami`
@@ -53,7 +55,8 @@ This file now serves two purposes:
 - `[Plan]` buttons are structured-only: they come from Codex `choices/options/suggestions/responses`, never from bridge heuristics.
 - Telegram-originated Plan Mode starts use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
 - `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
-- After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
+- `/settings` includes an App Server transport menu backed by SQLite daemon state.
+- After a model, reasoning-effort, or transport selection, the edited settings message removes inline choice buttons.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
 - Replies to active turns steer the active turn. If steering is rejected while the thread still looks active, the bridge must not create a parallel `turn/start`.
 - All observer/card messages carry a visual identity header: `emoji [Project] [Thread] [T:thread] [R:run] [Kind]`.
