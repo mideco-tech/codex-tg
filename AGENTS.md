@@ -76,7 +76,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Telegram-originated Plan Mode starts must pass App Server `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
 - `/model` and `/effort` are Telegram button menus for collaboration-mode model settings. Persist selections in SQLite, not env-only local config. After a selection, remove the inline choice buttons from the edited message.
 - Replies to active turns should steer the active turn. If steering is rejected while the thread still looks active, do not start a parallel turn.
-- Stale active-turn ghosts are different: if `thread/read` exposes a final answer or `turn/steer` says `no active turn to steer`, follow ADR-012 and allow a new `turn/start` after re-read instead of returning a false parallel-turn warning.
+- Stale active-turn ghosts are different: if `thread/read` exposes a final answer or `turn/steer` says `no active turn to steer`, follow the branch's lifecycle ADR or contract note when present and allow a new `turn/start` after re-read instead of returning a false parallel-turn warning.
 - Every observer-visible message must include the shared identity header: emoji marker, project, thread, `T:`, `R:`, and kind.
 - Emoji markers are visual hints only. Persisted message routes and callback tokens are the routing authority.
 
@@ -111,7 +111,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Keep tests deterministic, isolated, and runnable without manual setup.
 - If a check cannot be run, say exactly why and what should be run manually.
 - For feature/test context before changing Telegram routing, observer panels, Plan Mode, diagnostics, Telegram rendering, or lifecycle recovery, read `docs/testing/regression-map.md` and the ADR named there when present.
-- Behavior changes need the matching ADR or contract note, regression-map/test anchors, and validation notes when live Telegram was used.
+- Behavior changes need the matching ADR or contract note, regression-map/test anchors when present, and validation notes when live Telegram was used.
 
 ## Branch, Commit, And Release Discipline
 
