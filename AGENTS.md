@@ -12,12 +12,30 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 
 ## Working Mode
 
-- First understand the current design. Read nearby code, tests, ADRs, and `docs/testing/regression-map.md` before editing.
+- First understand the current design. Read nearby code, tests, ADRs, and `docs/testing/regression-map.md` when it exists before editing.
 - Do not treat a vague request as enough context. Ask focused questions when requirements, constraints, or tradeoffs are unclear and cannot be discovered safely.
 - Prefer small steps: inspect -> plan -> test -> implement -> refactor -> validate.
 - Do not generate large rewrites, broad refactors, or speculative frameworks unless the task explicitly requires them.
 - Build what is needed now. Avoid adding libraries, build tools, abstractions, or cross-platform machinery without an immediate reason.
 - For this operator, write working plans, handoffs, and status updates in Russian unless asked otherwise. Public README, wiki, demo, release notes, and GitHub-facing docs may stay English-first.
+
+## Agent Workflow Kernel
+
+- Do not start coding vague work. For unclear features, run alignment first: ask focused questions, lock goal, non-goals, UX, data, tests, and acceptance.
+- Feature work needs a destination before implementation: a short issue, feature brief, or equivalent written target.
+- Slice vertically. Prefer one small end-to-end behavior over horizontal phases such as storage first, daemon later, UI last.
+- Use TDD for non-trivial behavior changes and bug fixes: failing or updated test, minimal implementation, refactor, targeted checks.
+- Use fresh-context review for meaningful changes. The reviewer should inspect issue/brief, diff, tests, ADR/rules, and validation output, not the implementation chat.
+- Human/live QA remains required for Telegram-facing behavior when a live contour is available.
+- After compaction, context reset, or handoff, reread this file first, then pull only the docs called out by the Context Pull Map.
+
+## Context Pull Map
+
+- Telegram UI, routing, observer panels, lifecycle, Plan Mode, diagnostics, or rendering: read `docs/testing/regression-map.md` and the ADR named there when present.
+- Public command behavior or Telegram product contract: read `docs/research/contract-matrix.md` when present.
+- New feature planning, bugfix shaping, or review handoff: read `docs/process/agent-workflow.md` and the related template when present.
+- Release, README, demo, or public positioning work: read README plus relevant `docs/wiki/*`, `docs/demo/*`, `CONTRIBUTING.md`, and `SECURITY.md` when present.
+- If a referenced document is absent in the current branch, do not invent it or add broken links. Use this `AGENTS.md`, nearby code/tests, and existing ADRs as the source of truth.
 
 ## Core Decisions
 
@@ -92,7 +110,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Test public behavior through stable interfaces. Mock only external boundaries or slow/non-deterministic dependencies.
 - Keep tests deterministic, isolated, and runnable without manual setup.
 - If a check cannot be run, say exactly why and what should be run manually.
-- For feature/test context before changing Telegram routing, observer panels, Plan Mode, diagnostics, Telegram rendering, or lifecycle recovery, read `docs/testing/regression-map.md` and the ADR named there.
+- For feature/test context before changing Telegram routing, observer panels, Plan Mode, diagnostics, Telegram rendering, or lifecycle recovery, read `docs/testing/regression-map.md` and the ADR named there when present.
 - Behavior changes need the matching ADR or contract note, regression-map/test anchors, and validation notes when live Telegram was used.
 
 ## Branch, Commit, And Release Discipline
