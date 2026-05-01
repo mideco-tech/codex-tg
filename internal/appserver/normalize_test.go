@@ -479,3 +479,51 @@ func TestNormalizeLiveNotificationIgnoresCommentaryAgentMessageFinalClassificati
 		t.Fatalf("events = %#v, want no observer events", events)
 	}
 }
+
+func TestToolSnapshotFromLiveNotificationMapsRunningCommand(t *testing.T) {
+	t.Parallel()
+
+	thread := model.Thread{
+		ID:          "thread-1",
+		Title:       "Observer smoke",
+		ProjectName: "Codex",
+	}
+	snapshot, ok := ToolSnapshotFromLiveNotification(Event{
+		Channel: "notification",
+		Method:  "item/started",
+		Params: map[string]any{
+			"threadId": "thread-1",
+			"turnId":   "turn-9",
+			"item": map[string]any{
+				"id":      "cmd-slow",
+				"type":    "commandExecution",
+				"command": "sleep 20; printf 'slow-command-done\\n'",
+				"status":  "running",
+			},
+		},
+	}, thread)
+	if !ok {
+		t.Fatal("ToolSnapshotFromLiveNotification returned ok=false")
+	}
+	if got, want := snapshot.Thread.ID, "thread-1"; got != want {
+		t.Fatalf("Thread.ID = %q, want %q", got, want)
+	}
+	if got, want := snapshot.Thread.ActiveTurnID, "turn-9"; got != want {
+		t.Fatalf("Thread.ActiveTurnID = %q, want %q", got, want)
+	}
+	if got, want := snapshot.LatestTurnStatus, "inProgress"; got != want {
+		t.Fatalf("LatestTurnStatus = %q, want %q", got, want)
+	}
+	if got, want := snapshot.LatestToolLabel, "sleep 20; printf 'slow-command-done\\n'"; got != want {
+		t.Fatalf("LatestToolLabel = %q, want %q", got, want)
+	}
+	if got, want := snapshot.LatestToolStatus, "running"; got != want {
+		t.Fatalf("LatestToolStatus = %q, want %q", got, want)
+	}
+	if got := strings.TrimSpace(snapshot.LatestToolOutput); got != "" {
+		t.Fatalf("LatestToolOutput = %q, want empty until command writes output", got)
+	}
+	if len(snapshot.DetailItems) != 1 || snapshot.DetailItems[0].Kind != model.DetailItemTool {
+		t.Fatalf("DetailItems = %#v, want one tool item", snapshot.DetailItems)
+	}
+}

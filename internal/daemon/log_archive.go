@@ -468,6 +468,24 @@ func renderCommand(value any) string {
 	}
 }
 
+func commandFromArgumentsString(arguments string) string {
+	arguments = strings.TrimSpace(arguments)
+	if arguments == "" || arguments == "<nil>" || arguments == "{}" || arguments == "[]" || arguments == "map[]" {
+		return ""
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(arguments), &parsed); err == nil {
+		if len(parsed) == 0 {
+			return ""
+		}
+		if command := firstPayloadString(parsed, "command", "cmd", "input", "query", "path", "text"); command != "" {
+			return command
+		}
+		return ""
+	}
+	return arguments
+}
+
 func indentBlock(text string) string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	for index, line := range lines {

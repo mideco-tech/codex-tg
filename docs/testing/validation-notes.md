@@ -18,7 +18,7 @@ When changing this behavior, update the ADRs and run both unit tests and a live 
 
 ## App Server drift
 
-`codex app-server` is the integration surface, but its thread/read payloads and live notifications can drift across Codex versions. Tests should cover snapshot normalization, plan prompts, active tool overlay, and fallback parsing.
+`codex app-server` is the integration surface, but its thread/read payloads and live notifications can drift across Codex versions. Tests should cover snapshot normalization, plan prompts, tool rendering from `thread/read`, and fallback parsing.
 
 Important areas to re-check after Codex upgrades:
 
@@ -26,7 +26,7 @@ Important areas to re-check after Codex upgrades:
 - `status.activeFlags` values such as `waitingOnUserInput` and `waitingOnInput`.
 - stale lifecycle snapshots where a latest turn has `final_answer` but still reports `inProgress`.
 - `turn/steer` error text for stale turns, especially `no active turn to steer`.
-- tool call shape in live notifications and JSONL session tails.
+- tool call shape in live notifications and `thread/read` snapshots.
 - availability of `thread.raw_json.thread.path` for full-log exports.
 - missing or null command/request/status fields that could render as literal `"<nil>"`.
 
@@ -90,14 +90,17 @@ Literal `"<nil>"` in Telegram is treated as a rendering bug. It usually means Ap
 
 Validation expectations:
 
-- unit tests cover nil-like map/slice extraction, command rendering, session-tail overlay labels, summary Markdown rendering, App Server RPC id stringification, and snapshot string normalization.
+- unit tests cover nil-like map/slice extraction, command rendering, stale session-tail command suppression, summary Markdown rendering, App Server RPC id stringification, and snapshot string normalization.
 - live validation must read edited Telegram messages, not only newly delivered messages.
 - the ignored local runner `~/.codex-tg/e2e/nil_guard_e2e.py` exercises fast text, fast command, and a roughly one-minute active tool/output window against a dedicated private test thread.
+- when validating stale-command regressions manually, prefer one private test-thread turn that runs several safe shell commands sequentially as separate tool calls; watch Telegram `MessageEdited` updates for the same `[Tool]` message and verify it changes only through the current commands or neutral empty state.
+- for in-progress command visibility, verify the slow command appears in `[Tool]` before its output appears in `[Output]`; this proves App Server live item notifications are reaching the same render path before `thread/read` completion.
 - Details view should be checked during E2E when the button is available.
 - do not commit the runner, Telegram session, target thread id, raw message ids, logs, or screenshots.
 
 Latest local validation note:
 
+- 2026-04-30 PDT macOS live stale-command E2E used MTProto readback of `MessageEdited` updates for one private test-thread turn with `pwd`, `date`, `printf 'alpha\nbeta\n'`, and `sleep 20; printf 'slow-command-done\n'`. `[Tool]` showed the slow command in progress about 20 seconds before `[Output]` contained `slow-command-done`; no literal `"<nil>"` or stale session-tail command appeared.
 - 2026-04-29 macOS live nil-guard E2E completed all three scenarios and found no literal `"<nil>"` in edited New run, summary/Final, Tool, Output, or Details messages after the sanitizer change.
 
 ## Turn lifecycle live E2E

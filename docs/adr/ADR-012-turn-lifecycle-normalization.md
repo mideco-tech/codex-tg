@@ -50,7 +50,7 @@ The daemon owns one live App Server session and one poll App Server session at a
 App Server can transiently report a Telegram-origin turn as `interrupted` with only a user item before later recovering the same turn to `inProgress` with tool/commentary/final items. The bridge treats that shape as ambiguous drift:
 
 - applies only to Telegram-origin turns
-- empty `interrupted` means no final text/fingerprint, no agent messages, no tool id/label/output, no waiting approval/reply, no active session-tail tool, and no detail kinds except `user`
+- empty `interrupted` means no final text/fingerprint, no agent messages, no tool id/label/output, no waiting approval/reply, and no detail kinds except `user`
 - without an explicit `/stop`, empty `interrupted` is deferred for a short grace window instead of being compacted, rendered terminal, or logged terminal
 - if the same turn later shows active/waiting/tool/commentary/output/final evidence, the defer marker is cleared and normal rendering resumes
 - if the defer window expires, the empty `interrupted` is accepted as terminal
@@ -62,7 +62,7 @@ Nil-safe rendering is part of turn lifecycle normalization because the bad state
 
 - all Telegram-facing extraction should flow through nil-safe helpers such as `payloadString`, `payloadMapString`, `firstPayloadString`, or `rpcString`
 - command rendering must skip nil-like slice/map values and omit the command when no meaningful label exists
-- session-tail tool labels and output overlays must use neutral fallbacks or remain empty instead of rendering `"<nil>"`
+- missing tool labels and output must use neutral fallbacks or remain empty instead of rendering `"<nil>"`
 - summary, tool, output, Details, and delivery text must be cleaned before Telegram entity generation, so Markdown entity offsets stay correct
 - diagnostics may log a bounded `telegram_render_contains_nil` marker with ids, panel kind, message id, text length, and text hash, but never the full rendered text
 - local live E2E for this area must read edited Telegram messages, not only new bot messages, because `"<nil>"` can appear transiently during panel edits

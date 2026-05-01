@@ -9,271 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mideco-tech/codex-tg/internal/appserver"
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
-func TestLatestActiveToolFromSessionLinesDetectsRunningShellCommand(t *testing.T) {
-	t.Parallel()
-
-	lines := []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_sleep","name":"shell_command","arguments":"{\"command\":\"Start-Sleep -Seconds 1800\\n$ErrorActionPreference='Stop'\",\"timeout_ms\":1860000}"}}`,
-	}
-
-	overlay, ok := latestActiveToolFromSessionLines(lines, "")
-	if !ok {
-		t.Fatal("overlay not detected")
-	}
-	if got, want := overlay.CallID, "call_sleep"; got != want {
-		t.Fatalf("CallID = %q, want %q", got, want)
-	}
-	if got, want := overlay.TurnID, "turn-active"; got != want {
-		t.Fatalf("TurnID = %q, want %q", got, want)
-	}
-	if got := overlay.Command; !strings.Contains(got, "Start-Sleep -Seconds 1800") {
-		t.Fatalf("Command = %q, want Start-Sleep command", got)
-	}
-	if got, want := overlay.Status, "running"; got != want {
-		t.Fatalf("Status = %q, want %q", got, want)
-	}
-}
-
-func TestLatestActiveToolFromSessionLinesIgnoresCompletedShellCommand(t *testing.T) {
-	t.Parallel()
-
-	lines := []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_done","name":"shell_command","arguments":"{\"command\":\"Write-Output done\"}"}}`,
-		`{"timestamp":"2026-04-28T08:47:11Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call_done","status":"completed","aggregated_output":"done\n"}}`,
-	}
-
-	if overlay, ok := latestActiveToolFromSessionLines(lines, "turn-active"); ok {
-		t.Fatalf("overlay = %#v, want no active tool", overlay)
-	}
-}
-
-func TestLatestActiveToolFromSessionLinesSkipsMissingCommandAndName(t *testing.T) {
-	t.Parallel()
-
-	lines := []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_missing"}}`,
-	}
-
-	if overlay, ok := latestActiveToolFromSessionLines(lines, "turn-active"); ok {
-		t.Fatalf("overlay = %#v, want no active tool for nil-like command/name", overlay)
-	}
-}
-
-func TestLatestActiveToolFromSessionLinesUsesExecCommandCmdArgument(t *testing.T) {
-	t.Parallel()
-
-	lines := []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_exec","name":"exec_command","arguments":"{\"cmd\":\"sleep 65; printf ok\",\"yield_time_ms\":70000}"}}`,
-	}
-
-	overlay, ok := latestActiveToolFromSessionLines(lines, "turn-active")
-	if !ok {
-		t.Fatal("overlay not detected")
-	}
-	if got, want := overlay.Command, "sleep 65; printf ok"; got != want {
-		t.Fatalf("Command = %q, want %q", got, want)
-	}
-}
-
-func TestLatestActiveToolFromSessionLinesUsesToolNameForEmptyArguments(t *testing.T) {
-	t.Parallel()
-
-	lines := []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_terminal","name":"read_thread_terminal","arguments":"{}"}}`,
-	}
-
-	overlay, ok := latestActiveToolFromSessionLines(lines, "turn-active")
-	if !ok {
-		t.Fatal("overlay not detected")
-	}
-	if got, want := overlay.Command, ""; got != want {
-		t.Fatalf("Command = %q, want empty command", got)
-	}
-	if got, want := overlay.Name, "read_thread_terminal"; got != want {
-		t.Fatalf("Name = %q, want %q", got, want)
-	}
-	if strings.Contains(overlay.Name+overlay.Command, "{}") {
-		t.Fatalf("overlay leaked empty arguments: %#v", overlay)
-	}
-}
-
-func TestLatestActiveToolFromSessionLinesIgnoresToolAfterTaskComplete(t *testing.T) {
-	t.Parallel()
-
-	lines := []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_long","name":"shell_command","arguments":"{\"command\":\"sleep 1800\"}"}}`,
-		`{"timestamp":"2026-04-28T08:48:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-active","last_agent_message":"Done."}}`,
-	}
-
-	if overlay, ok := latestActiveToolFromSessionLines(lines, "turn-active"); ok {
-		t.Fatalf("overlay = %#v, want no active tool after task_complete", overlay)
-	}
-}
-
-func TestLatestFinalFromSessionLinesDetectsTaskComplete(t *testing.T) {
-	t.Parallel()
-
-	lines := []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-old"}}`,
-		`{"timestamp":"2026-04-28T08:48:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-old","last_agent_message":"Old final."}}`,
-		`{"timestamp":"2026-04-28T08:49:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:50:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-active","last_agent_message":"Fresh final."}}`,
-	}
-
-	overlay, ok := latestFinalFromSessionLines(lines, "turn-active")
-	if !ok {
-		t.Fatal("final overlay not detected")
-	}
-	if got, want := overlay.TurnID, "turn-active"; got != want {
-		t.Fatalf("TurnID = %q, want %q", got, want)
-	}
-	if got, want := overlay.Text, "Fresh final."; got != want {
-		t.Fatalf("Text = %q, want %q", got, want)
-	}
-	if overlay.FP == "" {
-		t.Fatal("FP is empty")
-	}
-}
-
-func TestApplySessionTailToolOverlayDoesNotReactivateFinalizedTurn(t *testing.T) {
-	t.Parallel()
-
-	sessionPath := writeSessionTailFixture(t, []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-final"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_sleep","name":"shell_command","arguments":"{\"command\":\"sleep 1800\"}"}}`,
-	})
-	thread := model.Thread{
-		ID:          "thread-finalized-tool",
-		Title:       "Finalized tool",
-		ProjectName: "Codex",
-		Raw:         rawThreadPath(t, sessionPath),
-	}
-	snapshot := appserver.ThreadReadSnapshot{
-		Thread:           thread,
-		LatestTurnID:     "turn-final",
-		LatestTurnStatus: "completed",
-		LatestFinalFP:    "final-fp",
-		LatestFinalText:  "Done.",
-	}
-
-	if applySessionTailToolOverlay(thread, &snapshot) {
-		t.Fatal("applySessionTailToolOverlay = true, want false for finalized turn")
-	}
-	if got, want := snapshot.LatestTurnStatus, "completed"; got != want {
-		t.Fatalf("LatestTurnStatus = %q, want %q", got, want)
-	}
-}
-
-func TestApplySessionTailOverlayReplacesOlderThreadReadTool(t *testing.T) {
-	t.Parallel()
-
-	sessionPath := writeSessionTailFixture(t, []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_sleep","name":"shell_command","arguments":"{\"command\":\"Start-Sleep -Seconds 1800\",\"timeout_ms\":1860000}"}}`,
-	})
-	thread := model.Thread{
-		ID:          "thread-session-tail",
-		Title:       "Session tail",
-		ProjectName: "Codex",
-		Raw:         rawThreadPath(t, sessionPath),
-	}
-	snapshot := appserver.ThreadReadSnapshot{
-		Thread:           thread,
-		LatestTurnID:     "turn-old",
-		LatestTurnStatus: "completed",
-		LatestToolID:     "old-tool",
-		LatestToolKind:   "commandExecution",
-		LatestToolLabel:  "curl.exe http://gitlab/pipeline",
-		LatestToolStatus: "completed",
-		LatestToolOutput: "pipeline created",
-		LatestToolFP:     "old-fp",
-	}
-
-	if !applySessionTailToolOverlay(thread, &snapshot) {
-		t.Fatal("applySessionTailToolOverlay = false, want true")
-	}
-	if got := snapshot.LatestToolLabel; !strings.Contains(got, "Start-Sleep -Seconds 1800") {
-		t.Fatalf("LatestToolLabel = %q, want Start-Sleep", got)
-	}
-	if got, want := snapshot.LatestToolStatus, "running"; got != want {
-		t.Fatalf("LatestToolStatus = %q, want %q", got, want)
-	}
-	if got, want := snapshot.LatestTurnStatus, "inProgress"; got != want {
-		t.Fatalf("LatestTurnStatus = %q, want %q", got, want)
-	}
-	if !snapshot.SessionTailActiveTool {
-		t.Fatal("SessionTailActiveTool = false, want true")
-	}
-	previous := &model.ThreadSnapshotState{
-		LastSeenTurnID:     "turn-active",
-		LastSeenTurnStatus: "interrupted",
-		LastProgressFP:     "old-fp",
-	}
-	if !snapshotHasPassiveChange(previous, &snapshot) {
-		t.Fatal("snapshotHasPassiveChange = false, want true for active session-tail tool over stale terminal snapshot")
-	}
-}
-
-func TestApplySessionTailFinalOverlayCorrectsInterruptedWithoutThreadReadFinal(t *testing.T) {
-	t.Parallel()
-
-	sessionPath := writeSessionTailFixture(t, []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-final"}}`,
-		`{"timestamp":"2026-04-28T08:50:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-final","last_agent_message":"Done from session tail."}}`,
-	})
-	thread := model.Thread{
-		ID:           "thread-session-final",
-		Title:        "Session final",
-		ProjectName:  "Codex",
-		Status:       "interrupted",
-		ActiveTurnID: "turn-final",
-		Raw:          rawThreadPath(t, sessionPath),
-	}
-	snapshot := appserver.ThreadReadSnapshot{
-		Thread:           thread,
-		LatestTurnID:     "turn-final",
-		LatestTurnStatus: "interrupted",
-	}
-
-	if !applySessionTailFinalOverlay(thread, &snapshot) {
-		t.Fatal("applySessionTailFinalOverlay = false, want true")
-	}
-	if got, want := snapshot.LatestTurnStatus, "completed"; got != want {
-		t.Fatalf("LatestTurnStatus = %q, want %q", got, want)
-	}
-	if got, want := snapshot.Thread.Status, "completed"; got != want {
-		t.Fatalf("Thread.Status = %q, want %q", got, want)
-	}
-	if got, want := snapshot.LatestFinalText, "Done from session tail."; got != want {
-		t.Fatalf("LatestFinalText = %q, want %q", got, want)
-	}
-	if snapshot.LatestFinalFP == "" {
-		t.Fatal("LatestFinalFP is empty")
-	}
-	if len(snapshot.DetailItems) != 1 || snapshot.DetailItems[0].Kind != model.DetailItemFinal {
-		t.Fatalf("DetailItems = %#v, want one final item", snapshot.DetailItems)
-	}
-	previous := &model.ThreadSnapshotState{
-		LastSeenTurnID:     "turn-final",
-		LastSeenTurnStatus: "interrupted",
-		LastCompletionFP:   hashStrings("turn-final", "interrupted"),
-	}
-	if !snapshotHasPassiveChange(previous, &snapshot) {
-		t.Fatal("snapshotHasPassiveChange = false, want terminal final correction")
-	}
-}
-
-func TestPollTrackedUsesSessionTailOverlayForForeignActiveTool(t *testing.T) {
+func TestPollTrackedIgnoresStaleSessionTailTool(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -284,7 +23,7 @@ func TestPollTrackedUsesSessionTailOverlayForForeignActiveTool(t *testing.T) {
 		t.Fatalf("SetGlobalObserverTarget failed: %v", err)
 	}
 	sessionPath := writeSessionTailFixture(t, []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
+		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-stale"}}`,
 		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_sleep","name":"shell_command","arguments":"{\"command\":\"Start-Sleep -Seconds 1800\",\"timeout_ms\":1860000}"}}`,
 	})
 	threadID := "thread-foreign-active"
@@ -292,7 +31,7 @@ func TestPollTrackedUsesSessionTailOverlayForForeignActiveTool(t *testing.T) {
 		ID:          threadID,
 		Title:       "Foreign active",
 		ProjectName: "Codex",
-		CWD:         `C:\Users\you\Projects\Codex`,
+		CWD:         `/Users/example/Projects/Codex`,
 		UpdatedAt:   time.Now().UTC().Unix(),
 		Status:      "completed",
 		Raw:         rawThreadPath(t, sessionPath),
@@ -313,15 +52,7 @@ func TestPollTrackedUsesSessionTailOverlayForForeignActiveTool(t *testing.T) {
 					map[string]any{
 						"id":     "turn-old",
 						"status": "completed",
-						"items": []any{
-							map[string]any{
-								"id":               "old-tool",
-								"type":             "commandExecution",
-								"command":          "curl.exe http://gitlab/pipeline",
-								"status":           "completed",
-								"aggregatedOutput": "pipeline created\n",
-							},
-						},
+						"items":  []any{},
 					},
 				},
 			},
@@ -338,60 +69,11 @@ func TestPollTrackedUsesSessionTailOverlayForForeignActiveTool(t *testing.T) {
 	if snapshot == nil {
 		t.Fatal("snapshot = nil")
 	}
-	var compact appserver.ThreadReadSnapshot
-	if err := json.Unmarshal(snapshot.CompactJSON, &compact); err != nil {
-		t.Fatalf("decode compact snapshot failed: %v", err)
+	if strings.Contains(string(snapshot.CompactJSON), "Start-Sleep -Seconds 1800") {
+		t.Fatalf("compact snapshot leaked stale session-tail command: %s", snapshot.CompactJSON)
 	}
-	if got := compact.LatestToolLabel; !strings.Contains(got, "Start-Sleep -Seconds 1800") {
-		t.Fatalf("LatestToolLabel = %q, want active Start-Sleep", got)
-	}
-	if got, want := compact.LatestToolStatus, "running"; got != want {
-		t.Fatalf("LatestToolStatus = %q, want %q", got, want)
-	}
-	if got, want := compact.LatestTurnStatus, "inProgress"; got != want {
-		t.Fatalf("LatestTurnStatus = %q, want %q", got, want)
-	}
-	if snapshot.NextPollAfter == "" {
-		t.Fatal("NextPollAfter is empty, want hot tracking")
-	}
-}
-
-func TestCurrentPanelThreadIDsKeepsTerminalPanelWithActiveSessionTailTool(t *testing.T) {
-	t.Parallel()
-
-	service := newTestService(t)
-	ctx := context.Background()
-	sessionPath := writeSessionTailFixture(t, []string{
-		`{"timestamp":"2026-04-28T08:47:00Z","type":"turn_context","payload":{"turn_id":"turn-active"}}`,
-		`{"timestamp":"2026-04-28T08:47:10Z","type":"response_item","payload":{"type":"function_call","call_id":"call_sleep","name":"shell_command","arguments":"{\"command\":\"Start-Sleep -Seconds 1800\"}"}}`,
-	})
-	thread := model.Thread{
-		ID:          "thread-current-panel-active-tail",
-		Title:       "Current panel active tail",
-		ProjectName: "Codex",
-		CWD:         `C:\Users\you\Projects\Codex`,
-		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour).Unix(),
-		Status:      "interrupted",
-		Raw:         rawThreadPath(t, sessionPath),
-	}
-	if err := service.store.UpsertThread(ctx, thread); err != nil {
-		t.Fatalf("UpsertThread failed: %v", err)
-	}
-	if _, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
-		ChatID:        123456789,
-		TopicID:       0,
-		ProjectName:   thread.ProjectName,
-		ThreadID:      thread.ID,
-		SourceMode:    model.PanelSourceGlobalObserver,
-		CurrentTurnID: "turn-active",
-		Status:        "interrupted",
-	}); err != nil {
-		t.Fatalf("CreateThreadPanel failed: %v", err)
-	}
-
-	ids := service.currentPanelThreadIDs(ctx)
-	if len(ids) != 1 || ids[0] != thread.ID {
-		t.Fatalf("currentPanelThreadIDs = %#v, want %q", ids, thread.ID)
+	if strings.Contains(sender.allText(), "Start-Sleep -Seconds 1800") {
+		t.Fatalf("telegram messages leaked stale session-tail command: %s", sender.allText())
 	}
 }
 
@@ -411,4 +93,18 @@ func rawThreadPath(t *testing.T, path string) []byte {
 		t.Fatalf("marshal raw path failed: %v", err)
 	}
 	return payload
+}
+
+func (s *recordingSender) allText() string {
+	if s == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(s.messages)+len(s.edits))
+	for _, message := range s.messages {
+		parts = append(parts, message.text)
+	}
+	for _, edit := range s.edits {
+		parts = append(parts, edit.text)
+	}
+	return strings.Join(parts, "\n")
 }

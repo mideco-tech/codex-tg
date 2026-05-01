@@ -32,8 +32,6 @@ type ThreadReadSnapshot struct {
 	LatestToolStatus          string
 	LatestToolOutput          string
 	LatestToolFP              string
-	LatestToolSource          string
-	SessionTailActiveTool     bool
 	PlanPrompt                *model.PlanPrompt
 	DetailItems               []model.DetailItem
 }
@@ -482,6 +480,76 @@ func NormalizeLiveNotification(event Event, thread model.Thread) []model.Observe
 	return nil
 }
 
+func ToolSnapshotFromLiveNotification(event Event, thread model.Thread) (ThreadReadSnapshot, bool) {
+	if event.Channel != "notification" {
+		return ThreadReadSnapshot{}, false
+	}
+	method := strings.TrimSpace(strings.ToLower(event.Method))
+	switch method {
+	case "item/started", "item/updated", "item/completed":
+	default:
+		return ThreadReadSnapshot{}, false
+	}
+	params := event.Params
+	item := asMap(params["item"])
+	itemType := strings.TrimSpace(stringValue(item["type"], ""))
+	switch itemType {
+	case "commandExecution", "fileChange", "dynamicToolCall", "mcpToolCall", "webSearch":
+	default:
+		return ThreadReadSnapshot{}, false
+	}
+	label := strings.TrimSpace(toolLabel(item))
+	output := toolOutput(item)
+	if label == "" && strings.TrimSpace(output) == "" {
+		return ThreadReadSnapshot{}, false
+	}
+	threadID := nestedThreadID(params)
+	if threadID == "" {
+		threadID = thread.ID
+	}
+	if threadID == "" {
+		return ThreadReadSnapshot{}, false
+	}
+	turnID := stringValue(params["turnId"], "")
+	status := strings.TrimSpace(toolStatus(item, ""))
+	if status == "" {
+		status = strings.TrimSpace(stringValue(params["status"], ""))
+	}
+	if status == "" {
+		if method == "item/completed" {
+			status = "completed"
+		} else {
+			status = "running"
+		}
+	}
+	toolID := stringValue(item["id"], itemType)
+	progressText := label
+	if progressText == "" {
+		progressText = strings.TrimSpace(output)
+	}
+	snapshot := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:           threadID,
+			Title:        firstString(thread.Title, stringValue(params["threadTitle"], threadID)),
+			ProjectName:  firstString(thread.ProjectName, stringValue(params["projectName"], "")),
+			Status:       "inProgress",
+			ActiveTurnID: turnID,
+		},
+		LatestTurnID:       turnID,
+		LatestTurnStatus:   "inProgress",
+		LatestProgressText: progressText,
+		LatestToolID:       toolID,
+		LatestToolKind:     itemType,
+		LatestToolLabel:    label,
+		LatestToolStatus:   status,
+		LatestToolOutput:   output,
+	}
+	snapshot.LatestProgressFP = fingerprint("live-progress", itemType, toolID, progressText, status, output)
+	snapshot.LatestToolFP = fingerprint("live-tool", itemType, toolID, label, status, output)
+	snapshot.DetailItems = liveToolDetailItems(snapshot)
+	return snapshot, true
+}
+
 func PendingApprovalFromServerRequest(event Event) (*model.PendingApproval, bool) {
 	if event.Channel != "server_request" {
 		return nil, false
@@ -846,6 +914,37 @@ func normalizeAgentMessagePhase(item map[string]any) string {
 	return strings.TrimSpace(stringValue(item["phase"], ""))
 }
 
+func liveToolDetailItems(snapshot ThreadReadSnapshot) []model.DetailItem {
+	if strings.TrimSpace(snapshot.LatestToolFP) == "" {
+		return nil
+	}
+	items := []model.DetailItem{{
+		ID:     snapshot.LatestToolID,
+		Kind:   model.DetailItemTool,
+		Label:  snapshot.LatestToolLabel,
+		Status: snapshot.LatestToolStatus,
+		FP:     snapshot.LatestToolFP,
+	}}
+	if output := strings.TrimSpace(snapshot.LatestToolOutput); output != "" {
+		items = append(items, model.DetailItem{
+			ID:     snapshot.LatestToolID + ":output",
+			Kind:   model.DetailItemOutput,
+			Output: output,
+			FP:     fingerprint("live-tool-output", snapshot.LatestToolID, output),
+		})
+	}
+	return items
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		if text := strings.TrimSpace(value); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -889,6 +988,14 @@ func toolStatus(item map[string]any, turnStatus string) string {
 func toolOutput(item map[string]any) string {
 	if output := stringValue(item["aggregatedOutput"], ""); strings.TrimSpace(output) != "" {
 		return output
+	}
+	if strings.TrimSpace(stringValue(item["type"], "")) == "commandExecution" {
+		for _, key := range []string{"output", "stdout", "stderr"} {
+			if output := stringValue(item[key], ""); strings.TrimSpace(output) != "" {
+				return output
+			}
+		}
+		return ""
 	}
 	if text := renderItemText(item); strings.TrimSpace(text) != "" {
 		return text

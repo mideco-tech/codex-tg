@@ -119,7 +119,7 @@ Primary tests:
 - `internal/daemon/log_archive_test.go::TestValueFromMapSkipsNilLikeValues`
 - `internal/daemon/log_archive_test.go::TestRenderCommandSkipsNilLikeValues`
 - `internal/daemon/log_archive_test.go::TestRenderEventMsgWithoutCommandDoesNotPrintNil`
-- `internal/daemon/session_tail_overlay_test.go::TestLatestActiveToolFromSessionLinesSkipsMissingCommandAndName`
+- `internal/daemon/session_tail_overlay_test.go::TestPollTrackedIgnoresStaleSessionTailTool`
 - `internal/daemon/observer_ui_v2_test.go::TestSummaryPanelRemovesNilLiteralBeforeRendering`
 - `internal/appserver/client_test.go::TestRPCStringSkipsNilLikeValues`
 - `internal/appserver/normalize_test.go::TestStringValueTreatsNilLiteralAsMissing`
@@ -129,7 +129,7 @@ Live E2E:
 - local ignored runner: `~/.codex-tg/e2e/nil_guard_e2e.py`
 - run against a dedicated private test thread, not the working operator thread
 - scenarios: fast text, fast command, and a command that stays active for about a minute
-- acceptance: scan edited Telegram messages, Details views, and Final Cards for literal `"<nil>"`
+- acceptance: scan edited Telegram messages, Details views, and Final Cards for literal `"<nil>"` and stale commands from earlier runs
 
 Contract notes:
 
@@ -159,19 +159,23 @@ Contract notes:
 - Logs must not include full prompt bodies, tokens, session files, SQLite paths, `.env` paths, or unbounded output.
 - Diagnostic logging is rate-limited to avoid filesystem floods during app-server loops.
 
-## Session Tail Overlay
+## Session Tail Overlay Retirement
 
-ADR: `docs/adr/ADR-008-session-tail-tool-overlay.md`
+ADR: `docs/adr/ADR-013-retire-session-tail-tool-overlay.md`
 
 Primary tests:
 
-- `internal/daemon/session_tail_overlay_test.go::TestLatestFinalFromSessionLinesDetectsTaskComplete`
-- `internal/daemon/session_tail_overlay_test.go::TestCurrentPanelThreadIDsKeepsTerminalPanelWithActiveSessionTailTool`
+- `internal/daemon/session_tail_overlay_test.go::TestPollTrackedIgnoresStaleSessionTailTool`
+- `internal/appserver/normalize_test.go::TestToolSnapshotFromLiveNotificationMapsRunningCommand`
+- `internal/daemon/service_test.go::TestLiveToolNotificationUpdatesRunningCommandBeforeThreadReadCompletion`
 
 Contract notes:
 
-- App Server snapshots remain primary.
-- Session tail overlay is bounded and only supplements missing in-flight local tool/final state.
+- App Server `thread/read` snapshots remain the durable source.
+- App Server live item notifications may update the same current tool snapshot for in-progress visibility.
+- Session JSONL is not a live Telegram UI source.
+- Missing App Server tool state renders as neutral absence, not as a guessed command.
+- Session JSONL can still be used for explicit full-log export paths.
 
 ## Baseline Commands
 

@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -525,6 +526,181 @@ func TestThreadNeedsLiveSyncSkipsTerminalGlobalObserverPanels(t *testing.T) {
 	}
 	if !service.threadNeedsLiveSync(ctx, thread.ID) {
 		t.Fatal("threadNeedsLiveSync returned false for bound thread")
+	}
+}
+
+func TestLiveToolNotificationUpdatesRunningCommandBeforeThreadReadCompletion(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	turnID := "turn-live-tool"
+	thread := model.Thread{
+		ID:           "thread-live-tool",
+		Title:        "Live tool",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	staleCurrent := appserver.ThreadReadSnapshot{
+		Thread:             thread,
+		LatestTurnID:       turnID,
+		LatestTurnStatus:   "inProgress",
+		LatestProgressText: "printf 'alpha\\nbeta\\n'",
+		LatestProgressFP:   "progress-alpha-fp",
+		LatestToolID:       "cmd-alpha",
+		LatestToolKind:     "commandExecution",
+		LatestToolLabel:    "printf 'alpha\\nbeta\\n'",
+		LatestToolStatus:   "completed",
+		LatestToolOutput:   "alpha\nbeta\n",
+		LatestToolFP:       "tool-alpha-fp",
+	}
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, appserver.CompactSnapshot(nil, staleCurrent, time.Now().UTC())); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	summaryMessage, _, summaryHash := service.renderSummaryPanel(ctx, thread, &staleCurrent, nil)
+	_ = summaryMessage
+	_, staleToolHash := service.renderToolPanel(ctx, thread, &staleCurrent)
+	_, staleOutputHash := service.renderOutputPanel(ctx, thread, &staleCurrent)
+	if _, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
+		ChatID:           123456789,
+		TopicID:          0,
+		ProjectName:      thread.ProjectName,
+		ThreadID:         thread.ID,
+		SourceMode:       model.PanelSourceTelegramInput,
+		SummaryMessageID: 201,
+		ToolMessageID:    202,
+		OutputMessageID:  203,
+		CurrentTurnID:    turnID,
+		Status:           "inProgress",
+		ArchiveEnabled:   true,
+		LastSummaryHash:  summaryHash,
+		LastToolHash:     staleToolHash,
+		LastOutputHash:   staleOutputHash,
+	}); err != nil {
+		t.Fatalf("CreateThreadPanel failed: %v", err)
+	}
+	stub := &stubSession{
+		threadReads: map[string]map[string]any{
+			thread.ID: {
+				"thread": map[string]any{
+					"id":           thread.ID,
+					"title":        thread.Title,
+					"cwd":          thread.CWD,
+					"status":       "active",
+					"activeTurnId": turnID,
+					"turns": []any{
+						map[string]any{
+							"id":     turnID,
+							"status": "inProgress",
+							"items": []any{
+								map[string]any{
+									"id":               "cmd-alpha",
+									"type":             "commandExecution",
+									"command":          "printf 'alpha\\nbeta\\n'",
+									"status":           "completed",
+									"aggregatedOutput": "alpha\nbeta\n",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	service.handleLiveEvent(ctx, stub, appserver.Event{
+		Channel: "notification",
+		Method:  "item/started",
+		Params: map[string]any{
+			"threadId": thread.ID,
+			"turnId":   turnID,
+			"item": map[string]any{
+				"id":      "cmd-slow",
+				"type":    "commandExecution",
+				"command": "sleep 20; printf 'slow-command-done\\n'",
+				"status":  "running",
+			},
+		},
+	})
+
+	foundToolEdit := false
+	foundOutputReset := false
+	for _, edit := range sender.edits {
+		switch edit.messageID {
+		case 202:
+			if strings.Contains(edit.text, "sleep 20") &&
+				strings.Contains(edit.text, "slow-command-done") &&
+				strings.Contains(edit.text, "Status: running") &&
+				!strings.Contains(edit.text, "alpha") {
+				foundToolEdit = true
+			}
+		case 203:
+			if strings.Contains(edit.text, "No tool output yet.") &&
+				!strings.Contains(edit.text, "slow-command-done") &&
+				!strings.Contains(edit.text, "alpha") {
+				foundOutputReset = true
+			}
+		}
+	}
+	if !foundToolEdit {
+		t.Fatalf("running command tool edit not found; edits=%#v", sender.edits)
+	}
+	if !foundOutputReset {
+		t.Fatalf("running command output reset not found; edits=%#v", sender.edits)
+	}
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("snapshot = nil")
+	}
+	var current appserver.ThreadReadSnapshot
+	if err := json.Unmarshal(stored.CompactJSON, &current); err != nil {
+		t.Fatalf("unmarshal CompactJSON failed: %v", err)
+	}
+	if got := current.LatestToolLabel; !strings.Contains(got, "sleep 20") {
+		t.Fatalf("LatestToolLabel = %q, want running sleep command", got)
+	}
+	if got, want := current.LatestToolStatus, "running"; got != want {
+		t.Fatalf("LatestToolStatus = %q, want %q", got, want)
+	}
+
+	current.LatestToolStatus = "completed"
+	current.LatestToolOutput = "slow-command-done\n"
+	current.LatestToolFP = "tool-slow-completed-fp"
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, appserver.CompactSnapshot(stored, current, time.Now().UTC())); err != nil {
+		t.Fatalf("UpsertSnapshot(completed tool) failed: %v", err)
+	}
+	if service.applyLiveToolSnapshot(ctx, thread.ID, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "cmd-slow",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "sleep 20; printf 'slow-command-done\\n'",
+		LatestToolStatus: "running",
+		LatestToolFP:     "late-running-fp",
+	}) {
+		t.Fatal("late running live tool update downgraded completed tool")
+	}
+	stored, err = service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot(after late live update) failed: %v", err)
+	}
+	if err := json.Unmarshal(stored.CompactJSON, &current); err != nil {
+		t.Fatalf("unmarshal CompactJSON(after late live update) failed: %v", err)
+	}
+	if got, want := current.LatestToolStatus, "completed"; got != want {
+		t.Fatalf("LatestToolStatus(after late live update) = %q, want %q", got, want)
 	}
 }
 

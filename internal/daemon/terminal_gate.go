@@ -65,7 +65,7 @@ func isEmptyInterruptedSnapshot(snapshot *appserver.ThreadReadSnapshot) bool {
 	if strings.TrimSpace(snapshot.Thread.ID) == "" || strings.TrimSpace(snapshot.LatestTurnID) == "" {
 		return false
 	}
-	if snapshot.WaitingOnApproval || snapshot.WaitingOnReply || snapshot.SessionTailActiveTool {
+	if snapshot.WaitingOnApproval || snapshot.WaitingOnReply {
 		return false
 	}
 	return !snapshotHasMeaningfulTerminalSignal(snapshot)
@@ -451,6 +451,5 @@ func terminalGateSnapshotNeedsHotPolling(snapshot *appserver.ThreadReadSnapshot)
 	return threadLooksActiveForPolling(snapshot.Thread) ||
 		strings.EqualFold(strings.TrimSpace(snapshot.LatestTurnStatus), "inProgress") ||
 		snapshot.WaitingOnApproval ||
-		snapshot.WaitingOnReply ||
-		snapshot.SessionTailActiveTool
+		snapshot.WaitingOnReply
 }

@@ -262,7 +262,7 @@ func (s *Service) logObserverSyncResult(operation string, snapshot appserver.Thr
 		len(snapshot.DetailItems) == 0 {
 		return
 	}
-	if operation == "poll_tracked" && !isTerminalTurnStatus(snapshot.LatestTurnStatus) && !snapshot.WaitingOnApproval && !snapshot.WaitingOnReply && !snapshot.SessionTailActiveTool {
+	if operation == "poll_tracked" && !isTerminalTurnStatus(snapshot.LatestTurnStatus) && !snapshot.WaitingOnApproval && !snapshot.WaitingOnReply {
 		return
 	}
 	key := strings.Join([]string{
@@ -273,7 +273,6 @@ func (s *Service) logObserverSyncResult(operation string, snapshot appserver.Thr
 		strings.TrimSpace(snapshot.LatestTurnStatus),
 		fmt.Sprint(snapshot.WaitingOnApproval),
 		fmt.Sprint(snapshot.WaitingOnReply),
-		fmt.Sprint(snapshot.SessionTailActiveTool),
 	}, ":")
 	if !s.allowDiagnosticRepeat(key, diagnosticObserverRepeatWindow) {
 		return
@@ -329,7 +328,6 @@ func snapshotDiagnosticFields(snapshot appserver.ThreadReadSnapshot) lifecycleFi
 		"has_output":          strings.TrimSpace(snapshot.LatestToolOutput) != "" || counts[model.DetailItemOutput] > 0,
 		"waiting_approval":    snapshot.WaitingOnApproval,
 		"waiting_reply":       snapshot.WaitingOnReply,
-		"session_tail_tool":   snapshot.SessionTailActiveTool,
 	}
 }
 

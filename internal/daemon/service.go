@@ -619,6 +619,7 @@ func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appse
 	if threadID != "" {
 		_ = s.store.MarkLiveEvent(ctx, threadID, model.NowString())
 	}
+	liveToolSnapshot, hasLiveToolSnapshot := appserver.ToolSnapshotFromLiveNotification(event, model.Thread{ID: threadID})
 	if approval, ok := appserver.PendingApprovalFromServerRequest(event); ok {
 		_ = s.store.SavePendingApproval(ctx, *approval)
 		if approval.ThreadID != "" {
@@ -645,6 +646,9 @@ func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appse
 			s.noteSessionError(ctx, "live_refresh", err)
 			return
 		}
+		if hasLiveToolSnapshot {
+			_ = s.applyLiveToolSnapshot(ctx, threadID, liveToolSnapshot)
+		}
 		if !interactiveSync {
 			_, current, err := s.loadThreadPanelSnapshot(ctx, threadID)
 			if err != nil || current == nil || !snapshotHasPassiveChange(previous, current) {
@@ -652,6 +656,114 @@ func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appse
 			}
 		}
 		s.syncThreadPanel(ctx, threadID)
+	}
+}
+
+func (s *Service) applyLiveToolSnapshot(ctx context.Context, threadID string, liveTool appserver.ThreadReadSnapshot) bool {
+	threadID = strings.TrimSpace(firstNonEmpty(threadID, liveTool.Thread.ID))
+	if threadID == "" || strings.TrimSpace(liveTool.LatestToolFP) == "" {
+		return false
+	}
+	thread, err := s.store.GetThread(ctx, threadID)
+	if err != nil || thread == nil {
+		return false
+	}
+	state, err := s.store.GetSnapshot(ctx, threadID)
+	if err != nil {
+		return false
+	}
+	var current appserver.ThreadReadSnapshot
+	if state != nil && len(state.CompactJSON) > 0 {
+		_ = json.Unmarshal(state.CompactJSON, &current)
+	}
+	if current.Thread.ID == "" {
+		current.Thread = *thread
+	} else {
+		current.Thread = mergeThreadMetadata(current.Thread, *thread)
+	}
+	turnID := strings.TrimSpace(liveTool.LatestTurnID)
+	if turnID == "" {
+		turnID = strings.TrimSpace(current.LatestTurnID)
+	}
+	if turnID == "" {
+		return false
+	}
+	if current.LatestTurnID != "" && current.LatestTurnID != turnID && !isTerminalStatus(current.LatestTurnStatus) {
+		return false
+	}
+	if current.LatestTurnID == turnID && isTerminalStatus(current.LatestTurnStatus) && strings.TrimSpace(current.LatestFinalFP) != "" {
+		return false
+	}
+	if current.LatestTurnID == turnID &&
+		sameToolSnapshot(current, liveTool) &&
+		terminalToolStatus(current.LatestToolStatus) &&
+		!terminalToolStatus(liveTool.LatestToolStatus) {
+		return false
+	}
+	current.LatestTurnID = turnID
+	current.LatestTurnStatus = firstNonEmpty(liveTool.LatestTurnStatus, current.LatestTurnStatus, "inProgress")
+	current.Thread.ActiveTurnID = turnID
+	current.Thread.Status = firstNonEmpty(liveTool.Thread.Status, current.Thread.Status, "inProgress")
+	current.LatestToolID = liveTool.LatestToolID
+	current.LatestToolKind = liveTool.LatestToolKind
+	current.LatestToolLabel = liveTool.LatestToolLabel
+	current.LatestToolStatus = liveTool.LatestToolStatus
+	current.LatestToolOutput = liveTool.LatestToolOutput
+	current.LatestToolFP = liveTool.LatestToolFP
+	current.LatestProgressText = liveTool.LatestProgressText
+	current.LatestProgressFP = liveTool.LatestProgressFP
+	current.DetailItems = upsertLiveToolDetails(current.DetailItems, liveTool.DetailItems)
+
+	_ = s.store.UpsertThread(ctx, current.Thread)
+	next := appserver.CompactSnapshot(state, current, time.Now().UTC())
+	if current.LatestTurnStatus == "inProgress" || current.WaitingOnApproval || current.WaitingOnReply {
+		next.NextPollAfter = model.TimeString(time.Now().UTC().Add(s.cfg.ObserverPollInterval).Format(time.RFC3339Nano))
+	}
+	if err := s.store.UpsertSnapshot(ctx, threadID, next); err != nil {
+		return false
+	}
+	s.logObserverSyncResult("live_tool", current)
+	return true
+}
+
+func upsertLiveToolDetails(items []model.DetailItem, liveItems []model.DetailItem) []model.DetailItem {
+	if len(liveItems) == 0 {
+		return items
+	}
+	remove := map[string]struct{}{}
+	for _, item := range liveItems {
+		if id := strings.TrimSpace(item.ID); id != "" {
+			remove[id] = struct{}{}
+		}
+	}
+	out := make([]model.DetailItem, 0, len(items)+len(liveItems))
+	for _, item := range items {
+		if _, ok := remove[strings.TrimSpace(item.ID)]; ok {
+			continue
+		}
+		out = append(out, item)
+	}
+	out = append(out, liveItems...)
+	return out
+}
+
+func sameToolSnapshot(left, right appserver.ThreadReadSnapshot) bool {
+	leftID := strings.TrimSpace(left.LatestToolID)
+	rightID := strings.TrimSpace(right.LatestToolID)
+	if leftID != "" && rightID != "" {
+		return leftID == rightID
+	}
+	leftLabel := strings.TrimSpace(left.LatestToolLabel)
+	rightLabel := strings.TrimSpace(right.LatestToolLabel)
+	return leftLabel != "" && leftLabel == rightLabel
+}
+
+func terminalToolStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "succeeded", "failed", "interrupted", "cancelled", "canceled":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -923,14 +1035,12 @@ func (s *Service) pollTracked(ctx context.Context) {
 		current := appserver.SnapshotFromThreadRead(payload)
 		current.Thread.Raw, _ = json.Marshal(payload)
 		current.Thread = mergeThreadMetadata(current.Thread, thread)
-		_ = applySessionTailToolOverlay(current.Thread, &current)
-		_ = applySessionTailFinalOverlay(current.Thread, &current)
 		if s.applyTelegramOriginTerminalGate(ctx, "poll_tracked", &current, snapshot) {
 			continue
 		}
 		_ = s.store.UpsertThread(ctx, current.Thread)
 		nextSnapshot := appserver.CompactSnapshot(snapshot, current, time.Now().UTC())
-		if current.LatestTurnStatus == "inProgress" || current.SessionTailActiveTool || current.WaitingOnApproval || current.WaitingOnReply {
+		if current.LatestTurnStatus == "inProgress" || current.WaitingOnApproval || current.WaitingOnReply {
 			nextSnapshot.NextPollAfter = model.TimeString(time.Now().UTC().Add(s.cfg.ObserverPollInterval).Format(time.RFC3339Nano))
 		} else {
 			nextSnapshot.NextPollAfter = model.TimeString(time.Now().UTC().Add(30 * time.Second).Format(time.RFC3339Nano))
@@ -2192,7 +2302,7 @@ func (s *Service) trackedThreads(ctx context.Context, limit int) []model.Thread 
 		}
 		if !threadLooksActiveForPolling(thread) {
 			snapshot, _ := s.store.GetSnapshot(ctx, thread.ID)
-			if !backgroundEnabled || (!s.threadNeedsCatchupPolling(ctx, thread, snapshot) && !threadHasActiveSessionTailTool(thread, "")) {
+			if !backgroundEnabled || !s.threadNeedsCatchupPolling(ctx, thread, snapshot) {
 				continue
 			}
 		}
@@ -2224,7 +2334,7 @@ func (s *Service) currentPanelThreadIDs(ctx context.Context) []string {
 		}
 		track := false
 		for _, panel := range panels {
-			if shouldTrackCurrentPanel(panel) || threadHasActiveSessionTailTool(thread, panel.CurrentTurnID) {
+			if shouldTrackCurrentPanel(panel) {
 				track = true
 				break
 			}
@@ -2441,8 +2551,6 @@ func (s *Service) refreshThreadForOperation(ctx context.Context, client Session,
 		thread.ID = threadID
 	}
 	current.Thread = thread
-	_ = applySessionTailToolOverlay(current.Thread, &current)
-	_ = applySessionTailFinalOverlay(current.Thread, &current)
 	thread = current.Thread
 	previous, err := s.store.GetSnapshot(ctx, threadID)
 	if err != nil {
@@ -2458,7 +2566,7 @@ func (s *Service) refreshThreadForOperation(ctx context.Context, client Session,
 		return nil, err
 	}
 	nextSnapshot := appserver.CompactSnapshot(previous, current, time.Now().UTC())
-	if current.LatestTurnStatus == "inProgress" || current.SessionTailActiveTool || current.WaitingOnApproval || current.WaitingOnReply {
+	if current.LatestTurnStatus == "inProgress" || current.WaitingOnApproval || current.WaitingOnReply {
 		nextSnapshot.NextPollAfter = model.TimeString(time.Now().UTC().Add(s.cfg.ObserverPollInterval).Format(time.RFC3339Nano))
 	}
 	if err := s.store.UpsertSnapshot(ctx, threadID, nextSnapshot); err != nil {
