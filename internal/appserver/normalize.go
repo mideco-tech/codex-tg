@@ -32,8 +32,6 @@ type ThreadReadSnapshot struct {
 	LatestToolStatus          string
 	LatestToolOutput          string
 	LatestToolFP              string
-	LatestToolSource          string
-	SessionTailActiveTool     bool
 	PlanPrompt                *model.PlanPrompt
 	DetailItems               []model.DetailItem
 }
@@ -65,6 +63,7 @@ func ThreadFromPayload(payload map[string]any) model.Thread {
 	title := stringValue(threadPayload["name"], stringValue(threadPayload["title"], id))
 	preview := stringValue(threadPayload["preview"], "")
 	status := statusText(threadPayload["status"])
+	preferredModel := stringValue(threadPayload["model"], stringValue(payload["model"], ""))
 	raw, _ := json.Marshal(threadPayload)
 	updatedAt := int64Value(threadPayload["updatedAt"])
 	activeTurnID := stringValue(threadPayload["activeTurnId"], "")
@@ -82,17 +81,18 @@ func ThreadFromPayload(payload map[string]any) model.Thread {
 		}
 	}
 	return model.Thread{
-		ID:            id,
-		Title:         title,
-		CWD:           cwd,
-		ProjectName:   project,
-		DirectoryName: directory,
-		UpdatedAt:     updatedAt,
-		Status:        status,
-		LastPreview:   preview,
-		ActiveTurnID:  activeTurnID,
-		Archived:      false,
-		Raw:           raw,
+		ID:             id,
+		Title:          title,
+		CWD:            cwd,
+		ProjectName:    project,
+		DirectoryName:  directory,
+		UpdatedAt:      updatedAt,
+		Status:         status,
+		LastPreview:    preview,
+		ActiveTurnID:   activeTurnID,
+		PreferredModel: preferredModel,
+		Archived:       false,
+		Raw:            raw,
 	}
 }
 
@@ -134,6 +134,7 @@ func SnapshotFromThreadRead(result map[string]any) ThreadReadSnapshot {
 	finalText, finalFP := latestFinalAgentMessage(items)
 	snapshot.LatestFinalText = finalText
 	snapshot.LatestFinalFP = finalFP
+	normalizeFinalizedTurn(&snapshot)
 	for i := len(items) - 1; i >= 0; i-- {
 		item, _ := items[i].(map[string]any)
 		itemType := strings.TrimSpace(stringValue(item["type"], ""))
@@ -161,6 +162,41 @@ func SnapshotFromThreadRead(result map[string]any) ThreadReadSnapshot {
 		}
 	}
 	return snapshot
+}
+
+func normalizeFinalizedTurn(snapshot *ThreadReadSnapshot) {
+	if snapshot == nil || strings.TrimSpace(snapshot.LatestFinalFP) == "" {
+		return
+	}
+	if snapshot.WaitingOnApproval || snapshot.WaitingOnReply {
+		return
+	}
+	if !terminalTurnStatus(snapshot.LatestTurnStatus) {
+		snapshot.LatestTurnStatus = "completed"
+	}
+	if strings.TrimSpace(snapshot.Thread.ActiveTurnID) == strings.TrimSpace(snapshot.LatestTurnID) {
+		snapshot.Thread.ActiveTurnID = ""
+	}
+	if statusLooksLive(snapshot.Thread.Status) || strings.TrimSpace(snapshot.Thread.Status) == "" {
+		snapshot.Thread.Status = "completed"
+	}
+}
+
+func terminalTurnStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "completed", "interrupted", "failed", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func statusLooksLive(status string) bool {
+	status = strings.TrimSpace(strings.ToLower(status))
+	return status == "active" ||
+		strings.HasPrefix(status, "active[") ||
+		strings.Contains(status, "inprogress") ||
+		strings.Contains(status, "running")
 }
 
 func DiffSnapshot(previous *model.ThreadSnapshotState, current ThreadReadSnapshot) []model.ObserverEvent {
@@ -444,12 +480,82 @@ func NormalizeLiveNotification(event Event, thread model.Thread) []model.Observe
 	return nil
 }
 
+func ToolSnapshotFromLiveNotification(event Event, thread model.Thread) (ThreadReadSnapshot, bool) {
+	if event.Channel != "notification" {
+		return ThreadReadSnapshot{}, false
+	}
+	method := strings.TrimSpace(strings.ToLower(event.Method))
+	switch method {
+	case "item/started", "item/updated", "item/completed":
+	default:
+		return ThreadReadSnapshot{}, false
+	}
+	params := event.Params
+	item := asMap(params["item"])
+	itemType := strings.TrimSpace(stringValue(item["type"], ""))
+	switch itemType {
+	case "commandExecution", "fileChange", "dynamicToolCall", "mcpToolCall", "webSearch":
+	default:
+		return ThreadReadSnapshot{}, false
+	}
+	label := strings.TrimSpace(toolLabel(item))
+	output := toolOutput(item)
+	if label == "" && strings.TrimSpace(output) == "" {
+		return ThreadReadSnapshot{}, false
+	}
+	threadID := nestedThreadID(params)
+	if threadID == "" {
+		threadID = thread.ID
+	}
+	if threadID == "" {
+		return ThreadReadSnapshot{}, false
+	}
+	turnID := stringValue(params["turnId"], "")
+	status := strings.TrimSpace(toolStatus(item, ""))
+	if status == "" {
+		status = strings.TrimSpace(stringValue(params["status"], ""))
+	}
+	if status == "" {
+		if method == "item/completed" {
+			status = "completed"
+		} else {
+			status = "running"
+		}
+	}
+	toolID := stringValue(item["id"], itemType)
+	progressText := label
+	if progressText == "" {
+		progressText = strings.TrimSpace(output)
+	}
+	snapshot := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:           threadID,
+			Title:        firstString(thread.Title, stringValue(params["threadTitle"], threadID)),
+			ProjectName:  firstString(thread.ProjectName, stringValue(params["projectName"], "")),
+			Status:       "inProgress",
+			ActiveTurnID: turnID,
+		},
+		LatestTurnID:       turnID,
+		LatestTurnStatus:   "inProgress",
+		LatestProgressText: progressText,
+		LatestToolID:       toolID,
+		LatestToolKind:     itemType,
+		LatestToolLabel:    label,
+		LatestToolStatus:   status,
+		LatestToolOutput:   output,
+	}
+	snapshot.LatestProgressFP = fingerprint("live-progress", itemType, toolID, progressText, status, output)
+	snapshot.LatestToolFP = fingerprint("live-tool", itemType, toolID, label, status, output)
+	snapshot.DetailItems = liveToolDetailItems(snapshot)
+	return snapshot, true
+}
+
 func PendingApprovalFromServerRequest(event Event) (*model.PendingApproval, bool) {
 	if event.Channel != "server_request" {
 		return nil, false
 	}
 	method := strings.ToLower(strings.TrimSpace(event.Method))
-	requestID := fmt.Sprintf("%v", event.ID)
+	requestID := rpcString(event.ID)
 	if requestID == "" {
 		return nil, false
 	}
@@ -576,7 +682,7 @@ func renderItemText(item map[string]any) string {
 	case "plan":
 		return strings.TrimSpace(planText(item))
 	case "commandExecution":
-		command := strings.TrimSpace(stringValue(item["command"], ""))
+		command := cleanToolText(stringValue(item["command"], ""))
 		status := strings.TrimSpace(stringValue(item["status"], ""))
 		output := strings.TrimSpace(stringValue(item["aggregatedOutput"], ""))
 		if output != "" {
@@ -594,7 +700,7 @@ func renderItemText(item map[string]any) string {
 		}
 		return command
 	case "fileChange":
-		path := strings.TrimSpace(stringValue(item["path"], ""))
+		path := cleanToolText(stringValue(item["path"], ""))
 		if path != "" {
 			return "File changed: " + path
 		}
@@ -808,6 +914,37 @@ func normalizeAgentMessagePhase(item map[string]any) string {
 	return strings.TrimSpace(stringValue(item["phase"], ""))
 }
 
+func liveToolDetailItems(snapshot ThreadReadSnapshot) []model.DetailItem {
+	if strings.TrimSpace(snapshot.LatestToolFP) == "" {
+		return nil
+	}
+	items := []model.DetailItem{{
+		ID:     snapshot.LatestToolID,
+		Kind:   model.DetailItemTool,
+		Label:  snapshot.LatestToolLabel,
+		Status: snapshot.LatestToolStatus,
+		FP:     snapshot.LatestToolFP,
+	}}
+	if output := strings.TrimSpace(snapshot.LatestToolOutput); output != "" {
+		items = append(items, model.DetailItem{
+			ID:     snapshot.LatestToolID + ":output",
+			Kind:   model.DetailItemOutput,
+			Output: output,
+			FP:     fingerprint("live-tool-output", snapshot.LatestToolID, output),
+		})
+	}
+	return items
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		if text := strings.TrimSpace(value); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -819,18 +956,26 @@ func toolLabel(item map[string]any) string {
 	itemType := strings.TrimSpace(stringValue(item["type"], ""))
 	switch itemType {
 	case "commandExecution":
-		if command := strings.TrimSpace(stringValue(item["command"], "")); command != "" {
+		if command := cleanToolText(stringValue(item["command"], "")); command != "" {
 			return command
 		}
 	case "fileChange":
-		if path := strings.TrimSpace(stringValue(item["path"], "")); path != "" {
+		if path := cleanToolText(stringValue(item["path"], "")); path != "" {
 			return "File changed: " + path
 		}
+	case "dynamicToolCall", "mcpToolCall":
+		if name := firstToolText(item, "tool", "name", "namespace"); name != "" {
+			return name
+		}
+	case "webSearch":
+		if query := firstToolText(item, "query", "text"); query != "" {
+			return query
+		}
 	}
-	if text := strings.TrimSpace(renderItemText(item)); text != "" {
+	if text := cleanToolText(renderItemText(item)); text != "" {
 		return text
 	}
-	return itemType
+	return ""
 }
 
 func toolStatus(item map[string]any, turnStatus string) string {
@@ -844,10 +989,37 @@ func toolOutput(item map[string]any) string {
 	if output := stringValue(item["aggregatedOutput"], ""); strings.TrimSpace(output) != "" {
 		return output
 	}
+	if strings.TrimSpace(stringValue(item["type"], "")) == "commandExecution" {
+		for _, key := range []string{"output", "stdout", "stderr"} {
+			if output := stringValue(item[key], ""); strings.TrimSpace(output) != "" {
+				return output
+			}
+		}
+		return ""
+	}
 	if text := renderItemText(item); strings.TrimSpace(text) != "" {
 		return text
 	}
 	return ""
+}
+
+func firstToolText(item map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if text := cleanToolText(stringValue(item[key], "")); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func cleanToolText(value string) string {
+	value = strings.TrimSpace(value)
+	switch value {
+	case "", "<nil>", "{}", "[]", "map[]":
+		return ""
+	default:
+		return value
+	}
 }
 
 func syntheticPlanPrompt(thread model.Thread, turnID string, items []any, waiting bool) *model.PlanPrompt {
@@ -950,7 +1122,7 @@ func extractChoiceOptions(payload map[string]any) []string {
 				}
 			case map[string]any:
 				for _, field := range []string{"label", "text", "value"} {
-					if text := strings.TrimSpace(fmt.Sprintf("%v", typed[field])); text != "" && text != "<nil>" {
+					if text := rpcString(typed[field]); text != "" {
 						out = append(out, text)
 						break
 					}
@@ -1031,8 +1203,8 @@ func stringSliceValue(value any) []string {
 	}
 	out := make([]string, 0, len(items))
 	for _, item := range items {
-		text := strings.TrimSpace(fmt.Sprintf("%v", item))
-		if text != "" && text != "<nil>" {
+		text := rpcString(item)
+		if text != "" {
 			out = append(out, text)
 		}
 	}
@@ -1050,6 +1222,9 @@ func fingerprint(parts ...string) string {
 
 func stringValue(value any, fallback string) string {
 	if typed, ok := value.(string); ok {
+		if strings.TrimSpace(typed) == "<nil>" {
+			return fallback
+		}
 		return typed
 	}
 	return fallback

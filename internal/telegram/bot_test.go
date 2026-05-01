@@ -25,6 +25,19 @@ func TestBotEditMessageRejectsMultiChunkPayload(t *testing.T) {
 	}
 }
 
+func TestSanitizeTelegramLogErrorRedactsBotTokenURL(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf(`Post "https://api.telegram.org/bot123456789:AAF_secret-token/getUpdates": context deadline exceeded`)
+	got := sanitizeTelegramLogError(err)
+	if strings.Contains(got, "123456789:AAF_secret-token") {
+		t.Fatalf("sanitizeTelegramLogError leaked token: %q", got)
+	}
+	if !strings.Contains(got, "bot<redacted>") {
+		t.Fatalf("sanitizeTelegramLogError = %q, want redacted marker", got)
+	}
+}
+
 func TestBotSendMessageChunksAndReturnsLastMessageID(t *testing.T) {
 	t.Parallel()
 

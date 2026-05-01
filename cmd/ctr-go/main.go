@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"github.com/mideco-tech/codex-tg/internal/config"
 	"github.com/mideco-tech/codex-tg/internal/daemon"
 	"github.com/mideco-tech/codex-tg/internal/telegram"
+	"github.com/mideco-tech/codex-tg/internal/version"
 )
 
 func main() {
@@ -44,6 +46,9 @@ func run(args []string) error {
 		return runDoctor(cfg)
 	case "repair":
 		return runRepair(cfg)
+	case "version":
+		_, _ = fmt.Fprintf(os.Stdout, "ctr-go v%s\n", version.Version)
+		return nil
 	case "help", "--help", "-h":
 		printUsage(os.Stdout)
 		return nil
@@ -59,12 +64,13 @@ func runDaemon(cfg config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logger := log.New(os.Stdout, "", log.LstdFlags)
+	logger := daemonLogger(cfg)
 	service, err := daemon.New(cfg)
 	if err != nil {
 		return err
 	}
 	defer service.Close()
+	service.SetLogger(diagnosticLogger(cfg, logger))
 
 	bot, err := telegram.NewBot(cfg, service, logger)
 	if err != nil {
@@ -79,6 +85,24 @@ func runDaemon(cfg config.Config) error {
 	}
 	logger.Printf("ctr-go daemon running with %s", bot.String())
 	return bot.Run(ctx)
+}
+
+func daemonLogger(cfg config.Config) *log.Logger {
+	return log.New(daemonLogOutput(cfg), "", log.LstdFlags)
+}
+
+func daemonLogOutput(cfg config.Config) io.Writer {
+	if !cfg.LogEnabled {
+		return io.Discard
+	}
+	return os.Stdout
+}
+
+func diagnosticLogger(cfg config.Config, logger *log.Logger) *log.Logger {
+	if !cfg.LogEnabled || !cfg.DiagnosticLogs {
+		return nil
+	}
+	return logger
 }
 
 func runStatus(cfg config.Config) error {
@@ -169,6 +193,7 @@ func printUsage(out *os.File) {
 	_, _ = fmt.Fprintln(out, "  ctr-go status")
 	_, _ = fmt.Fprintln(out, "  ctr-go doctor")
 	_, _ = fmt.Fprintln(out, "  ctr-go repair")
+	_, _ = fmt.Fprintln(out, "  ctr-go version")
 }
 
 func formatIDs(values []int64) string {

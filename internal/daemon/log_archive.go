@@ -252,11 +252,11 @@ func threadPathFromRaw(raw json.RawMessage) string {
 		return ""
 	}
 	if threadNode, ok := payload["thread"].(map[string]any); ok {
-		if path := strings.TrimSpace(fmt.Sprintf("%v", threadNode["path"])); path != "" && path != "<nil>" {
+		if path := payloadMapString(threadNode, "path"); path != "" {
 			return path
 		}
 	}
-	if path := strings.TrimSpace(fmt.Sprintf("%v", payload["path"])); path != "" && path != "<nil>" {
+	if path := payloadMapString(payload, "path"); path != "" {
 		return path
 	}
 	return ""
@@ -449,15 +449,41 @@ func renderCommand(value any) string {
 	case []any:
 		parts := make([]string, 0, len(typed))
 		for _, item := range typed {
-			text := strings.TrimSpace(fmt.Sprintf("%v", item))
+			text := payloadString(item)
 			if text != "" {
 				parts = append(parts, text)
 			}
 		}
 		return strings.Join(parts, " ")
+	case map[string]any:
+		if command := firstPayloadString(typed, "command", "cmd", "input", "text"); command != "" {
+			return command
+		}
+		if command := commandFromArgumentsString(valueFromMap(typed, "arguments")); command != "" {
+			return command
+		}
+		return firstPayloadString(typed, "name", "tool")
 	default:
-		return strings.TrimSpace(fmt.Sprintf("%v", value))
+		return payloadString(value)
 	}
+}
+
+func commandFromArgumentsString(arguments string) string {
+	arguments = strings.TrimSpace(arguments)
+	if arguments == "" || arguments == "<nil>" || arguments == "{}" || arguments == "[]" || arguments == "map[]" {
+		return ""
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(arguments), &parsed); err == nil {
+		if len(parsed) == 0 {
+			return ""
+		}
+		if command := firstPayloadString(parsed, "command", "cmd", "input", "query", "path", "text"); command != "" {
+			return command
+		}
+		return ""
+	}
+	return arguments
 }
 
 func indentBlock(text string) string {
@@ -472,14 +498,14 @@ func valueFromMap(values map[string]any, key string) string {
 	if values == nil {
 		return ""
 	}
-	return strings.TrimSpace(fmt.Sprintf("%v", values[key]))
+	return payloadMapString(values, key)
 }
 
 func valueFromMapAny(values map[string]any, key string) any {
 	if values == nil {
 		return nil
 	}
-	return values[key]
+	return payloadAny(values[key])
 }
 
 func writeLogArchive(destination, sessionPath, humanLog string) error {

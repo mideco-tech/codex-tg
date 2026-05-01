@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,6 +35,7 @@ type recordingSender struct {
 	documents []recordedDocument
 	edits     []recordedMessage
 	deletes   []recordedMessage
+	editErr   error
 }
 
 func (s *recordingSender) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec) (int64, error) {
@@ -53,11 +55,17 @@ func (s *recordingSender) SendRenderedMessages(ctx context.Context, chatID, topi
 }
 
 func (s *recordingSender) EditMessage(ctx context.Context, chatID, topicID, messageID int64, text string, buttons [][]model.ButtonSpec) error {
+	if s.editErr != nil {
+		return s.editErr
+	}
 	s.edits = append(s.edits, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: text, buttons: buttons})
 	return nil
 }
 
 func (s *recordingSender) EditRenderedMessage(ctx context.Context, chatID, topicID, messageID int64, rendered model.RenderedMessage, buttons [][]model.ButtonSpec) error {
+	if s.editErr != nil {
+		return s.editErr
+	}
 	s.edits = append(s.edits, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: rendered.Text, entities: rendered.Entities, buttons: buttons})
 	return nil
 }
@@ -259,6 +267,12 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 	if len(sender.messages) != 5 {
 		t.Fatalf("messages = %#v, want New run + [User] + trio", sender.messages)
 	}
+	if strings.Contains(sender.messages[0].text, "Status:") {
+		t.Fatalf("run notice text = %q, want no status", sender.messages[0].text)
+	}
+	if strings.Contains(sender.messages[1].text, "Status:") {
+		t.Fatalf("user notice text = %q, want no status", sender.messages[1].text)
+	}
 	runNoticeID := sender.messages[0].messageID
 	userID := sender.messages[1].messageID
 	toolID := sender.messages[3].messageID
@@ -273,6 +287,12 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 		LatestUserMessageFP:   "user-final-cleanup-fp",
 		LatestFinalFP:         "final-cleanup-fp",
 		LatestFinalText:       "Cleanup done.",
+		LatestAgentMessageEntries: []appserver.AgentMessageEntry{{
+			ID:    "agent-final-cleanup",
+			Phase: "commentary",
+			Text:  "This completed commentary belongs in Details only.",
+			FP:    "agent-final-cleanup-fp",
+		}},
 	}, time.Now().UTC())
 	if err := service.store.UpsertSnapshot(ctx, thread.ID, completed); err != nil {
 		t.Fatalf("UpsertSnapshot(completed) failed: %v", err)
@@ -295,6 +315,10 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 	}
 	if len(sender.edits) == 0 || !hasHeaderKind(sender.edits[len(sender.edits)-1].text, "Final") {
 		t.Fatalf("edits = %#v, want summary edited into Final", sender.edits)
+	}
+	finalText := sender.edits[len(sender.edits)-1].text
+	if strings.Contains(finalText, "[commentary]") || strings.Contains(finalText, "This completed commentary belongs in Details only.") {
+		t.Fatalf("final text = %q, want final answer without commentary transcript", finalText)
 	}
 }
 
@@ -391,6 +415,36 @@ func TestSummaryPanelDisplaysAgentMessagesChronologically(t *testing.T) {
 	}
 }
 
+func TestSummaryPanelRemovesNilLiteralBeforeRendering(t *testing.T) {
+	t.Parallel()
+
+	thread := model.Thread{
+		ID:          "thread-nil-summary",
+		Title:       "Nil summary",
+		ProjectName: "Codex",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-nil-summary",
+		LatestTurnStatus: "<nil>",
+		LatestAgentMessageEntries: []appserver.AgentMessageEntry{
+			{ID: "agent-nil", Phase: "<nil>", Text: "Before <nil> after"},
+		},
+	}
+
+	service := newTestService(t)
+	messages := service.renderSummaryPanelMarkdown(context.Background(), thread, snapshot, snapshot.LatestAgentMessageEntries, nil)
+	if len(messages) != 1 {
+		t.Fatalf("len(messages) = %d, want 1", len(messages))
+	}
+	if strings.Contains(messages[0].Text, "<nil>") {
+		t.Fatalf("summary text leaked nil literal: %q", messages[0].Text)
+	}
+	if !strings.Contains(messages[0].Text, "Before  after") {
+		t.Fatalf("summary text = %q, want sanitized agent text", messages[0].Text)
+	}
+}
+
 func TestSyncThreadPanelDoesNotUseDocumentDeliveryForToolOutput(t *testing.T) {
 	t.Parallel()
 
@@ -480,8 +534,14 @@ func TestGlobalObserverSyncSendsUserRequestNoticeOnceBeforeTrio(t *testing.T) {
 	if !strings.Contains(sender.messages[0].text, "New run:") {
 		t.Fatalf("first message = %q, want New run before [User]", sender.messages[0].text)
 	}
+	if strings.Contains(sender.messages[0].text, "Status:") {
+		t.Fatalf("run notice text = %q, want no status", sender.messages[0].text)
+	}
 	if !hasHeaderKind(sender.messages[1].text, "User") {
 		t.Fatalf("second message = %q, want [User] before trio", sender.messages[1].text)
+	}
+	if strings.Contains(sender.messages[1].text, "Status:") {
+		t.Fatalf("user notice text = %q, want no status", sender.messages[1].text)
 	}
 	if strings.Contains(sender.messages[1].text, "```") {
 		t.Fatalf("user notice contains raw markdown: %q", sender.messages[1].text)
@@ -545,8 +605,14 @@ func TestGlobalObserverSyncCreatesRunNoticeAndUserPlaceholderBeforeTrioWithoutUs
 	if !strings.Contains(sender.messages[0].text, "New run:") {
 		t.Fatalf("first message = %q, want New run", sender.messages[0].text)
 	}
+	if strings.Contains(sender.messages[0].text, "Status:") {
+		t.Fatalf("run notice text = %q, want no status", sender.messages[0].text)
+	}
 	if !hasHeaderKind(sender.messages[1].text, "User") || !strings.Contains(sender.messages[1].text, "User prompt was not available") {
 		t.Fatalf("second message = %q, want [User] placeholder", sender.messages[1].text)
+	}
+	if strings.Contains(sender.messages[1].text, "Status:") {
+		t.Fatalf("user placeholder text = %q, want no status", sender.messages[1].text)
 	}
 	if !hasHeaderKind(sender.messages[2].text, "commentary") || !hasHeaderKind(sender.messages[3].text, "Tool") || !hasHeaderKind(sender.messages[4].text, "Output") {
 		t.Fatalf("messages = %#v, want trio after New run and [User]", sender.messages)
@@ -620,6 +686,9 @@ func TestLateUserPromptEditsExistingUserPlaceholder(t *testing.T) {
 	foundEdit := false
 	for _, edit := range sender.edits {
 		if edit.messageID == userMessageID && hasHeaderKind(edit.text, "User") && strings.Contains(edit.text, "mtkachenko2") {
+			if strings.Contains(edit.text, "Status:") {
+				t.Fatalf("user placeholder edit text = %q, want no status", edit.text)
+			}
 			foundEdit = true
 		}
 	}
@@ -639,6 +708,38 @@ func TestLateUserPromptEditsExistingUserPlaceholder(t *testing.T) {
 	}
 	if route == nil || route.ThreadID != thread.ID || route.TurnID != "turn-late-user" || route.ItemID != "user-late" {
 		t.Fatalf("user route = %#v, want edited [User] route", route)
+	}
+
+	userEditCount := 0
+	for _, edit := range sender.edits {
+		if edit.messageID == userMessageID {
+			userEditCount++
+		}
+	}
+	statusOnly := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          "turn-late-user",
+		LatestTurnStatus:      "interrupted",
+		LatestUserMessageID:   "user-late",
+		LatestUserMessageText: "Use `mtkachenko2` config.",
+		LatestUserMessageFP:   "user-late-fp",
+		LatestToolID:          "tool-late-user",
+		LatestToolLabel:       "Start-Sleep -Seconds 900",
+		LatestToolStatus:      "running",
+		LatestToolFP:          "tool-late-user-fp",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, statusOnly); err != nil {
+		t.Fatalf("UpsertSnapshot(statusOnly) failed: %v", err)
+	}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
+	afterStatusUserEditCount := 0
+	for _, edit := range sender.edits {
+		if edit.messageID == userMessageID {
+			afterStatusUserEditCount++
+		}
+	}
+	if afterStatusUserEditCount != userEditCount {
+		t.Fatalf("user edit count after status-only sync = %d, want %d; edits=%#v", afterStatusUserEditCount, userEditCount, sender.edits)
 	}
 }
 
@@ -681,6 +782,9 @@ func TestTelegramInputSyncDoesNotDuplicateUserRequestNotice(t *testing.T) {
 	if !strings.Contains(sender.messages[0].text, "New run:") || !strings.Contains(sender.messages[0].text, "Source: Telegram") {
 		t.Fatalf("first message = %q, want Telegram New run notice", sender.messages[0].text)
 	}
+	if strings.Contains(sender.messages[0].text, "Status:") {
+		t.Fatalf("run notice text = %q, want no status", sender.messages[0].text)
+	}
 	for _, message := range sender.messages {
 		if hasHeaderKind(message.text, "User") {
 			t.Fatalf("unexpected user notice for Telegram-originated input: %#v", sender.messages)
@@ -692,6 +796,75 @@ func TestTelegramInputSyncDoesNotDuplicateUserRequestNotice(t *testing.T) {
 	}
 	if panel == nil || panel.SourceMode != model.PanelSourceTelegramInput || panel.RunNoticeMessageID != sender.messages[0].messageID || panel.LastUserNoticeFP != "" {
 		t.Fatalf("panel = %#v, want telegram_input with empty user notice fp", panel)
+	}
+}
+
+func TestGlobalObserverDoesNotRecreateTelegramOriginPanelOnEditFailure(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	thread := model.Thread{
+		ID:          "thread-telegram-origin-no-global-duplicate",
+		Title:       "Telegram prompt",
+		ProjectName: "Codex",
+		CWD:         `C:\Users\you\Projects\Codex`,
+		UpdatedAt:   time.Now().UTC().Unix(),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, "turn-telegram-origin-no-global-duplicate"); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-telegram-origin-no-global-duplicate",
+		LatestTurnStatus: "inProgress",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot(initial) failed: %v", err)
+	}
+
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
+	if len(sender.messages) != 4 {
+		t.Fatalf("initial message count = %d, want New run + trio; messages=%#v", len(sender.messages), sender.messages)
+	}
+	panelBefore, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel(before) failed: %v", err)
+	}
+	if panelBefore == nil || panelBefore.SourceMode != model.PanelSourceTelegramInput {
+		t.Fatalf("panel before = %#v, want telegram_input", panelBefore)
+	}
+
+	nextSnapshot := appserver.CompactSnapshot(&snapshot, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-telegram-origin-no-global-duplicate",
+		LatestTurnStatus: "inProgress",
+		LatestAgentMessageEntries: []appserver.AgentMessageEntry{
+			{ID: "agent-1", Phase: model.DetailItemCommentary, Text: "Working.", FP: "agent-1-fp"},
+		},
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, nextSnapshot); err != nil {
+		t.Fatalf("UpsertSnapshot(next) failed: %v", err)
+	}
+	sender.editErr = errors.New("forced edit failure")
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
+
+	if len(sender.messages) != 4 {
+		t.Fatalf("message count after global sync = %d, want no duplicate New run/trio; messages=%#v", len(sender.messages), sender.messages)
+	}
+	panelAfter, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel(after) failed: %v", err)
+	}
+	if panelAfter == nil || panelAfter.ID != panelBefore.ID || panelAfter.SourceMode != model.PanelSourceTelegramInput {
+		t.Fatalf("panel after = %#v, want original telegram_input panel %#v", panelAfter, panelBefore)
 	}
 }
 
@@ -991,6 +1164,156 @@ func TestSyncThreadPanelToTargetCreatesPanelForRecentTerminalGlobalObserverChang
 	}
 	if panel == nil {
 		t.Fatal("expected panel for recent terminal observer change")
+	}
+}
+
+func TestTerminalObserverPanelWithRunNoticeCollapsesWhenFinalAppears(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	thread := model.Thread{
+		ID:          "thread-terminal-run-notice-final",
+		Title:       "Terminal with prompt",
+		ProjectName: "Codex",
+		CWD:         `C:\Users\you\Projects\Codex`,
+		UpdatedAt:   time.Now().UTC().Unix(),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	initial := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          "turn-terminal-run-notice",
+		LatestTurnStatus:      "completed",
+		LatestUserMessageID:   "user-terminal-run-notice",
+		LatestUserMessageText: "Finish from GUI.",
+		LatestUserMessageFP:   "user-terminal-run-notice-fp",
+		LatestToolID:          "tool-terminal-run-notice",
+		LatestToolLabel:       "go test ./...",
+		LatestToolStatus:      "completed",
+		LatestToolOutput:      "ok\n",
+		LatestToolFP:          "tool-terminal-run-notice-fp",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, initial); err != nil {
+		t.Fatalf("UpsertSnapshot(initial) failed: %v", err)
+	}
+
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
+	if len(sender.messages) != 5 {
+		t.Fatalf("initial messages = %#v, want New run + [User] + trio", sender.messages)
+	}
+	runNoticeID := sender.messages[0].messageID
+	toolID := sender.messages[3].messageID
+	outputID := sender.messages[4].messageID
+
+	finalSnapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          "turn-terminal-run-notice",
+		LatestTurnStatus:      "completed",
+		LatestUserMessageID:   "user-terminal-run-notice",
+		LatestUserMessageText: "Finish from GUI.",
+		LatestUserMessageFP:   "user-terminal-run-notice-fp",
+		LatestFinalFP:         "final-terminal-run-notice-fp",
+		LatestFinalText:       "Done from final answer.",
+		LatestAgentMessageEntries: []appserver.AgentMessageEntry{{
+			ID:    "agent-terminal-run-notice",
+			Phase: "commentary",
+			Text:  "Completed commentary should stay in Details.",
+			FP:    "agent-terminal-run-notice-fp",
+		}},
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, finalSnapshot); err != nil {
+		t.Fatalf("UpsertSnapshot(final) failed: %v", err)
+	}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
+
+	if len(sender.deletes) != 3 {
+		t.Fatalf("deletes = %#v, want New run + tool + output", sender.deletes)
+	}
+	wantDeletes := []int64{runNoticeID, toolID, outputID}
+	for index, want := range wantDeletes {
+		if sender.deletes[index].messageID != want {
+			t.Fatalf("delete[%d] = %d, want %d; deletes=%#v", index, sender.deletes[index].messageID, want, sender.deletes)
+		}
+	}
+	if len(sender.edits) == 0 {
+		t.Fatalf("edits = %#v, want final edit", sender.edits)
+	}
+	finalEdit := sender.edits[len(sender.edits)-1]
+	if !hasHeaderKind(finalEdit.text, "Final") {
+		t.Fatalf("last edit = %q, want Final", finalEdit.text)
+	}
+	if strings.Contains(finalEdit.text, "[commentary]") || strings.Contains(finalEdit.text, "Completed commentary should stay in Details.") {
+		t.Fatalf("final edit = %q, want final answer only", finalEdit.text)
+	}
+	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
+	}
+	if panel == nil || panel.LastFinalNoticeFP != "final-terminal-run-notice-fp" {
+		t.Fatalf("panel = %#v, want final fingerprint recorded", panel)
+	}
+}
+
+func TestTerminalSyncDoesNotRewriteRunNotice(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	thread := model.Thread{
+		ID:          "thread-terminal-run-notice-no-edit",
+		Title:       "Terminal no run edit",
+		ProjectName: "Codex",
+		CWD:         `C:\Users\you\Projects\Codex`,
+		UpdatedAt:   time.Now().UTC().Unix(),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
+	if _, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
+		ChatID:             target.ChatID,
+		TopicID:            target.TopicID,
+		ProjectName:        thread.ProjectName,
+		ThreadID:           thread.ID,
+		SourceMode:         model.PanelSourceGlobalObserver,
+		SummaryMessageID:   102,
+		ToolMessageID:      103,
+		OutputMessageID:    104,
+		RunNoticeMessageID: 101,
+		LastRunNoticeFP:    "legacy-run-notice-with-status",
+		CurrentTurnID:      "turn-terminal-no-run-edit",
+		Status:             "inProgress",
+		ArchiveEnabled:     true,
+	}); err != nil {
+		t.Fatalf("CreateThreadPanel failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          "turn-terminal-no-run-edit",
+		LatestTurnStatus:      "completed",
+		LatestUserMessageID:   "user-terminal-no-run-edit",
+		LatestUserMessageText: "Finish without final yet.",
+		LatestUserMessageFP:   "user-terminal-no-run-edit-fp",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
+
+	for _, edit := range sender.edits {
+		if edit.messageID == 101 {
+			t.Fatalf("edits = %#v, want no terminal run-notice rewrite", sender.edits)
+		}
 	}
 }
 

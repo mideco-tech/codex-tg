@@ -10,6 +10,9 @@
 - The default header shape is:
   `emoji [Project] [Thread] [T:thread] [R:run] [Kind]`
 - Emoji markers are visual hints only. Routing correctness depends on persisted message routes and callback route tokens, not rendered text.
+- Short `T:` and `R:` chips are copy hints only. They are not route authority and are not sufficient for explicit commands that need the full Codex id.
+- `/context` must show the full bound `Thread ID` when a thread is available.
+- Live summary and Final Card actions expose `Get thread id`, which sends a separate copyable message with full `Thread ID` and `Turn ID`.
 - Marker assignment is deterministic by `threadId`, but the runtime avoids active marker collisions while palette slots are available.
 - Marker assignments remain reserved for 30 minutes after the last render, reducing confusing reuse in nearby chat history.
 - When active threads exceed the palette, the runtime may reuse a base emoji with suffixes such as `#2`.
@@ -21,6 +24,7 @@
 - Renderers must use a shared identity header helper instead of hand-written `[Project] [Thread]` strings.
 - The first release after this ADR may edit existing panels because header hashes change.
 - Tests must assert identity presence by message kind and route metadata, not exact string prefixes like `[Final]`.
+- Tests must cover full-id access through `/context`, live summary cards, and Final Cards.
 - Live Telegram e2e for UI changes must include at least two parallel Codex threads, so marker/chip separation is verified in the real chat.
 
 ## Non-goals

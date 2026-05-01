@@ -23,9 +23,8 @@ The daemon uses `codex app-server` over stdio. It does not use `codex exec resum
 
 ## Observer Model
 
-Live notifications are used for daemon-owned runs. Foreign GUI/CLI runs are covered through bounded `thread/read` polling and session-tail overlay for active tools.
+Live notifications are used for daemon-owned runs. Foreign GUI/CLI runs are covered through bounded `thread/read` polling. Local session JSONL is reserved for explicit log exports, not live observer state.
 
 ## State
 
 SQLite stores routes, callback tokens, bindings, observer target, panels, pending prompts, and delivery metadata.
-

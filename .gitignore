@@ -1,5 +1,14 @@
 .env
 .env.local
+.env.*
+!.env.example
+
+# Local Telegram/MTProto live-E2E credentials and session state.
+*.session
+*.session-*
+*.session-journal
+telegram.env
+telegram-user-test/
 
 *.exe
 *.log
@@ -11,7 +20,6 @@
 bin/
 data/
 logs/
-telegram-user-test/
 
 coverage.out
 dist/

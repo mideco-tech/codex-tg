@@ -70,6 +70,9 @@ func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread mod
 			s.callbackButton(ctx, "Show", "show_thread", thread.ID, snapshot.LatestTurnID, "", nil),
 			s.callbackButton(ctx, "Bind here", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil),
 		},
+		{
+			s.callbackButton(ctx, "Get thread id", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
+		},
 	}
 	header := strings.Join([]string{
 		s.visualHeader(ctx, "Final", thread, snapshot.LatestTurnID),
@@ -80,7 +83,7 @@ func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread mod
 }
 
 func renderSingleMarkdownCard(header, markdown string) model.RenderedMessage {
-	body := strings.TrimSpace(markdown)
+	body := strings.TrimSpace(cleanTelegramNilLiteral(markdown))
 	truncated := false
 	for attempts := 0; attempts < 12; attempts++ {
 		candidate := body
@@ -182,6 +185,7 @@ func (s *Service) editPanelCard(ctx context.Context, chatID, topicID, messageID 
 	if sender == nil {
 		return fmt.Errorf("telegram sender is not ready")
 	}
+	s.logTelegramRenderedMessagesContainsNil(panel.ThreadID, snapshot.LatestTurnID, "details", messageID, []model.RenderedMessage{message})
 	if err := sender.EditRenderedMessage(ctx, chatID, topicID, messageID, message, buttons); err != nil {
 		return err
 	}
@@ -219,7 +223,11 @@ func (s *Service) renderDetailsCard(ctx context.Context, panelID int64, thread m
 			start := state.Page * detailsPageSize
 			end := minInt(start+detailsPageSize, len(commentaries))
 			for index := start; index < end; index++ {
-				segments = append(segments, tgformat.Plain(fmt.Sprintf("\n\n[commentary %d]\n", index+1)), tgformat.Markdown(strings.TrimSpace(commentaries[index].Text)))
+				text := strings.TrimSpace(cleanTelegramNilLiteral(commentaries[index].Text))
+				if text == "" {
+					continue
+				}
+				segments = append(segments, tgformat.Plain(fmt.Sprintf("\n\n[commentary %d]\n", index+1)), tgformat.Markdown(text))
 			}
 			segments = append(segments, tgformat.Plain(fmt.Sprintf("\n\nPage %d/%d", state.Page+1, totalPages)))
 		}
@@ -240,9 +248,9 @@ func appendToolDetailSegments(segments []tgformat.Segment, items []model.DetailI
 	for _, item := range items {
 		switch item.Kind {
 		case model.DetailItemTool:
-			label := strings.TrimSpace(item.Label)
+			label := strings.TrimSpace(cleanTelegramNilLiteral(item.Label))
 			if label == "" {
-				label = strings.TrimSpace(item.Text)
+				label = strings.TrimSpace(cleanTelegramNilLiteral(item.Text))
 			}
 			segments = append(segments, tgformat.Plain("\n\n[Tool]\n"))
 			if label != "" {
@@ -252,9 +260,9 @@ func appendToolDetailSegments(segments []tgformat.Segment, items []model.DetailI
 				segments = append(segments, tgformat.Plain("\nStatus: "+status))
 			}
 		case model.DetailItemOutput:
-			output := strings.TrimSpace(item.Output)
+			output := strings.TrimSpace(cleanTelegramNilLiteral(item.Output))
 			if output == "" {
-				output = strings.TrimSpace(item.Text)
+				output = strings.TrimSpace(cleanTelegramNilLiteral(item.Text))
 			}
 			if output != "" {
 				segments = append(segments, tgformat.Plain("\n\n[Output]\n"), tgformat.Markdown("```\n"+trimOutputTail(output, perItem)+"\n```"))

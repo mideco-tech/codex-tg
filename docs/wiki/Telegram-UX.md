@@ -15,9 +15,23 @@ New run
 
 `New run`, `[Tool]`, and `[Output]` are deleted best-effort when the final card is rendered. `[User]` remains as a historical marker.
 
+`New run` identifies the source of the run. `[User]` carries the request text. Neither card shows run status.
+
 ## Final Card
 
-The active commentary card becomes `[Final]`. Details pagination edits the same message instead of sending more messages.
+The active commentary card owns run status and becomes `[Final]` when the final answer is available. `[Final]` shows final-answer text/status only; completed commentary and tool/output history stay in Details. Details pagination edits the same message instead of sending more messages.
+
+## Plan Mode
+
+Telegram can start a Codex Plan Mode turn with `/plan <thread> <text>`, `/plan_mode <thread> <text>`, or `/reply --plan <thread> <text>`. These commands use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not treated as Plan Mode.
+
+When Codex asks for input, the bridge renders a separate routeable `[Plan]` prompt-card. Replying to that card answers the same run. Structured buttons appear only when Codex provides choices.
+
+## Codex Settings
+
+`/settings`, `/model`, and `/effort` expose Telegram button menus for model selection and reasoning effort used by Telegram-started collaboration-mode turns. The selections are stored in SQLite daemon state and are not configured through public env vars.
+
+After a model or reasoning-effort selection, the menu message is edited into a compact settings summary without inline choice buttons. Use `/settings`, `/model`, or `/effort` to reopen the menus.
 
 ## Exports
 
@@ -25,4 +39,3 @@ The active commentary card becomes `[Final]`. Details pagination edits the same 
 - `Get full log`: on-demand archive from Codex session JSONL.
 
 Automatic tool-output document spam is intentionally forbidden.
-

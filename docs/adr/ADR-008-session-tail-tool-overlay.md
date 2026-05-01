@@ -1,7 +1,9 @@
 # ADR-008: Session Tail Tool Overlay
 
-- Status: accepted
+- Status: superseded by `docs/adr/ADR-013-retire-session-tail-tool-overlay.md`
 - Decision: `thread/read` remains the primary observer state source, but the daemon may use a bounded read-only tail of the local Codex session JSONL as an overlay for in-flight GUI/CLI tool calls that are not yet materialized in App Server snapshots.
+
+This ADR is historical. ADR-013 retires session-tail overlay from live Telegram rendering because it can resurrect stale tool calls from older JSONL entries.
 
 ## Decisions
 
