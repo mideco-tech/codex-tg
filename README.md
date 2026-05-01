@@ -1,6 +1,6 @@
-# codex-tg
+# codex-tg: Codex Telegram remote UI
 
-Telegram remote UI and observer for local OpenAI Codex App Server, built in Go.
+Codex Telegram bot and remote UI for local OpenAI Codex App Server, built in Go.
 
 `codex-tg` turns a Telegram bot into a mobile control surface for local Codex threads: it watches Codex GUI/CLI activity, keeps thread identity visible, routes replies back to the right thread, and exposes high-signal controls such as Plan Mode prompts, Stop, Steer, Details, Tools file, and Get full log.
 
@@ -152,15 +152,15 @@ See [docs/demo/telegram-plan-mode-demo.md](docs/demo/telegram-plan-mode-demo.md)
 Suggested repository description:
 
 ```text
-Telegram remote UI and observer for local OpenAI Codex App Server, built in Go.
+Codex Telegram bot and remote UI for local OpenAI Codex App Server. Observe, approve, and steer Codex from Telegram.
 ```
 
 Suggested topics:
 
 ```text
-openai-codex codex-cli codex-app-server telegram-bot go golang ai-agents
-coding-agent remote-control developer-tools local-first sqlite json-rpc
-agent-observer plan-mode telegram-ui windows macos linux
+codex telegram telegram-bot telegram-ui openai-codex codex-cli
+codex-app-server ai-agents coding-agent remote-control developer-tools
+local-first go golang macos windows linux plan-mode agent-observer json-rpc
 ```
 
 ## Documentation
