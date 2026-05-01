@@ -49,6 +49,8 @@ type Config struct {
 	AllowedChatIDs        []int64
 	DefaultCWD            string
 	PanelMode             string
+	LogEnabled            bool
+	DiagnosticLogs        bool
 	ObserverPollInterval  time.Duration
 	RequestTimeout        time.Duration
 	IndexRefreshInterval  time.Duration
@@ -84,6 +86,8 @@ func FromEnv() Config {
 		AllowedChatIDs:        parseInt64List(envFirst("CTR_GO_ALLOWED_CHAT_IDS", "CTR_ALLOWED_CHAT_IDS")),
 		DefaultCWD:            envString("CTR_GO_DEFAULT_CWD", cwd),
 		PanelMode:             normalizePanelMode(envString("CTR_GO_PANEL_MODE", "per_run")),
+		LogEnabled:            envBool("CTR_GO_LOG_ENABLED", true),
+		DiagnosticLogs:        envBool("CTR_GO_DIAGNOSTIC_LOGS", true),
 		ObserverPollInterval:  envDurationSeconds("CTR_GO_OBSERVER_POLL_SECONDS", 5*time.Second),
 		RequestTimeout:        envDurationSeconds("CTR_GO_REQUEST_TIMEOUT_SECONDS", 30*time.Second),
 		IndexRefreshInterval:  envDurationSeconds("CTR_GO_INDEX_REFRESH_SECONDS", 45*time.Second),
@@ -104,6 +108,8 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		AllowedChatIDs        []int64 `json:"allowed_chat_ids"`
 		DefaultCWD            string  `json:"default_cwd"`
 		PanelMode             string  `json:"panel_mode"`
+		LogEnabled            bool    `json:"log_enabled"`
+		DiagnosticLogs        bool    `json:"diagnostic_logs"`
 		ObserverPollSeconds   float64 `json:"observer_poll_seconds"`
 		RequestTimeoutSeconds float64 `json:"request_timeout_seconds"`
 		GoOS                  string  `json:"goos"`
@@ -118,6 +124,8 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		AllowedChatIDs:        c.AllowedChatIDs,
 		DefaultCWD:            c.DefaultCWD,
 		PanelMode:             normalizePanelMode(c.PanelMode),
+		LogEnabled:            c.LogEnabled,
+		DiagnosticLogs:        c.DiagnosticLogs,
 		ObserverPollSeconds:   c.ObserverPollInterval.Seconds(),
 		RequestTimeoutSeconds: c.RequestTimeout.Seconds(),
 		GoOS:                  runtime.GOOS,
@@ -153,6 +161,21 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "t", "yes", "y", "on", "enabled":
+		return true
+	case "0", "false", "f", "no", "n", "off", "disabled":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func envDurationSeconds(key string, fallback time.Duration) time.Duration {

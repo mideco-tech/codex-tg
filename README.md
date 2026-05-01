@@ -109,6 +109,8 @@ Primary environment variables:
 - `CTR_GO_ALLOWED_USER_IDS`
 - `CTR_GO_ALLOWED_CHAT_IDS`
 - `CTR_GO_DEFAULT_CWD`
+- `CTR_GO_LOG_ENABLED` (`true` by default; set `false`/`off`/`0` to discard daemon stdout logs)
+- `CTR_GO_DIAGNOSTIC_LOGS` (`true` by default; set `false`/`off`/`0` to keep normal bot logs but suppress structured `daemon_event` diagnostics)
 - `CTR_GO_OBSERVER_POLL_SECONDS`
 - `CTR_GO_REQUEST_TIMEOUT_SECONDS`
 - `CTR_GO_INDEX_REFRESH_SECONDS`

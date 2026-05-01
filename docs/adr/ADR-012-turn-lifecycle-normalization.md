@@ -32,7 +32,7 @@ That message is correct for a genuinely active-but-not-steerable turn, but wrong
 - `turn/steer` errors that indicate active/in-flight/not-steerable state still block fallback `turn/start`.
 - `turn/steer` errors that explicitly say there is no active turn are stale-active evidence. The bridge re-reads the thread and then may fall through to `turn/start` instead of returning the parallel-turn warning.
 - Telegram-originated turns remain marked by `thread_id + turn_id`. A global observer sync must not recreate a second panel/New run for the same marked turn if a Telegram-origin panel already exists.
-- Diagnostic logs for this lifecycle are structured, sanitized, and bounded. They may include thread/turn ids, route source, operation names, durations, item counts, and redacted stderr tails, but must not include prompt bodies, tokens, sessions, or unbounded file dumps.
+- Diagnostic logs for this lifecycle are structured, sanitized, and bounded. They may include thread/turn ids, route source, operation names, durations, item counts, and redacted stderr tails, but must not include prompt bodies, tokens, sessions, or unbounded file dumps. Operators can disable all daemon stdout logging with `CTR_GO_LOG_ENABLED=off`, or suppress only structured lifecycle diagnostics with `CTR_GO_DIAGNOSTIC_LOGS=off`.
 - Telegram-visible rendering treats missing, null, empty, and literal `"<nil>"` payload values as absent. App Server and rollout payloads may omit `command`, `arguments`, `request_id`, `phase`, `status`, or related fields while a turn is still active; the bridge must render empty text or a neutral fallback instead of leaking Go stringification artifacts to Telegram.
 
 ## Session Lifecycle Contract

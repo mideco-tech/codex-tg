@@ -100,6 +100,7 @@ Validation expectations:
 
 Latest local validation note:
 
+- 2026-04-30 PDT macOS live logging-flags E2E used MTProto readback against a private test thread after rebuilding and restarting the daemon. It verified sequential `pwd`, `date`, `printf 'alpha\nbeta\n'`, and `sleep 20; printf 'slow-command-done\n'` tool updates, with the slow command visible in `[Tool]` about 20 seconds before `[Output]`; a separate `/reply` math run reached `[Final]` with the expected answer and no visible interrupted state. Daemon diagnostics remained present with default logging flags.
 - 2026-04-30 PDT macOS live stale-command E2E used MTProto readback of `MessageEdited` updates for one private test-thread turn with `pwd`, `date`, `printf 'alpha\nbeta\n'`, and `sleep 20; printf 'slow-command-done\n'`. `[Tool]` showed the slow command in progress about 20 seconds before `[Output]` contained `slow-command-done`; no literal `"<nil>"` or stale session-tail command appeared.
 - 2026-04-29 macOS live nil-guard E2E completed all three scenarios and found no literal `"<nil>"` in edited New run, summary/Final, Tool, Output, or Details messages after the sanitizer change.
 

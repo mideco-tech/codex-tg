@@ -1942,6 +1942,20 @@ func TestDiagnosticLogsAreRateLimited(t *testing.T) {
 	}
 }
 
+func TestDiagnosticLoggerCanBeDisabled(t *testing.T) {
+	service := newTestService(t)
+	logs := captureServiceLogs(service)
+
+	service.logLifecycle("enabled_event", lifecycleFields{"value": "before"})
+	requireLogContains(t, logs.String(), `"event":"enabled_event"`)
+
+	service.SetLogger(nil)
+	service.logLifecycle("disabled_event", lifecycleFields{"value": "after"})
+	if got := logs.String(); strings.Contains(got, `"event":"disabled_event"`) {
+		t.Fatalf("disabled diagnostic log was written: %s", got)
+	}
+}
+
 func TestObserverSyncResultLogsAreDebounced(t *testing.T) {
 	service := newTestService(t)
 	logs := captureServiceLogs(service)

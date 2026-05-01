@@ -148,16 +148,21 @@ Primary tests:
 - `internal/daemon/service_test.go::TestTelegramTurnLifecycleLogsTurnStartFailure`
 - `internal/daemon/service_test.go::TestTelegramTurnLifecycleLogsRefreshFailuresAroundStart`
 - `internal/daemon/service_test.go::TestDiagnosticLogsAreRateLimited`
+- `internal/daemon/service_test.go::TestDiagnosticLoggerCanBeDisabled`
 - `internal/daemon/service_test.go::TestObserverSyncResultLogsAreDebounced`
 - `internal/daemon/service_test.go::TestGenericThreadReadDiagnosticsAreDebounced`
 - `internal/daemon/service_test.go::TestThreadReadSkippedLogsAreDebounced`
 - `internal/telegram/bot_test.go::TestSanitizeTelegramLogErrorRedactsBotTokenURL`
+- `tests/config_env_test.go::TestFromEnvDefaultsLoggingOn`
+- `tests/config_env_test.go::TestFromEnvInvalidLoggingFlagsFallBackToEnabled`
+- `cmd/ctr-go/main_test.go::TestDiagnosticLoggerHonorsFlags`
 
 Contract notes:
 
 - Logs may include ids, route source, operation names, durations, item counts, and sanitized stderr tails.
 - Logs must not include full prompt bodies, tokens, session files, SQLite paths, `.env` paths, or unbounded output.
 - Diagnostic logging is rate-limited to avoid filesystem floods during app-server loops.
+- `CTR_GO_LOG_ENABLED=off` discards daemon stdout logs; `CTR_GO_DIAGNOSTIC_LOGS=off` keeps normal bot logs but suppresses structured lifecycle diagnostics.
 
 ## Session Tail Overlay Retirement
 
