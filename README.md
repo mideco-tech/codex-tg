@@ -46,7 +46,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 ## Platform Status
 
 - Windows: actively tested with the local Codex App Server, Telegram Bot API, observer flows, and live E2E demo.
-- macOS: verified on macOS 26.3.1 arm64 with Go 1.26.2, LaunchAgent daemon startup, local build, and Telegram readback/status check.
+- macOS: `v0.1.1` is verified stable on macOS 26.3.1 arm64 with Go 1.26.2, LaunchAgent daemon startup, local build, and live Telegram readback E2E.
 - Linux: CI runs tests/builds on Ubuntu; full local daemon/runtime validation is still pending.
 
 ## Quickstart
