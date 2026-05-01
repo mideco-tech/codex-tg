@@ -131,6 +131,10 @@ go test ./...
 go build -buildvcs=false ./...
 ```
 
+Live Telegram readback E2E is documented in
+[tests/live_e2e/README.md](tests/live_e2e/README.md). It is intentionally
+gated by local env and is not part of `go test ./...`.
+
 Live demo for a screenshot:
 
 ```powershell

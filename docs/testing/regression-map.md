@@ -102,9 +102,10 @@ Primary tests:
 
 Live E2E:
 
-- local ignored runner: `~/.codex-tg/e2e/turn_lifecycle_e2e.py`
-- requires `CODEX_TG_E2E_THREAD_ID`
-- uses MTProto readback, edited messages, Details roundtrip, daemon log correlation, and read-only SQLite correlation
+- checked-in public-safe harness: `tests/live_e2e/telegram_readback_e2e.py`
+- requires `CODEX_TG_LIVE_E2E=1`, `CODEX_TG_E2E_THREAD_ID`, a local Telethon session, and bot identity from local env
+- uses MTProto readback of edited messages and optional daemon log correlation
+- exercises sequential commands plus a multi-command `/reply` math run to catch accidental self-interruption
 
 Contract notes:
 
@@ -128,10 +129,10 @@ Primary tests:
 
 Live E2E:
 
-- local ignored runner: `~/.codex-tg/e2e/nil_guard_e2e.py`
-- run against a dedicated private test thread, not the working operator thread
-- scenarios: fast text, fast command, and a command that stays active for about a minute
-- acceptance: scan edited Telegram messages, Details views, and Final Cards for literal `"<nil>"` and stale commands from earlier runs
+- checked-in public-safe harness: `tests/live_e2e/telegram_readback_e2e.py`
+- run against a dedicated private test thread from local env, not the working operator thread
+- scenarios: sequential `pwd`, `date`, `printf`, slow command, and multi-command math through `/reply`
+- acceptance: scan edited Telegram `[Tool]`, `[Output]`, and `[Final]` messages for literal `"<nil>"`, stale commands from earlier runs, false parallel-turn rejection, and visible non-final `interrupted`
 
 Contract notes:
 

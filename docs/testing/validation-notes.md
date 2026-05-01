@@ -92,11 +92,11 @@ Validation expectations:
 
 - unit tests cover nil-like map/slice extraction, command rendering, stale session-tail command suppression, summary Markdown rendering, App Server RPC id stringification, and snapshot string normalization.
 - live validation must read edited Telegram messages, not only newly delivered messages.
-- the ignored local runner `~/.codex-tg/e2e/nil_guard_e2e.py` exercises fast text, fast command, and a roughly one-minute active tool/output window against a dedicated private test thread.
+- the checked-in public-safe harness `tests/live_e2e/telegram_readback_e2e.py` exercises sequential `pwd`, `date`, `printf`, and slow command updates against a dedicated private test thread configured only through local env.
 - when validating stale-command regressions manually, prefer one private test-thread turn that runs several safe shell commands sequentially as separate tool calls; watch Telegram `MessageEdited` updates for the same `[Tool]` message and verify it changes only through the current commands or neutral empty state.
 - for in-progress command visibility, verify the slow command appears in `[Tool]` before its output appears in `[Output]`; this proves App Server live item notifications are reaching the same render path before `thread/read` completion.
 - Details view should be checked during E2E when the button is available.
-- do not commit the runner, Telegram session, target thread id, raw message ids, logs, or screenshots.
+- do not commit Telegram sessions, target thread ids, raw message ids, logs, env files, or screenshots.
 
 Latest local validation note:
 
@@ -107,16 +107,14 @@ Latest local validation note:
 
 ## Turn lifecycle live E2E
 
-The ignored local runner `~/.codex-tg/e2e/turn_lifecycle_e2e.py` validates Telegram-origin lifecycle behavior. It must use MTProto readback, not Bot API polling, and it must require `CODEX_TG_E2E_THREAD_ID` so it never defaults to the current operator thread.
+The checked-in public-safe harness `tests/live_e2e/telegram_readback_e2e.py` validates Telegram-origin lifecycle behavior. It must use MTProto readback, not Bot API polling, and it must require `CODEX_TG_LIVE_E2E=1` plus `CODEX_TG_E2E_THREAD_ID` so it never defaults to the current operator thread.
 
 Acceptance checks:
 
-- fast Telegram-origin turn reaches `[Final]`.
-- reply to a Final Card can route to a new turn without a false parallel-turn warning.
-- immediate next turn after final does not hit stale active state.
-- active-turn guard does not start a parallel turn.
-- Details edits the same message.
-- daemon logs for the scenario window contain no duplicate live session starts, no premature interrupted terminal without a final answer, and no `telegram_render_contains_nil`.
-- read-only SQLite correlation maps the visible Final Card to the expected thread/panel.
+- sequential command run reaches `[Final]`.
+- slow command becomes visible in `[Tool]` before `[Output]` contains its completion text.
+- complex `/reply` math run uses multiple shell commands and reaches `[Final]` with the expected aggregate answer.
+- Telegram readback contains no false parallel-turn warning, literal `"<nil>"`, stale known command, or visible non-final `Status: interrupted`.
+- optional daemon log correlation for the scenario window contains no premature interrupted terminal without a final answer, no input rejection, and no `telegram_render_contains_nil`.
 
-Do not commit local runners, Telegram user sessions, chat/thread ids, raw message ids, raw logs, env files, or screenshots.
+Do not commit Telegram user sessions, chat/thread ids, raw message ids, raw logs, env files, or screenshots.
