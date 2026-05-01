@@ -42,18 +42,18 @@ Regression tests for this area should cover:
 - no fallback for active-but-not-steerable failures.
 - no duplicate global-observer panel for a marked Telegram-origin turn.
 
-## Session lifecycle and empty interrupted drift
+## Session lifecycle and interrupted drift
 
 Live Telegram-origin turns can expose two independent forms of App Server drift:
 
 - duplicate live event loops after daemon startup or repair when session lifecycle is not serialized.
-- transient empty `interrupted` snapshots that later recover to `inProgress` for the same turn.
+- transient non-final `interrupted` snapshots that later recover to `inProgress` or `completed` for the same turn.
 
 Regression tests should cover:
 
 - startup/reconcile/repair cannot create duplicate live subscriptions.
 - stale old live loops cannot clear newer session state or trigger repair loops.
-- empty Telegram-origin `interrupted` does not compact or render terminal during the grace window.
+- Telegram-origin `interrupted` without a final answer does not compact or render terminal during the grace window, even when partial tool/output evidence is already present.
 - explicit `/stop` accepts `interrupted` immediately.
 - recovered turns clear the defer marker and continue normal live panel rendering.
 
@@ -100,6 +100,7 @@ Validation expectations:
 
 Latest local validation note:
 
+- 2026-04-30 PDT macOS live complex `/reply` E2E reproduced a transient partial `interrupted` snapshot with tool/output evidence before final completion. After extending the terminal gate to defer non-final Telegram-origin `interrupted`, the same E2E passed: sequential command updates stayed visible, then a multi-command number-theory task created a temporary helper and ran four Python range commands before reaching `[Final]` with `COUNT=2034 SUM=115514223`; no visible interrupted state, literal `"<nil>"`, stale command, or input rejection appeared.
 - 2026-04-30 PDT macOS live logging-flags E2E used MTProto readback against a private test thread after rebuilding and restarting the daemon. It verified sequential `pwd`, `date`, `printf 'alpha\nbeta\n'`, and `sleep 20; printf 'slow-command-done\n'` tool updates, with the slow command visible in `[Tool]` about 20 seconds before `[Output]`; a separate `/reply` math run reached `[Final]` with the expected answer and no visible interrupted state. Daemon diagnostics remained present with default logging flags.
 - 2026-04-30 PDT macOS live stale-command E2E used MTProto readback of `MessageEdited` updates for one private test-thread turn with `pwd`, `date`, `printf 'alpha\nbeta\n'`, and `sleep 20; printf 'slow-command-done\n'`. `[Tool]` showed the slow command in progress about 20 seconds before `[Output]` contained `slow-command-done`; no literal `"<nil>"` or stale session-tail command appeared.
 - 2026-04-29 macOS live nil-guard E2E completed all three scenarios and found no literal `"<nil>"` in edited New run, summary/Final, Tool, Output, or Details messages after the sanitizer change.
@@ -115,7 +116,7 @@ Acceptance checks:
 - immediate next turn after final does not hit stale active state.
 - active-turn guard does not start a parallel turn.
 - Details edits the same message.
-- daemon logs for the scenario window contain no duplicate live session starts, no premature empty interrupted terminal, and no `telegram_render_contains_nil`.
+- daemon logs for the scenario window contain no duplicate live session starts, no premature interrupted terminal without a final answer, and no `telegram_render_contains_nil`.
 - read-only SQLite correlation maps the visible Final Card to the expected thread/panel.
 
 Do not commit local runners, Telegram user sessions, chat/thread ids, raw message ids, raw logs, env files, or screenshots.

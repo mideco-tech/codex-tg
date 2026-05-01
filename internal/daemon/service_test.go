@@ -878,6 +878,79 @@ func TestPollTrackedDefersTelegramOriginEmptyInterruptedAndKeepsActiveState(t *t
 	}
 }
 
+func TestPollTrackedDefersTelegramOriginPartialInterruptedAndKeepsActiveState(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	logs := captureServiceLogs(service)
+	ctx := context.Background()
+	turnID := "turn-partial-interrupted"
+	thread := model.Thread{
+		ID:           "thread-partial-interrupted",
+		Title:        "Partial interrupted",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	previousCurrent := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "cmd-slow",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "sleep 20; printf 'slow-command-done\\n'",
+		LatestToolStatus: "running",
+		LatestToolFP:     "cmd-slow-running",
+	}
+	previous := appserver.CompactSnapshot(nil, previousCurrent, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, previous); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	service.poll = &stubSession{
+		threadReads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayloadWithTool(thread, turnID, "interrupted"),
+		},
+	}
+	service.pollConnected = true
+
+	service.pollTracked(ctx)
+
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("snapshot = nil")
+	}
+	if stored.LastSeenTurnStatus != "inProgress" {
+		t.Fatalf("LastSeenTurnStatus = %q, want inProgress", stored.LastSeenTurnStatus)
+	}
+	if stored.LastCompletionFP != "" {
+		t.Fatalf("LastCompletionFP = %q, want empty while partial interrupted is deferred", stored.LastCompletionFP)
+	}
+	if stored.NextPollAfter == "" {
+		t.Fatal("NextPollAfter is empty, want hot polling while partial interrupted is deferred")
+	}
+	state := loadTerminalGateState(t, service, ctx, terminalGateDeferKey(thread.ID, turnID))
+	if state.LastReason != "partial_interrupted" || state.LastDecision != string(terminalGateDefer) {
+		t.Fatalf("defer state = %#v, want partial_interrupted defer", state)
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"event":"telegram_origin_terminal_deferred"`)
+	requireLogContains(t, got, `"reason":"partial_interrupted"`)
+	if strings.Contains(got, `"event":"telegram_origin_turn_terminal"`) {
+		t.Fatalf("terminal log should be deferred, got:\n%s", got)
+	}
+}
+
 func TestRefreshThreadForOperationDefersEmptyInterrupted(t *testing.T) {
 	t.Parallel()
 
@@ -2555,6 +2628,28 @@ func diagnosticThreadReadPayload(thread model.Thread, turnID, status string) map
 			},
 		},
 	}
+}
+
+func diagnosticThreadReadPayloadWithTool(thread model.Thread, turnID, status string) map[string]any {
+	payload := diagnosticThreadReadPayload(thread, turnID, status)
+	threadPayload := payload["thread"].(map[string]any)
+	turns := threadPayload["turns"].([]any)
+	turn := turns[0].(map[string]any)
+	turn["items"] = []any{
+		map[string]any{
+			"id":      "user-item",
+			"type":    "userMessage",
+			"content": []any{map[string]any{"text": "hello"}},
+		},
+		map[string]any{
+			"id":               "cmd-slow",
+			"type":             "commandExecution",
+			"command":          "sleep 20; printf 'slow-command-done\\n'",
+			"status":           "completed",
+			"aggregatedOutput": "slow-command-done\n",
+		},
+	}
+	return payload
 }
 
 func callbackTokenForButton(rows [][]model.ButtonSpec, label string) string {

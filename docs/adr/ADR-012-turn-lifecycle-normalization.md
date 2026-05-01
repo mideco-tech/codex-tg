@@ -45,15 +45,15 @@ The daemon owns one live App Server session and one poll App Server session at a
 - stale old-session close/error events may be logged with `current=false`, but they must not invalidate the current session
 - lifecycle diagnostics may include role, generation, operation, thread/turn ids, durations, and sanitized errors, but not raw prompt text, local session paths, SQLite paths, env paths, or unbounded stderr
 
-## Transient Empty Interrupted Contract
+## Transient Interrupted Contract
 
-App Server can transiently report a Telegram-origin turn as `interrupted` with only a user item before later recovering the same turn to `inProgress` with tool/commentary/final items. The bridge treats that shape as ambiguous drift:
+App Server can transiently report a Telegram-origin turn as `interrupted` before later recovering the same turn to `inProgress` or `completed`. The first observed form was an empty user-only snapshot, but live validation also showed a partial tool/output snapshot briefly reporting `interrupted` before the final answer arrived. The bridge treats non-final Telegram-origin `interrupted` as ambiguous drift:
 
 - applies only to Telegram-origin turns
-- empty `interrupted` means no final text/fingerprint, no agent messages, no tool id/label/output, no waiting approval/reply, and no detail kinds except `user`
-- without an explicit `/stop`, empty `interrupted` is deferred for a short grace window instead of being compacted, rendered terminal, or logged terminal
-- if the same turn later shows active/waiting/tool/commentary/output/final evidence, the defer marker is cleared and normal rendering resumes
-- if the defer window expires, the empty `interrupted` is accepted as terminal
+- applies only when no final-answer signal is present
+- without an explicit `/stop`, non-final `interrupted` is deferred for a short grace window instead of being compacted, rendered terminal, or logged terminal
+- if the same turn later shows active/waiting or final evidence, the defer marker is cleared and normal rendering resumes
+- if the defer window expires, the `interrupted` snapshot is accepted as terminal
 - explicit `/stop` or Stop button writes an explicit interrupt marker so its terminal `interrupted` bypasses deferral
 
 ## Nil-Safe Rendering Contract
@@ -74,7 +74,7 @@ Nil-safe rendering is part of turn lifecycle normalization because the bad state
 - Final Card collapse can happen even when App Server status lags behind the final item.
 - Telegram UI must never expose literal `"<nil>"`; missing App Server fields are treated as data-shape drift, not as meaningful user-facing content.
 - Duplicate live App Server session loops are treated as lifecycle bugs, not harmless diagnostics.
-- Empty Telegram-origin `interrupted` snapshots do not erase active UI or create a false terminal card until confirmed.
+- Non-final Telegram-origin `interrupted` snapshots do not erase active UI or create a false terminal card until confirmed.
 - New agents should debug lifecycle issues from normalized snapshot behavior, not raw `thread/read` status alone.
 - Tests must cover both parts of the contract:
   - final-answer normalization clears active turn state
@@ -83,7 +83,7 @@ Nil-safe rendering is part of turn lifecycle normalization because the bad state
   - global observer does not duplicate Telegram-origin panels
   - nil-like payload values do not leak into command, Details, summary, tool, output, or RPC request rendering
   - old live loops cannot clear newer session state
-  - empty Telegram-origin `interrupted` is deferred, recovered, expired, or bypassed for explicit stop
+  - non-final Telegram-origin `interrupted` is deferred, recovered, expired, or bypassed for explicit stop
 
 ## Non-goals
 

@@ -208,6 +208,46 @@ func TestTelegramEmptyInterruptedGateMeaningfulInterruptedNotDeferred(t *testing
 	}
 }
 
+func TestTelegramPartialInterruptedGateDefersUntilFinalOrGrace(t *testing.T) {
+	t.Parallel()
+
+	service := newTerminalGateTestService(t)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+	if err := service.markTelegramOriginTurn(ctx, "thread-partial", "turn-partial"); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	snapshot := terminalGateTestSnapshot("thread-partial", "turn-partial", "interrupted")
+	snapshot.LatestToolID = "tool-partial"
+	snapshot.LatestToolKind = "commandExecution"
+	snapshot.LatestToolLabel = "sleep 20; printf 'done\\n'"
+	snapshot.LatestToolOutput = "done\n"
+	snapshot.LatestToolFP = "tool-fp"
+	snapshot.DetailItems = []model.DetailItem{
+		{Kind: model.DetailItemUser, Text: "run command"},
+		{Kind: model.DetailItemTool, Text: "sleep 20; printf 'done\\n'", FP: "tool-fp"},
+		{Kind: model.DetailItemOutput, Text: "done\n", FP: "output-fp"},
+	}
+
+	decision, err := service.decideTelegramOriginEmptyInterruptedTerminal(ctx, &snapshot, now)
+	if err != nil {
+		t.Fatalf("decideTelegramOriginEmptyInterruptedTerminal failed: %v", err)
+	}
+	if decision.Action != terminalGateDefer {
+		t.Fatalf("Action = %q, want %q", decision.Action, terminalGateDefer)
+	}
+	if decision.EmptyInterrupted {
+		t.Fatal("EmptyInterrupted = true, want false for partial interrupted snapshot")
+	}
+	if !decision.DeferrableInterrupted || decision.Reason != "partial_interrupted" {
+		t.Fatalf("decision = %#v, want partial_interrupted defer", decision)
+	}
+	state := loadTerminalGateState(t, service, ctx, terminalGateDeferKey("thread-partial", "turn-partial"))
+	if state.LastReason != "partial_interrupted" || state.LastDecision != string(terminalGateDefer) {
+		t.Fatalf("defer state = %#v, want partial_interrupted defer", state)
+	}
+}
+
 func TestTelegramEmptyInterruptedGateGraceExpiryAccepts(t *testing.T) {
 	t.Parallel()
 

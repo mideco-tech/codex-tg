@@ -84,7 +84,7 @@ Contract notes:
 - Stale old live-loop closes must not clear newer session state.
 - Repair is serialized with reconcile/startup and is processed before replacement reconcile.
 
-## Transient Empty Interrupted Gating
+## Transient Interrupted Gating
 
 ADR: `docs/adr/ADR-012-turn-lifecycle-normalization.md`
 
@@ -95,7 +95,9 @@ Primary tests:
 - `internal/daemon/terminal_gate_test.go::TestTelegramEmptyInterruptedGateGraceExpiryAccepts`
 - `internal/daemon/terminal_gate_test.go::TestTelegramEmptyInterruptedGateExplicitInterruptBypassesDefer`
 - `internal/daemon/terminal_gate_test.go::TestTelegramEmptyInterruptedGateMeaningfulInterruptedNotDeferred`
+- `internal/daemon/terminal_gate_test.go::TestTelegramPartialInterruptedGateDefersUntilFinalOrGrace`
 - `internal/daemon/service_test.go::TestPollTrackedDefersTelegramOriginEmptyInterruptedAndKeepsActiveState`
+- `internal/daemon/service_test.go::TestPollTrackedDefersTelegramOriginPartialInterruptedAndKeepsActiveState`
 - `internal/daemon/service_test.go::TestRefreshThreadForOperationDefersEmptyInterrupted`
 
 Live E2E:
@@ -106,8 +108,8 @@ Live E2E:
 
 Contract notes:
 
-- Empty Telegram-origin `interrupted` is ambiguous until it recovers, expires, or follows explicit `/stop`.
-- Deferred empty terminal state must not collapse the live panel into a false Final Card.
+- Non-final Telegram-origin `interrupted` is ambiguous until it recovers, expires, or follows explicit `/stop`.
+- Deferred terminal state must not collapse the live panel into a false Final Card.
 - The daemon must keep polling deferred turns hot.
 
 ## Nil-Safe Telegram Rendering

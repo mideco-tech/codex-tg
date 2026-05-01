@@ -26,20 +26,21 @@ const (
 )
 
 type terminalGateDecision struct {
-	Action            terminalGateDecisionKind
-	Reason            string
-	ThreadID          string
-	TurnID            string
-	EmptyInterrupted  bool
-	ExplicitInterrupt bool
-	Grace             time.Duration
-	FirstSeenAt       time.Time
-	LastSeenAt        time.Time
-	ExpiresAt         time.Time
-	HotPoll           bool
-	NextPollAfter     model.TimeString
-	DeferKey          string
-	ExplicitKey       string
+	Action                terminalGateDecisionKind
+	Reason                string
+	ThreadID              string
+	TurnID                string
+	EmptyInterrupted      bool
+	DeferrableInterrupted bool
+	ExplicitInterrupt     bool
+	Grace                 time.Duration
+	FirstSeenAt           time.Time
+	LastSeenAt            time.Time
+	ExpiresAt             time.Time
+	HotPoll               bool
+	NextPollAfter         model.TimeString
+	DeferKey              string
+	ExplicitKey           string
 }
 
 type terminalGateState struct {
@@ -69,6 +70,47 @@ func isEmptyInterruptedSnapshot(snapshot *appserver.ThreadReadSnapshot) bool {
 		return false
 	}
 	return !snapshotHasMeaningfulTerminalSignal(snapshot)
+}
+
+func isDeferrableInterruptedSnapshot(snapshot *appserver.ThreadReadSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(snapshot.LatestTurnStatus), "interrupted") {
+		return false
+	}
+	if strings.TrimSpace(snapshot.Thread.ID) == "" || strings.TrimSpace(snapshot.LatestTurnID) == "" {
+		return false
+	}
+	if snapshot.WaitingOnApproval || snapshot.WaitingOnReply {
+		return false
+	}
+	return !snapshotHasFinalSignal(snapshot)
+}
+
+func snapshotHasFinalSignal(snapshot *appserver.ThreadReadSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	if strings.TrimSpace(snapshot.LatestFinalText) != "" || strings.TrimSpace(snapshot.LatestFinalFP) != "" {
+		return true
+	}
+	for _, entry := range snapshot.LatestAgentMessageEntries {
+		if strings.EqualFold(strings.TrimSpace(entry.Phase), "final_answer") &&
+			(strings.TrimSpace(entry.Text) != "" || strings.TrimSpace(entry.FP) != "") {
+			return true
+		}
+	}
+	for _, item := range snapshot.DetailItems {
+		if strings.TrimSpace(item.Kind) == model.DetailItemFinal &&
+			(strings.TrimSpace(item.Text) != "" ||
+				strings.TrimSpace(item.Label) != "" ||
+				strings.TrimSpace(item.Output) != "" ||
+				strings.TrimSpace(item.FP) != "") {
+			return true
+		}
+	}
+	return false
 }
 
 func snapshotHasMeaningfulTerminalSignal(snapshot *appserver.ThreadReadSnapshot) bool {
@@ -142,7 +184,7 @@ func (s *Service) decideTelegramOriginEmptyInterruptedTerminal(ctx context.Conte
 	now = now.UTC()
 	decision := terminalGateDecision{
 		Action: terminalGateAccept,
-		Reason: "not_empty_interrupted",
+		Reason: "not_deferrable_interrupted",
 		Grace:  terminalGateGraceDuration(s.cfg.ObserverPollInterval),
 	}
 	threadID, turnID := terminalGateSnapshotIDs(snapshot)
@@ -163,11 +205,13 @@ func (s *Service) decideTelegramOriginEmptyInterruptedTerminal(ctx context.Conte
 
 	emptyInterrupted := isEmptyInterruptedSnapshot(snapshot)
 	decision.EmptyInterrupted = emptyInterrupted
+	deferrableInterrupted := isDeferrableInterruptedSnapshot(snapshot)
+	decision.DeferrableInterrupted = deferrableInterrupted
 	existing, hasExisting, err := s.loadTelegramOriginEmptyInterruptedDefer(ctx, threadID, turnID, now)
 	if err != nil {
 		return decision, err
 	}
-	if !emptyInterrupted {
+	if !deferrableInterrupted {
 		if hasExisting {
 			_ = s.clearTelegramOriginEmptyInterruptedDefer(ctx, threadID, turnID)
 			decision.Action = terminalGateRecover
@@ -197,13 +241,17 @@ func (s *Service) decideTelegramOriginEmptyInterruptedTerminal(ctx context.Conte
 
 	state := existing
 	if !hasExisting {
+		reason := "partial_interrupted"
+		if emptyInterrupted {
+			reason = "empty_interrupted"
+		}
 		state = terminalGateState{
 			ThreadID:     threadID,
 			TurnID:       turnID,
 			FirstSeenAt:  model.TimeString(now.Format(time.RFC3339Nano)),
 			ExpiresAt:    model.TimeString(now.Add(decision.Grace).Format(time.RFC3339Nano)),
 			LastDecision: string(terminalGateDefer),
-			LastReason:   "empty_interrupted",
+			LastReason:   reason,
 		}
 	}
 	state.ThreadID = threadID
@@ -236,7 +284,10 @@ func (s *Service) decideTelegramOriginEmptyInterruptedTerminal(ctx context.Conte
 	}
 
 	decision.Action = terminalGateDefer
-	decision.Reason = "empty_interrupted"
+	decision.Reason = "partial_interrupted"
+	if emptyInterrupted {
+		decision.Reason = "empty_interrupted"
+	}
 	decision.HotPoll = true
 	decision.NextPollAfter = terminalGateNextPollAfter(now, s.cfg.ObserverPollInterval)
 	state.NextPollAfter = decision.NextPollAfter
@@ -288,7 +339,7 @@ func (s *Service) applyTelegramOriginTerminalGate(ctx context.Context, operation
 		fields["first_seen_at"] = decision.FirstSeenAt
 		s.logLifecycle("telegram_origin_terminal_recovered", fields)
 	case terminalGateAccept:
-		if decision.EmptyInterrupted && decision.Reason == "grace_expired" {
+		if decision.DeferrableInterrupted && decision.Reason == "grace_expired" {
 			fields := snapshotDiagnosticFields(*current)
 			fields["operation"] = operation
 			fields["reason"] = decision.Reason
