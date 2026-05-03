@@ -43,17 +43,28 @@ python tests/live_e2e/telegram_readback_e2e.py
 
 ## Cases
 
-`sequential_commands` asks the agent to run `pwd`, `date`, `printf`, and a slow
-`sleep 20; printf ...` command as separate tool calls. It passes only if the slow
-command appears in `[Tool]` before its output appears in `[Output]`.
+`sequential_commands` sends three `/reply` prompts one after another for `pwd`,
+`date`, and `printf`. Each command also reads a runtime token from a temp file
+created by the harness, so the agent has to read tool output before answering.
+Each command sleeps long enough for edited run-state messages to stay
+observable. The harness waits for each run to finish
+before sending the next one, and validates whole-run timing in `[commentary]`,
+last completed tool state in `[Tool]`, last completed output in `[Output]`, and
+run duration in `[Final]`.
+
+`sleep20_timing` asks the agent to run one `sleep 20; printf ...` command and
+validates that `[commentary]` keeps showing active run elapsed time while
+`[Tool]` does not pretend to know an authoritative current command.
 
 `complex_math` asks the agent, through `/reply`, to create a temporary Python
 helper and run four separate range commands for a number-theory task. It passes
-only if all four tool/output updates are observed and the final answer contains:
+only if last completed tool/output updates are observed, active run timing is
+visible, and the final answer contains:
 
 ```text
 COUNT=2034 SUM=115514223
 ```
 
-Both cases fail on visible `Status: interrupted`, literal `"<nil>"`, stale known
-commands from earlier regressions, or parallel-turn rejection text.
+All cases fail on visible `Status: interrupted`, literal `"<nil>"`, stale known
+commands from earlier regressions, parallel-turn rejection text, or `[Tool]`
+rendering a running/in-progress command as authoritative current state.

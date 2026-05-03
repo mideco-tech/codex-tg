@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -133,6 +134,69 @@ func TestBindingAndGlobalObserverCanCoexist(t *testing.T) {
 	}
 	if target.ChatID != 123456789 || target.TopicID != 0 {
 		t.Fatalf("global observer target = %#v, want 123456789:0", target)
+	}
+}
+
+func TestListThreadsFiltersInternalAppServerThreads(t *testing.T) {
+	t.Parallel()
+
+	store := openTestStore(t)
+	ctx := context.Background()
+	threads := []model.Thread{
+		{
+			ID:            "visible-thread",
+			Title:         "Visible work",
+			ProjectName:   "codex-tg",
+			DirectoryName: "codex-tg",
+			UpdatedAt:     10,
+			LastPreview:   "normal user request",
+			Raw:           json.RawMessage(`{"id":"visible-thread","preview":"normal user request"}`),
+		},
+		{
+			ID:            "ephemeral-thread",
+			Title:         "01900000-0000-7000-8000-000000000014",
+			ProjectName:   "memories",
+			DirectoryName: "memories",
+			UpdatedAt:     30,
+			Raw:           json.RawMessage(`{"thread":{"id":"ephemeral-thread","ephemeral":true,"source":{"subAgent":"memory_consolidation"}}}`),
+		},
+		{
+			ID:            "sub-agent-thread",
+			Title:         "01900000-0000-7000-8000-000000000015",
+			ProjectName:   "memories",
+			DirectoryName: "memories",
+			UpdatedAt:     20,
+			Raw:           json.RawMessage(`{"id":"sub-agent-thread","source":{"subAgent":"memory_consolidation"}}`),
+		},
+	}
+	for _, thread := range threads {
+		if err := store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread(%s) failed: %v", thread.ID, err)
+		}
+	}
+
+	listed, err := store.ListThreads(ctx, 10, "")
+	if err != nil {
+		t.Fatalf("ListThreads failed: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != "visible-thread" {
+		t.Fatalf("listed threads = %#v, want only visible-thread", listed)
+	}
+
+	searched, err := store.ListThreads(ctx, 10, "memories")
+	if err != nil {
+		t.Fatalf("ListThreads(search) failed: %v", err)
+	}
+	if len(searched) != 0 {
+		t.Fatalf("searched internal threads = %#v, want none", searched)
+	}
+
+	grouped, err := store.ListProjectGroups(ctx)
+	if err != nil {
+		t.Fatalf("ListProjectGroups failed: %v", err)
+	}
+	if _, ok := grouped["memories"]; ok {
+		t.Fatalf("project groups include internal memories project: %#v", grouped)
 	}
 }
 

@@ -175,16 +175,16 @@ func TestTelegramEmptyInterruptedGateKeepsExplicitInterruptAfterTerminalLog(t *t
 	}
 }
 
-func TestTelegramEmptyInterruptedGateMeaningfulInterruptedNotDeferred(t *testing.T) {
+func TestTelegramFinalInterruptedGateDefersUntilRecovered(t *testing.T) {
 	t.Parallel()
 
 	service := newTerminalGateTestService(t)
 	ctx := context.Background()
 	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
-	if err := service.markTelegramOriginTurn(ctx, "thread-meaningful", "turn-meaningful"); err != nil {
+	if err := service.markTelegramOriginTurn(ctx, "thread-final", "turn-final"); err != nil {
 		t.Fatalf("markTelegramOriginTurn failed: %v", err)
 	}
-	snapshot := terminalGateTestSnapshot("thread-meaningful", "turn-meaningful", "interrupted")
+	snapshot := terminalGateTestSnapshot("thread-final", "turn-final", "interrupted")
 	snapshot.LatestFinalText = "Stopped after doing useful work."
 	snapshot.LatestFinalFP = "final-fp"
 	snapshot.DetailItems = []model.DetailItem{{Kind: model.DetailItemFinal, Text: "Stopped after doing useful work.", FP: "final-fp"}}
@@ -193,18 +193,37 @@ func TestTelegramEmptyInterruptedGateMeaningfulInterruptedNotDeferred(t *testing
 	if err != nil {
 		t.Fatalf("decideTelegramOriginEmptyInterruptedTerminal failed: %v", err)
 	}
-	if decision.Action != terminalGateAccept {
-		t.Fatalf("Action = %q, want %q", decision.Action, terminalGateAccept)
+	if decision.Action != terminalGateDefer {
+		t.Fatalf("Action = %q, want %q", decision.Action, terminalGateDefer)
 	}
 	if decision.EmptyInterrupted {
-		t.Fatal("EmptyInterrupted = true, want false for meaningful interrupted snapshot")
+		t.Fatal("EmptyInterrupted = true, want false for final interrupted snapshot")
 	}
-	value, err := service.store.GetState(ctx, terminalGateDeferKey("thread-meaningful", "turn-meaningful"))
+	if !decision.DeferrableInterrupted || decision.Reason != "final_interrupted" {
+		t.Fatalf("decision = %#v, want final_interrupted defer", decision)
+	}
+	state := loadTerminalGateState(t, service, ctx, terminalGateDeferKey("thread-final", "turn-final"))
+	if state.LastReason != "final_interrupted" || state.LastDecision != string(terminalGateDefer) {
+		t.Fatalf("defer state = %#v, want final_interrupted defer", state)
+	}
+
+	recovered := terminalGateTestSnapshot("thread-final", "turn-final", "completed")
+	recovered.LatestFinalText = snapshot.LatestFinalText
+	recovered.LatestFinalFP = snapshot.LatestFinalFP
+	recovered.DetailItems = snapshot.DetailItems
+	decision, err = service.decideTelegramOriginEmptyInterruptedTerminal(ctx, &recovered, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("decideTelegramOriginEmptyInterruptedTerminal(recovered) failed: %v", err)
+	}
+	if decision.Action != terminalGateRecover {
+		t.Fatalf("Action = %q, want %q", decision.Action, terminalGateRecover)
+	}
+	value, err := service.store.GetState(ctx, terminalGateDeferKey("thread-final", "turn-final"))
 	if err != nil {
 		t.Fatalf("GetState(defer key) failed: %v", err)
 	}
 	if value != "" {
-		t.Fatalf("defer state = %q, want empty", value)
+		t.Fatalf("defer state = %q, want empty after recovery", value)
 	}
 }
 

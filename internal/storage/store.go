@@ -343,10 +343,10 @@ func (s *Store) ListThreads(ctx context.Context, limit int, search string) ([]mo
 	}
 	query := `
 	SELECT thread_id, title, cwd, project_name, directory_name, updated_at, status, last_preview, active_turn_id, preferred_model, permissions_mode, archived, raw_json
-	FROM threads`
+	FROM threads WHERE ` + visibleThreadPredicateSQL
 	args := make([]any, 0, 2)
 	if trimmed := strings.TrimSpace(search); trimmed != "" {
-		query += ` WHERE lower(title) LIKE ? OR lower(project_name) LIKE ? OR lower(last_preview) LIKE ? OR lower(thread_id) LIKE ?`
+		query += ` AND (lower(title) LIKE ? OR lower(project_name) LIKE ? OR lower(last_preview) LIKE ? OR lower(thread_id) LIKE ?)`
 		pattern := "%" + strings.ToLower(trimmed) + "%"
 		args = append(args, pattern, pattern, pattern, pattern)
 	}
@@ -367,6 +367,11 @@ func (s *Store) ListThreads(ctx context.Context, limit int, search string) ([]mo
 	}
 	return out, rows.Err()
 }
+
+const visibleThreadPredicateSQL = `(
+	lower(trim(cast(coalesce(json_extract(raw_json, '$.ephemeral'), json_extract(raw_json, '$.thread.ephemeral'), '') as text))) NOT IN ('1', 'true', 'yes')
+	AND trim(cast(coalesce(json_extract(raw_json, '$.source.subAgent'), json_extract(raw_json, '$.thread.source.subAgent'), '') as text)) = ''
+)`
 
 func (s *Store) CountThreads(ctx context.Context) (int, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT count(*) FROM threads`)

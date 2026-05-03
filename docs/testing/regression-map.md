@@ -94,10 +94,13 @@ Primary tests:
 - `internal/daemon/terminal_gate_test.go::TestTelegramEmptyInterruptedGateRecoversAndClearsDefer`
 - `internal/daemon/terminal_gate_test.go::TestTelegramEmptyInterruptedGateGraceExpiryAccepts`
 - `internal/daemon/terminal_gate_test.go::TestTelegramEmptyInterruptedGateExplicitInterruptBypassesDefer`
-- `internal/daemon/terminal_gate_test.go::TestTelegramEmptyInterruptedGateMeaningfulInterruptedNotDeferred`
+- `internal/daemon/terminal_gate_test.go::TestTelegramFinalInterruptedGateDefersUntilRecovered`
 - `internal/daemon/terminal_gate_test.go::TestTelegramPartialInterruptedGateDefersUntilFinalOrGrace`
 - `internal/daemon/service_test.go::TestPollTrackedDefersTelegramOriginEmptyInterruptedAndKeepsActiveState`
 - `internal/daemon/service_test.go::TestPollTrackedDefersTelegramOriginPartialInterruptedAndKeepsActiveState`
+- `internal/daemon/service_test.go::TestPollTrackedDefersTelegramOriginFinalInterruptedAndKeepsActiveState`
+- `internal/daemon/service_test.go::TestTelegramOriginHotPollCapturesRunningTool`
+- `internal/daemon/service_test.go::TestLiveToolNotificationIgnoresOlderTurnAfterNewerCompletion`
 - `internal/daemon/service_test.go::TestRefreshThreadForOperationDefersEmptyInterrupted`
 
 Live E2E:
@@ -109,9 +112,12 @@ Live E2E:
 
 Contract notes:
 
-- Non-final Telegram-origin `interrupted` is ambiguous until it recovers, expires, or follows explicit `/stop`.
+- Implicit Telegram-origin `interrupted` is ambiguous until it recovers, expires, or follows explicit `/stop`.
 - Deferred terminal state must not collapse the live panel into a false Final Card.
 - The daemon must keep polling deferred turns hot.
+- Telegram-origin turns get a short App Server `thread/read` hot-poll window after start so `[Tool]` can become visible even when live events do not expose the running command.
+- If App Server still has not exposed a tool for an active turn, `[Tool]` must show neutral active-run elapsed time instead of a static empty state.
+- Late live tool notifications from older turns must not overwrite a newer completed turn or reintroduce stale `[Tool]` / `[Output]` content.
 
 ## Nil-Safe Telegram Rendering
 
@@ -131,7 +137,7 @@ Live E2E:
 
 - checked-in public-safe harness: `tests/live_e2e/telegram_readback_e2e.py`
 - run against a dedicated private test thread from local env, not the working operator thread
-- scenarios: sequential `pwd`, `date`, `printf`, slow command, and multi-command math through `/reply`
+- scenarios: sequential `pwd`, `date`, `printf`, dedicated sleep-20 timing, slow command, and multi-command math through `/reply`
 - acceptance: scan edited Telegram `[Tool]`, `[Output]`, and `[Final]` messages for literal `"<nil>"`, stale commands from earlier runs, false parallel-turn rejection, and visible non-final `interrupted`
 
 Contract notes:
@@ -175,12 +181,24 @@ Primary tests:
 
 - `internal/daemon/session_tail_overlay_test.go::TestPollTrackedIgnoresStaleSessionTailTool`
 - `internal/appserver/normalize_test.go::TestToolSnapshotFromLiveNotificationMapsRunningCommand`
-- `internal/daemon/service_test.go::TestLiveToolNotificationUpdatesRunningCommandBeforeThreadReadCompletion`
+- `internal/appserver/normalize_test.go::TestCompactSnapshotStoresToolTimingOnFirstSeen`
+- `internal/appserver/normalize_test.go::TestCompactSnapshotPreservesToolTimingWhenUnchanged`
+- `internal/appserver/normalize_test.go::TestCompactSnapshotUpdatesToolLastUpdateWhenFingerprintChanges`
+- `internal/appserver/normalize_test.go::TestCompactSnapshotDoesNotPreserveActiveLiveToolWhenThreadReadOmitsTool`
+- `internal/appserver/normalize_test.go::TestCompactSnapshotDoesNotPreserveLiveToolAcrossTurns`
+- `internal/daemon/service_test.go::TestLiveToolNotificationStoresRunningCommandWithoutRenderingItAsCurrent`
+- `internal/daemon/service_test.go::TestPollSnapshotWithoutToolDoesNotPreserveSameTurnRunningToolAsCurrent`
+- `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelShowsLastCompletedToolInsteadOfRunningTool`
+- `internal/daemon/observer_ui_v2_test.go::TestRenderSummaryPanelShowsActiveRunElapsedTimeAtBottom`
+- `internal/daemon/service_test.go::TestFinalCardShowsRunDuration`
 
 Contract notes:
 
 - App Server `thread/read` snapshots remain the durable source.
-- App Server live item notifications may update the same current tool snapshot for in-progress visibility.
+- App Server live item notifications may update snapshot/detail history, but Telegram `[Tool]` does not promise authoritative current command visibility.
+- Long-running active runs render elapsed runtime in `[commentary]`; completed Final Cards render total `Run duration`.
+- `[Tool]` renders the last completed tool, or `No completed tool yet.` when no completed tool is available.
+- `[Output]` renders the last completed tool output when available.
 - Session JSONL is not a live Telegram UI source.
 - Missing App Server tool state renders as neutral absence, not as a guessed command.
 - Session JSONL can still be used for explicit full-log export paths.

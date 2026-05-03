@@ -1351,8 +1351,9 @@ func TestRenderToolPanelMarksUnknownShell(t *testing.T) {
 		Title:       "Unknown shell",
 		ProjectName: "Codex",
 	}, &appserver.ThreadReadSnapshot{
-		LatestTurnID:    "turn-tool-unknown",
-		LatestToolLabel: `hui.exe -Command "echo 1"`,
+		LatestTurnID:     "turn-tool-unknown",
+		LatestToolLabel:  `hui.exe -Command "echo 1"`,
+		LatestToolStatus: "completed",
 	})
 
 	if !strings.Contains(text, "[Shell:hui.exe (⚠️UNKNOWN SHELL⚠️)]") {
@@ -1363,6 +1364,82 @@ func TestRenderToolPanelMarksUnknownShell(t *testing.T) {
 	}
 }
 
+func TestRenderToolPanelShowsLastCompletedToolInsteadOfRunningTool(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	now := time.Date(2026, time.May, 1, 23, 19, 21, 0, time.UTC)
+	text, _ := service.renderToolPanelAt(context.Background(), model.Thread{
+		ID:          "thread-tool-running",
+		Title:       "Long command",
+		ProjectName: "Codex",
+	}, &appserver.ThreadReadSnapshot{
+		LatestTurnID:     "turn-tool-running",
+		LatestTurnStatus: "inProgress",
+		LatestToolLabel:  `sleep 20; printf 'slow-command-done\n'`,
+		LatestToolStatus: "running",
+		DetailItems: []model.DetailItem{
+			{
+				ID:     "tool-prev",
+				Kind:   model.DetailItemTool,
+				Label:  `printf 'previous\n'`,
+				Status: "completed",
+			},
+			{
+				ID:     "tool-prev:output",
+				Kind:   model.DetailItemOutput,
+				Output: "previous\n",
+			},
+		},
+	}, now)
+
+	if !strings.Contains(text, "Last completed tool:") {
+		t.Fatalf("rendered tool = %q, want last completed label", text)
+	}
+	if !strings.Contains(text, "previous") || !strings.Contains(text, "Status: completed") {
+		t.Fatalf("rendered tool = %q, want previous completed command", text)
+	}
+	if strings.Contains(text, "slow-command-done") || strings.Contains(text, "Status: running") {
+		t.Fatalf("rendered tool = %q, want running command hidden from Tool panel", text)
+	}
+	if strings.Contains(text, "Running for:") || strings.Contains(text, "Run active for:") {
+		t.Fatalf("rendered tool = %q, want run timing outside Tool panel", text)
+	}
+}
+
+func TestRenderSummaryPanelShowsActiveRunElapsedTimeAtBottom(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	now := time.Date(2026, time.May, 1, 23, 19, 21, 0, time.UTC)
+	thread := model.Thread{
+		ID:          "thread-active-no-tool",
+		Title:       "Waiting command",
+		ProjectName: "Codex",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:              thread,
+		LatestTurnID:        "turn-active-no-tool",
+		LatestTurnStatus:    "inProgress",
+		LatestTurnStartedAt: "2026-05-01T23:18:51Z",
+	}
+	messages := service.renderSummaryPanelMarkdownAt(context.Background(), thread, snapshot, nil, nil, now)
+	if len(messages) != 1 {
+		t.Fatalf("len(messages) = %d, want 1", len(messages))
+	}
+	text := messages[0].Text
+
+	if !strings.Contains(text, "No agent messages yet.") {
+		t.Fatalf("rendered summary = %q, want empty commentary state", text)
+	}
+	if !strings.Contains(text, "Run active for: 30s") {
+		t.Fatalf("rendered summary = %q, want active run elapsed time", text)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(text), "Run active for: 30s") {
+		t.Fatalf("rendered summary = %q, want run timing footer", text)
+	}
+}
+
 func TestRenderOutputPanelEscapesHTMLInsideCodeBlock(t *testing.T) {
 	t.Parallel()
 
@@ -1370,6 +1447,8 @@ func TestRenderOutputPanelEscapesHTMLInsideCodeBlock(t *testing.T) {
 	thread := model.Thread{ID: "thread-output-html", Title: "Output HTML", ProjectName: "Codex"}
 	text, _ := service.renderOutputPanel(context.Background(), thread, &appserver.ThreadReadSnapshot{
 		LatestTurnID:     "turn-output-html",
+		LatestToolLabel:  "printf html",
+		LatestToolStatus: "completed",
 		LatestToolOutput: "<tag>value & more</tag>\n",
 	})
 	if !hasHeaderKind(text, "Output") || !strings.Contains(text, "\n<pre><code>") {
@@ -1393,6 +1472,8 @@ func TestRenderOutputPanelFitsAfterHTMLEscaping(t *testing.T) {
 	thread := model.Thread{ID: "thread-output-fit", Title: "Output fit", ProjectName: "Codex"}
 	text, _ := service.renderOutputPanel(context.Background(), thread, &appserver.ThreadReadSnapshot{
 		LatestTurnID:     "turn-output-fit",
+		LatestToolLabel:  "printf fit",
+		LatestToolStatus: "completed",
 		LatestToolOutput: strings.Repeat("<tag>&", 2000),
 	})
 	if len(text) > outputMessageLimit {

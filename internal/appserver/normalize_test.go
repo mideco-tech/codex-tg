@@ -1,6 +1,7 @@
 package appserver
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,40 @@ func TestStringValueTreatsNilLiteralAsMissing(t *testing.T) {
 	}
 	if got := stringValue("ok", "fallback"); got != "ok" {
 		t.Fatalf("stringValue(ok) = %q, want ok", got)
+	}
+}
+
+func TestThreadsFromListSkipsInternalSubAgentThreads(t *testing.T) {
+	t.Parallel()
+
+	threads := ThreadsFromList(map[string]any{
+		"data": []any{
+			map[string]any{
+				"id":      "visible-thread",
+				"name":    "Visible",
+				"cwd":     "/Users/example/work",
+				"preview": "user work",
+			},
+			map[string]any{
+				"id":        "ephemeral-thread",
+				"cwd":       "/Users/example/.codex/memories",
+				"ephemeral": true,
+			},
+			map[string]any{
+				"id":  "sub-agent-thread",
+				"cwd": "/Users/example/.codex/memories",
+				"source": map[string]any{
+					"subAgent": "memory_consolidation",
+				},
+			},
+		},
+	})
+
+	if len(threads) != 1 {
+		t.Fatalf("len(threads) = %d, want 1: %#v", len(threads), threads)
+	}
+	if threads[0].ID != "visible-thread" {
+		t.Fatalf("thread id = %q, want visible-thread", threads[0].ID)
 	}
 }
 
@@ -67,6 +102,223 @@ func TestCompactSnapshotStoresCompletionFingerprint(t *testing.T) {
 	want := fingerprint("turn-1", "completed")
 	if snapshot.LastCompletionFP != want {
 		t.Fatalf("expected completion fingerprint %q, got %q", want, snapshot.LastCompletionFP)
+	}
+}
+
+func TestCompactSnapshotStoresToolTimingOnFirstSeen(t *testing.T) {
+	t.Parallel()
+
+	polledAt := time.Date(2026, time.May, 1, 22, 39, 21, 0, time.UTC)
+	current := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:     "thread-tool-timing",
+			Status: "inProgress",
+		},
+		LatestTurnID:     "turn-tool-timing",
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "tool-1",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "sleep 20",
+		LatestToolStatus: "running",
+		LatestToolFP:     fingerprint("tool", "tool-1", "sleep 20", "running"),
+	}
+
+	state := CompactSnapshot(nil, current, polledAt)
+
+	var compact ThreadReadSnapshot
+	if err := json.Unmarshal(state.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot: %v", err)
+	}
+	want := polledAt.Format(time.RFC3339Nano)
+	if compact.LatestToolStartedAt != want {
+		t.Fatalf("LatestToolStartedAt = %q, want %q", compact.LatestToolStartedAt, want)
+	}
+	if compact.LatestToolUpdatedAt != want {
+		t.Fatalf("LatestToolUpdatedAt = %q, want %q", compact.LatestToolUpdatedAt, want)
+	}
+}
+
+func TestCompactSnapshotPreservesTurnStartedAtWhenToolIsMissing(t *testing.T) {
+	t.Parallel()
+
+	firstSeen := time.Date(2026, time.May, 1, 22, 39, 21, 0, time.UTC)
+	later := firstSeen.Add(20 * time.Second)
+	current := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:     "thread-turn-timing",
+			Status: "inProgress",
+		},
+		LatestTurnID:     "turn-timing",
+		LatestTurnStatus: "inProgress",
+	}
+	previous := CompactSnapshot(nil, current, firstSeen)
+	next := CompactSnapshot(&previous, current, later)
+
+	var compact ThreadReadSnapshot
+	if err := json.Unmarshal(next.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot: %v", err)
+	}
+	if compact.LatestTurnStartedAt != firstSeen.Format(time.RFC3339Nano) {
+		t.Fatalf("LatestTurnStartedAt = %q, want %q", compact.LatestTurnStartedAt, firstSeen.Format(time.RFC3339Nano))
+	}
+	if compact.LatestTurnUpdatedAt != later.Format(time.RFC3339Nano) {
+		t.Fatalf("LatestTurnUpdatedAt = %q, want %q", compact.LatestTurnUpdatedAt, later.Format(time.RFC3339Nano))
+	}
+}
+
+func TestCompactSnapshotPreservesToolTimingWhenUnchanged(t *testing.T) {
+	t.Parallel()
+
+	firstSeen := time.Date(2026, time.May, 1, 22, 39, 21, 0, time.UTC)
+	later := firstSeen.Add(10 * time.Minute)
+	current := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:     "thread-tool-timing",
+			Status: "inProgress",
+		},
+		LatestTurnID:     "turn-tool-timing",
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "tool-1",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "sleep 20",
+		LatestToolStatus: "running",
+		LatestToolFP:     fingerprint("tool", "tool-1", "sleep 20", "running"),
+	}
+	previous := CompactSnapshot(nil, current, firstSeen)
+
+	state := CompactSnapshot(&previous, current, later)
+
+	var compact ThreadReadSnapshot
+	if err := json.Unmarshal(state.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot: %v", err)
+	}
+	want := firstSeen.Format(time.RFC3339Nano)
+	if compact.LatestToolStartedAt != want {
+		t.Fatalf("LatestToolStartedAt = %q, want %q", compact.LatestToolStartedAt, want)
+	}
+	if compact.LatestToolUpdatedAt != want {
+		t.Fatalf("LatestToolUpdatedAt = %q, want %q", compact.LatestToolUpdatedAt, want)
+	}
+}
+
+func TestCompactSnapshotUpdatesToolLastUpdateWhenFingerprintChanges(t *testing.T) {
+	t.Parallel()
+
+	firstSeen := time.Date(2026, time.May, 1, 22, 39, 21, 0, time.UTC)
+	later := firstSeen.Add(10 * time.Minute)
+	initial := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:     "thread-tool-timing",
+			Status: "inProgress",
+		},
+		LatestTurnID:     "turn-tool-timing",
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "tool-1",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "sleep 20",
+		LatestToolStatus: "running",
+		LatestToolFP:     fingerprint("tool", "tool-1", "sleep 20", "running"),
+	}
+	previous := CompactSnapshot(nil, initial, firstSeen)
+	updated := initial
+	updated.LatestToolOutput = "still running"
+	updated.LatestToolFP = fingerprint("tool", "tool-1", "sleep 20", "running", updated.LatestToolOutput)
+
+	state := CompactSnapshot(&previous, updated, later)
+
+	var compact ThreadReadSnapshot
+	if err := json.Unmarshal(state.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot: %v", err)
+	}
+	if compact.LatestToolStartedAt != firstSeen.Format(time.RFC3339Nano) {
+		t.Fatalf("LatestToolStartedAt = %q, want %q", compact.LatestToolStartedAt, firstSeen.Format(time.RFC3339Nano))
+	}
+	if compact.LatestToolUpdatedAt != later.Format(time.RFC3339Nano) {
+		t.Fatalf("LatestToolUpdatedAt = %q, want %q", compact.LatestToolUpdatedAt, later.Format(time.RFC3339Nano))
+	}
+}
+
+func TestCompactSnapshotDoesNotPreserveActiveLiveToolWhenThreadReadOmitsTool(t *testing.T) {
+	t.Parallel()
+
+	firstSeen := time.Date(2026, time.May, 1, 23, 46, 1, 0, time.UTC)
+	later := firstSeen.Add(8 * time.Second)
+	previousCurrent := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:     "thread-live-tool",
+			Status: "inProgress",
+		},
+		LatestTurnID:        "turn-live-tool",
+		LatestTurnStatus:    "inProgress",
+		LatestToolID:        "tool-sleep",
+		LatestToolKind:      "commandExecution",
+		LatestToolLabel:     "sleep 20; printf 'done\\n'",
+		LatestToolStatus:    "running",
+		LatestToolFP:        fingerprint("tool", "tool-sleep", "running"),
+		LatestToolStartedAt: firstSeen.Format(time.RFC3339Nano),
+		LatestToolUpdatedAt: firstSeen.Format(time.RFC3339Nano),
+	}
+	previous := CompactSnapshot(nil, previousCurrent, firstSeen)
+	pollWithoutTool := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:     "thread-live-tool",
+			Status: "inProgress",
+		},
+		LatestTurnID:     "turn-live-tool",
+		LatestTurnStatus: "inProgress",
+	}
+
+	state := CompactSnapshot(&previous, pollWithoutTool, later)
+
+	var compact ThreadReadSnapshot
+	if err := json.Unmarshal(state.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot: %v", err)
+	}
+	if compact.LatestToolLabel != "" {
+		t.Fatalf("LatestToolLabel = %q, want omitted live tool to stay omitted", compact.LatestToolLabel)
+	}
+	if compact.LatestToolStatus != "" {
+		t.Fatalf("LatestToolStatus = %q, want omitted live tool status to stay omitted", compact.LatestToolStatus)
+	}
+	if compact.LatestTurnStartedAt != firstSeen.Format(time.RFC3339Nano) {
+		t.Fatalf("LatestTurnStartedAt = %q, want %q", compact.LatestTurnStartedAt, firstSeen.Format(time.RFC3339Nano))
+	}
+}
+
+func TestCompactSnapshotDoesNotPreserveLiveToolAcrossTurns(t *testing.T) {
+	t.Parallel()
+
+	firstSeen := time.Date(2026, time.May, 1, 23, 46, 1, 0, time.UTC)
+	previous := CompactSnapshot(nil, ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:     "thread-live-tool",
+			Status: "inProgress",
+		},
+		LatestTurnID:     "turn-old",
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "tool-old",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "old command",
+		LatestToolStatus: "running",
+		LatestToolFP:     fingerprint("tool", "tool-old", "running"),
+	}, firstSeen)
+	nextTurnWithoutTool := ThreadReadSnapshot{
+		Thread: model.Thread{
+			ID:     "thread-live-tool",
+			Status: "inProgress",
+		},
+		LatestTurnID:     "turn-new",
+		LatestTurnStatus: "inProgress",
+	}
+
+	state := CompactSnapshot(&previous, nextTurnWithoutTool, firstSeen.Add(time.Second))
+
+	var compact ThreadReadSnapshot
+	if err := json.Unmarshal(state.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot: %v", err)
+	}
+	if compact.LatestToolLabel != "" {
+		t.Fatalf("LatestToolLabel = %q, want no stale tool from previous turn", compact.LatestToolLabel)
 	}
 }
 

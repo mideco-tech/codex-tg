@@ -65,6 +65,10 @@ type Thread struct {
 	Raw             json.RawMessage `json:"raw"`
 }
 
+func (t Thread) IsInternal() bool {
+	return rawThreadLooksInternal(t.Raw)
+}
+
 func (t Thread) ShortID() string {
 	if len(t.ID) <= 8 {
 		return t.ID
@@ -82,6 +86,56 @@ func (t Thread) Label() string {
 		return title
 	}
 	return fmt.Sprintf("[%s] %s", project, title)
+}
+
+func rawThreadLooksInternal(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false
+	}
+	return payloadLooksInternal(payload) || payloadLooksInternal(mapValue(payload["thread"]))
+}
+
+func payloadLooksInternal(payload map[string]any) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	if truthy(payload["ephemeral"]) {
+		return true
+	}
+	source := mapValue(payload["source"])
+	return stringFromAny(source["subAgent"]) != ""
+}
+
+func mapValue(value any) map[string]any {
+	typed, _ := value.(map[string]any)
+	return typed
+}
+
+func truthy(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		normalized := strings.TrimSpace(strings.ToLower(typed))
+		return normalized == "true" || normalized == "1" || normalized == "yes"
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
+	default:
+		return false
+	}
+}
+
+func stringFromAny(value any) string {
+	if typed, ok := value.(string); ok {
+		return strings.TrimSpace(typed)
+	}
+	return ""
 }
 
 type ThreadSnapshotState struct {

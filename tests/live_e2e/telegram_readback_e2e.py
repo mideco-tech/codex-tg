@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from datetime import datetime, timezone
@@ -152,6 +153,8 @@ def fail_if_bad_text(text: str, context: str) -> None:
             raise SystemExit(f"BAD_TEXT context={context} bit={bit!r} preview={preview(text)}")
     if "Status: interrupted" in text:
         raise SystemExit(f"VISIBLE_INTERRUPTED context={context} preview={preview(text)}")
+    if "[Tool]" in text and ("Status: inProgress" in text or "Running for:" in text):
+        raise SystemExit(f"CURRENT_TOOL_RENDERED context={context} preview={preview(text)}")
 
 
 def fail_if_bad_logs(since: datetime, thread_id: str, context: str) -> None:
@@ -181,21 +184,128 @@ async def bot_messages_after(client, bot, sent_id: int):
 
 
 async def sequential_commands_case(client, bot, thread_id: str, stamp: str) -> None:
-    marker = f"OK_LIVE_COMMANDS_{stamp}"
+    temp_specs = []
+    for label in ("pwd", "date", "printf"):
+        token = f"SEQ_TOKEN_{stamp}_{label}_{secrets.token_hex(8)}"
+        path = Path(f"/tmp/codex_tg_live_seq_{stamp}_{label}.txt")
+        path.write_text(token + "\n", encoding="utf-8")
+        temp_specs.append((label, path, token))
+
+    commands = [
+        ("pwd", f"sleep 12; pwd; cat {temp_specs[0][1]}", temp_specs[0][2]),
+        ("date", f"sleep 12; date; cat {temp_specs[1][1]}", temp_specs[1][2]),
+        (
+            "printf",
+            f"sleep 12; printf 'alpha\\nbeta\\n'; cat {temp_specs[2][1]}",
+            temp_specs[2][2],
+        ),
+    ]
+    since = utc_now()
+    observed_tools = set()
+    alpha_output_seen = False
+
+    try:
+        for index, (label, command, required_output) in enumerate(commands, start=1):
+            marker = f"OK_LIVE_COMMANDS_{stamp}_{label}"
+            prompt = (
+                "Run exactly one shell command tool call, verbatim, and wait for it to finish before answering: "
+                f"{command}. "
+                "The command prints a token from a local temp file; the token is not in this prompt. "
+                f"Final answer in one line containing {marker} and the exact SEQ_TOKEN_... line from the tool output."
+            )
+            sent = await client.send_message(bot, f"/reply {thread_id} {prompt}")
+            print(
+                f"SENT case=sequential_commands step={index} label={label} "
+                f"message_id={sent.id} marker={marker}",
+                flush=True,
+            )
+            tool_seen = False
+            active_wait_seen = False
+            output_seen = False
+            final = None
+            final_seen_at = None
+            seen = set()
+            deadline = time.time() + 180
+            while time.time() < deadline:
+                await asyncio.sleep(poll_seconds())
+                now = time.time()
+                async for message in bot_messages_after(client, bot, sent.id):
+                    text = (message.raw_text or "").strip()
+                    key = (message.id, text)
+                    if key not in seen:
+                        seen.add(key)
+                        print(
+                            f"BOT case=sequential_commands step={index} "
+                            f"message_id={message.id} preview={preview(text)}",
+                            flush=True,
+                        )
+                    fail_if_bad_text(text, "sequential_commands")
+                    for other_label, _, other_token in temp_specs:
+                        if other_label != label and other_token in text:
+                            raise SystemExit(
+                                f"SEQUENTIAL_STALE_TOKEN label={label} stale_label={other_label}"
+                            )
+                    if "[commentary]" in text and "Run active for:" in text:
+                        active_wait_seen = True
+                    if "[Tool]" in text and "Last completed tool:" in text and label in text:
+                        tool_seen = True
+                        observed_tools.add(label)
+                    if "[Output]" in text and "Last completed output:" in text and required_output in text:
+                        output_seen = True
+                        if label == "printf" and "alpha" in text and "beta" in text:
+                            alpha_output_seen = True
+                    if is_final_with_marker(text, marker):
+                        final = message
+                        if final_seen_at is None:
+                            final_seen_at = now
+                if final is not None and tool_seen and output_seen:
+                    break
+                if final is not None and final_seen_at is not None and now-final_seen_at > 20:
+                    break
+            if final is None:
+                raise SystemExit(f"FINAL_TIMEOUT case=sequential_commands marker={marker}")
+            final_text = (final.raw_text or "").strip()
+            if required_output not in final_text:
+                raise SystemExit(f"SEQUENTIAL_FINAL_TOKEN_MISSING label={label}")
+            if "Run duration:" not in final_text:
+                raise SystemExit(f"SEQUENTIAL_FINAL_DURATION_MISSING label={label}")
+            if not active_wait_seen:
+                raise SystemExit(f"SEQUENTIAL_RUN_TIMER_MISSING label={label}")
+            if tool_seen:
+                observed_tools.add(label)
+            if output_seen and label == "printf":
+                alpha_output_seen = True
+    finally:
+        for _, path, _ in temp_specs:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    fail_if_bad_logs(since, thread_id, "sequential_commands")
+    print(f"RESULT case=sequential_commands ok observed_completed_tools={sorted(observed_tools)}", flush=True)
+
+
+async def sleep20_timing_case(client, bot, thread_id: str, stamp: str) -> None:
+    marker = f"OK_LIVE_SLEEP20_{stamp}"
+    done = f"SLEEP20_DONE_{stamp}"
     prompt = (
-        "Run these four shell commands as four separate tool calls, strictly one after another, "
-        "waiting for each to finish before starting the next: "
-        "1) pwd 2) date 3) printf 'alpha\\nbeta\\n' 4) sleep 20; printf 'slow-command-done\\n'. "
-        f"Do not final-answer before the last command completes. Then final answer exactly: {marker}"
+        "This is a live UI timing test. Run exactly one shell command tool call: "
+        f"sleep 20; printf '{done}\\n'. "
+        "Do not use any other shell command. Do not answer before that command finishes. "
+        f"Final answer exactly: {marker}"
     )
     since = utc_now()
     sent = await client.send_message(bot, f"/reply {thread_id} {prompt}")
-    print(f"SENT case=sequential_commands message_id={sent.id} marker={marker}", flush=True)
-    deadline = time.time() + 240
+    print(f"SENT case=sleep20_timing message_id={sent.id} marker={marker}", flush=True)
+    deadline = time.time() + 180
     seen = set()
-    sleep_tool_at = None
-    output_at = None
-    final = None
+    tool_seen = False
+    active_wait_seen = False
+    output_seen = False
+    final_seen = False
+    tool_first_at = None
+    final_at = None
     while time.time() < deadline:
         await asyncio.sleep(poll_seconds())
         async for message in bot_messages_after(client, bot, sent.id):
@@ -203,25 +313,35 @@ async def sequential_commands_case(client, bot, thread_id: str, stamp: str) -> N
             key = (message.id, text)
             if key not in seen:
                 seen.add(key)
-                print(f"BOT case=sequential_commands message_id={message.id} preview={preview(text)}", flush=True)
-            fail_if_bad_text(text, "sequential_commands")
-            now = time.time()
-            if "[Tool]" in text and "sleep 20" in text and sleep_tool_at is None:
-                sleep_tool_at = now
-            if "[Output]" in text and "slow-command-done" in text and output_at is None:
-                output_at = now
+                print(f"BOT case=sleep20_timing message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, "sleep20_timing")
+            if "[commentary]" in text and "Run active for:" in text:
+                active_wait_seen = True
+            if "[Tool]" in text:
+                if tool_seen and not output_seen and "No completed tool yet." in text:
+                    raise SystemExit(f"SLEEP20_TOOL_DISAPPEARED preview={preview(text)}")
+                if "Last completed tool:" in text and "sleep 20" in text and done in text:
+                    if not tool_seen:
+                        tool_seen = True
+                        tool_first_at = time.time()
+            if "[Output]" in text and "Last completed output:" in text and done in text:
+                output_seen = True
             if is_final_with_marker(text, marker):
-                final = message
-        if final is not None:
+                final_seen = True
+                final_at = time.time()
+                if "Run duration:" not in text:
+                    raise SystemExit(f"SLEEP20_FINAL_DURATION_MISSING preview={preview(text)}")
+        if final_seen and active_wait_seen:
             break
-    if final is None:
-        raise SystemExit(f"FINAL_TIMEOUT case=sequential_commands marker={marker}")
-    if sleep_tool_at is None or output_at is None:
-        raise SystemExit("SLOW_COMMAND_VISIBILITY_MISSING")
-    if output_at - sleep_tool_at < 10:
-        raise SystemExit(f"SLOW_COMMAND_TOO_LATE delta={output_at - sleep_tool_at:.1f}")
-    fail_if_bad_logs(since, thread_id, "sequential_commands")
-    print(f"RESULT case=sequential_commands ok delta={output_at - sleep_tool_at:.1f}", flush=True)
+    if not active_wait_seen:
+        raise SystemExit("SLEEP20_RUN_TIMER_NOT_SEEN")
+    if not final_seen:
+        raise SystemExit(f"FINAL_TIMEOUT case=sleep20_timing marker={marker}")
+    fail_if_bad_logs(since, thread_id, "sleep20_timing")
+    visible_for = 0.0
+    if tool_first_at is not None and final_at is not None:
+        visible_for = final_at - tool_first_at
+    print(f"RESULT case=sleep20_timing ok visible_for={visible_for:.1f}", flush=True)
 
 
 async def complex_math_case(client, bot, thread_id: str, stamp: str) -> None:
@@ -256,9 +376,12 @@ After the four range outputs, add the counts and sums yourself. Final answer mus
     seen = set()
     observed_tools = set()
     observed_outputs = set()
+    active_wait_seen = False
     final = None
+    final_seen_at = None
     while time.time() < deadline:
         await asyncio.sleep(poll_seconds())
+        now = time.time()
         async for message in bot_messages_after(client, bot, sent.id):
             text = (message.raw_text or "").strip()
             key = (message.id, text)
@@ -266,23 +389,33 @@ After the four range outputs, add the counts and sums yourself. Final answer mus
                 seen.add(key)
                 print(f"BOT case=complex_math message_id={message.id} preview={preview(text)}", flush=True)
             fail_if_bad_text(text, "complex_math")
-            if "[Tool]" in text and ("python" in text or script_path in text):
+            if "[commentary]" in text and "Run active for:" in text:
+                active_wait_seen = True
+            if "[Tool]" in text and "Last completed tool:" in text and ("python" in text or script_path in text):
                 for label in RANGE_LABELS:
                     if label in text:
                         observed_tools.add(label)
-            if "[Output]" in text and "RANGE " in text:
+            if "[Output]" in text and "Last completed output:" in text and "RANGE " in text:
                 for label in RANGE_LABELS:
                     if label in text:
                         observed_outputs.add(label)
             if is_final_with_marker(text, marker):
                 final = message
-        if final is not None:
+                if final_seen_at is None:
+                    final_seen_at = now
+        if final is not None and active_wait_seen and len(observed_tools) >= 3 and len(observed_outputs) >= 3:
+            break
+        if final is not None and final_seen_at is not None and now-final_seen_at > 20:
             break
     if final is None:
         raise SystemExit(f"FINAL_TIMEOUT case=complex_math marker={marker}")
     text = (final.raw_text or "").strip()
     if f"COUNT={EXPECTED_COMPLEX_COUNT}" not in text or f"SUM={EXPECTED_COMPLEX_SUM}" not in text:
         raise SystemExit(f"COMPLEX_MATH_ANSWER_MISSING preview={preview(text)}")
+    if "Run duration:" not in text:
+        raise SystemExit(f"COMPLEX_MATH_DURATION_MISSING preview={preview(text)}")
+    if not active_wait_seen:
+        raise SystemExit("COMPLEX_MATH_RUN_TIMER_MISSING")
     if len(observed_tools) < 3 or len(observed_outputs) < 3:
         raise SystemExit(
             "COMPLEX_MATH_TOO_FEW_UPDATES "
@@ -308,8 +441,9 @@ async def main() -> None:
             raise SystemExit("Telegram user session is not authorized")
         bot_peer_id = os.environ.get("TG_BOT_PEER_ID", "").strip()
         bot = await client.get_entity(int(bot_peer_id) if bot_peer_id else os.environ["TG_BOT_USERNAME"])
-        print("LIVE_E2E start cases=sequential_commands,complex_math", flush=True)
+        print("LIVE_E2E start cases=sequential_commands,sleep20_timing,complex_math", flush=True)
         await sequential_commands_case(client, bot, thread_id, stamp)
+        await sleep20_timing_case(client, bot, thread_id, stamp)
         await complex_math_case(client, bot, thread_id, stamp)
         print("ALL_OK", flush=True)
     finally:

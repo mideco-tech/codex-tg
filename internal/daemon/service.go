@@ -95,6 +95,8 @@ const (
 	collaborationModePlan     = "plan"
 	codexModelStateKey        = "codex.model"
 	codexReasoningStateKey    = "codex.reasoning_effort"
+	telegramOriginHotPollMax  = 75 * time.Second
+	telegramOriginHotPollTick = 3 * time.Second
 )
 
 var (
@@ -688,10 +690,15 @@ func (s *Service) applyLiveToolSnapshot(ctx context.Context, threadID string, li
 	if turnID == "" {
 		return false
 	}
-	if current.LatestTurnID != "" && current.LatestTurnID != turnID && !isTerminalStatus(current.LatestTurnStatus) {
-		return false
+	if current.LatestTurnID != "" && current.LatestTurnID != turnID {
+		if !isTerminalStatus(current.LatestTurnStatus) || !turnIDAfter(turnID, current.LatestTurnID) {
+			return false
+		}
 	}
 	if current.LatestTurnID == turnID && isTerminalStatus(current.LatestTurnStatus) && strings.TrimSpace(current.LatestFinalFP) != "" {
+		return false
+	}
+	if current.LatestTurnID == turnID && liveToolIsOlderThanCurrentSameTurn(current, liveTool) {
 		return false
 	}
 	if current.LatestTurnID == turnID &&
@@ -724,6 +731,45 @@ func (s *Service) applyLiveToolSnapshot(ctx context.Context, threadID string, li
 	}
 	s.logObserverSyncResult("live_tool", current)
 	return true
+}
+
+func turnIDAfter(candidate, current string) bool {
+	candidate = strings.TrimSpace(candidate)
+	current = strings.TrimSpace(current)
+	if candidate == "" || current == "" || candidate == current {
+		return false
+	}
+	if !codexThreadIDPattern.MatchString(candidate) || !codexThreadIDPattern.MatchString(current) {
+		return false
+	}
+	return strings.Compare(candidate, current) > 0
+}
+
+func liveToolIsOlderThanCurrentSameTurn(current, liveTool appserver.ThreadReadSnapshot) bool {
+	currentIndex := latestToolDetailIndex(current.DetailItems, current.LatestToolID, current.LatestToolLabel)
+	liveIndex := latestToolDetailIndex(current.DetailItems, liveTool.LatestToolID, liveTool.LatestToolLabel)
+	return currentIndex >= 0 && liveIndex >= 0 && liveIndex < currentIndex
+}
+
+func latestToolDetailIndex(items []model.DetailItem, toolID, label string) int {
+	toolID = strings.TrimSpace(toolID)
+	label = strings.TrimSpace(label)
+	if toolID == "" && label == "" {
+		return -1
+	}
+	for i := len(items) - 1; i >= 0; i-- {
+		item := items[i]
+		if item.Kind != model.DetailItemTool {
+			continue
+		}
+		if toolID != "" && strings.TrimSpace(item.ID) == toolID {
+			return i
+		}
+		if toolID == "" && label != "" && strings.TrimSpace(item.Label) == label {
+			return i
+		}
+	}
+	return -1
 }
 
 func upsertLiveToolDetails(items []model.DetailItem, liveItems []model.DetailItem) []model.DetailItem {
@@ -1722,6 +1768,9 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 		"thread_id": threadID,
 		"turn_id":   turn,
 	})
+	if strings.TrimSpace(turn) != "" {
+		s.startTelegramOriginHotPoll(ctx, threadID, turn)
+	}
 	return &DirectResponse{ThreadID: threadID, TurnID: turn}, nil
 }
 
@@ -1767,6 +1816,77 @@ func (s *Service) ensureStartedTurnSnapshot(ctx context.Context, thread *model.T
 		"thread_id": startedThread.ID,
 		"turn_id":   turnID,
 	})
+}
+
+func (s *Service) startTelegramOriginHotPoll(ctx context.Context, threadID, turnID string) {
+	threadID = strings.TrimSpace(threadID)
+	turnID = strings.TrimSpace(turnID)
+	if threadID == "" || turnID == "" {
+		return
+	}
+	s.mu.RLock()
+	started := s.started
+	s.mu.RUnlock()
+	if !started {
+		return
+	}
+	s.spawn(ctx, func(ctx context.Context) {
+		s.telegramOriginHotPollLoop(ctx, threadID, turnID)
+	})
+}
+
+func (s *Service) telegramOriginHotPollLoop(ctx context.Context, threadID, turnID string) {
+	timer := time.NewTimer(telegramOriginHotPollMax)
+	defer timer.Stop()
+	ticker := time.NewTicker(telegramOriginHotPollTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			return
+		case <-ticker.C:
+			if !s.telegramOriginHotPollOnce(ctx, threadID, turnID) {
+				return
+			}
+		}
+	}
+}
+
+func (s *Service) telegramOriginHotPollOnce(ctx context.Context, threadID, turnID string) bool {
+	threadID = strings.TrimSpace(threadID)
+	turnID = strings.TrimSpace(turnID)
+	if threadID == "" || turnID == "" {
+		return false
+	}
+	s.mu.RLock()
+	poll := s.poll
+	connected := s.pollConnected
+	s.mu.RUnlock()
+	if !connected || poll == nil {
+		return true
+	}
+	if _, err := s.refreshThreadForOperation(ctx, poll, threadID, "telegram_hot_poll"); err != nil {
+		s.logLifecycle("telegram_hot_poll_failed", lifecycleFields{
+			"thread_id": threadID,
+			"turn_id":   turnID,
+			"error":     err,
+		})
+		return true
+	}
+	s.syncThreadPanel(ctx, threadID)
+	snapshot, err := s.store.GetSnapshot(ctx, threadID)
+	if err != nil || snapshot == nil {
+		return true
+	}
+	if strings.TrimSpace(snapshot.LastSeenTurnID) != turnID {
+		return false
+	}
+	if isTerminalStatus(snapshot.LastSeenTurnStatus) {
+		return false
+	}
+	return true
 }
 
 func threadLooksActiveForInput(thread *model.Thread) bool {

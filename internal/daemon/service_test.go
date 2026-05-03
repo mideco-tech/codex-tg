@@ -321,6 +321,53 @@ func TestTrackedThreadsSkipsIdleRecentHistoryWithoutBindingsOrPanels(t *testing.
 	}
 }
 
+func TestThreadsCommandHidesInternalSubAgentThreads(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	visible := model.Thread{
+		ID:            "visible-thread",
+		Title:         "Visible work",
+		ProjectName:   "codex-tg",
+		DirectoryName: "codex-tg",
+		UpdatedAt:     10,
+		LastPreview:   "normal user request",
+		Raw:           json.RawMessage(`{"id":"visible-thread","preview":"normal user request"}`),
+	}
+	internal := model.Thread{
+		ID:            "01900000-0000-7000-8000-000000000014",
+		Title:         "01900000-0000-7000-8000-000000000014",
+		ProjectName:   "memories",
+		DirectoryName: "memories",
+		UpdatedAt:     20,
+		Raw:           json.RawMessage(`{"thread":{"id":"01900000-0000-7000-8000-000000000014","ephemeral":true,"source":{"subAgent":"memory_consolidation"}}}`),
+	}
+	if err := service.store.UpsertThread(ctx, visible); err != nil {
+		t.Fatalf("UpsertThread(visible) failed: %v", err)
+	}
+	if err := service.store.UpsertThread(ctx, internal); err != nil {
+		t.Fatalf("UpsertThread(internal) failed: %v", err)
+	}
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/threads 8", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/threads) failed: %v", err)
+	}
+	if response == nil {
+		t.Fatal("handleCommand(/threads) returned nil response")
+	}
+	if !strings.Contains(response.Text, "Visible work") {
+		t.Fatalf("/threads text missing visible thread:\n%s", response.Text)
+	}
+	if strings.Contains(response.Text, "memories") || strings.Contains(response.Text, internal.ID) {
+		t.Fatalf("/threads text contains internal thread:\n%s", response.Text)
+	}
+	if len(response.Buttons) != 1 || len(response.Buttons[0]) != 1 || response.Buttons[0][0].Text != "Open 1" {
+		t.Fatalf("/threads buttons = %#v, want one Open 1 button", response.Buttons)
+	}
+}
+
 func TestTrackedThreadsIncludesRecentlyChangedTerminalThreadForGlobalObserver(t *testing.T) {
 	t.Parallel()
 
@@ -529,7 +576,7 @@ func TestThreadNeedsLiveSyncSkipsTerminalGlobalObserverPanels(t *testing.T) {
 	}
 }
 
-func TestLiveToolNotificationUpdatesRunningCommandBeforeThreadReadCompletion(t *testing.T) {
+func TestLiveToolNotificationStoresRunningCommandWithoutRenderingItAsCurrent(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -561,6 +608,10 @@ func TestLiveToolNotificationUpdatesRunningCommandBeforeThreadReadCompletion(t *
 		LatestToolStatus:   "completed",
 		LatestToolOutput:   "alpha\nbeta\n",
 		LatestToolFP:       "tool-alpha-fp",
+		DetailItems: []model.DetailItem{
+			{ID: "cmd-alpha", Kind: model.DetailItemTool, Label: "printf 'alpha\\nbeta\\n'", Status: "completed"},
+			{ID: "cmd-alpha:output", Kind: model.DetailItemOutput, Output: "alpha\nbeta\n"},
+		},
 	}
 	if err := service.store.UpsertSnapshot(ctx, thread.ID, appserver.CompactSnapshot(nil, staleCurrent, time.Now().UTC())); err != nil {
 		t.Fatalf("UpsertSnapshot failed: %v", err)
@@ -631,30 +682,28 @@ func TestLiveToolNotificationUpdatesRunningCommandBeforeThreadReadCompletion(t *
 		},
 	})
 
-	foundToolEdit := false
-	foundOutputReset := false
+	renderedRunningTool := false
+	resetCompletedOutput := false
 	for _, edit := range sender.edits {
 		switch edit.messageID {
 		case 202:
 			if strings.Contains(edit.text, "sleep 20") &&
 				strings.Contains(edit.text, "slow-command-done") &&
-				strings.Contains(edit.text, "Status: running") &&
-				!strings.Contains(edit.text, "alpha") {
-				foundToolEdit = true
+				strings.Contains(edit.text, "Status: running") {
+				renderedRunningTool = true
 			}
 		case 203:
-			if strings.Contains(edit.text, "No tool output yet.") &&
-				!strings.Contains(edit.text, "slow-command-done") &&
-				!strings.Contains(edit.text, "alpha") {
-				foundOutputReset = true
+			if strings.Contains(edit.text, "No completed tool output yet.") ||
+				(strings.Contains(edit.text, "slow-command-done") && !strings.Contains(edit.text, "alpha")) {
+				resetCompletedOutput = true
 			}
 		}
 	}
-	if !foundToolEdit {
-		t.Fatalf("running command tool edit not found; edits=%#v", sender.edits)
+	if renderedRunningTool {
+		t.Fatalf("running command was rendered as current tool; edits=%#v", sender.edits)
 	}
-	if !foundOutputReset {
-		t.Fatalf("running command output reset not found; edits=%#v", sender.edits)
+	if resetCompletedOutput {
+		t.Fatalf("completed output was reset by running live tool; edits=%#v", sender.edits)
 	}
 	stored, err := service.store.GetSnapshot(ctx, thread.ID)
 	if err != nil {
@@ -672,6 +721,17 @@ func TestLiveToolNotificationUpdatesRunningCommandBeforeThreadReadCompletion(t *
 	}
 	if got, want := current.LatestToolStatus, "running"; got != want {
 		t.Fatalf("LatestToolStatus = %q, want %q", got, want)
+	}
+	toolText, _ := service.renderToolPanel(ctx, thread, &current)
+	if strings.Contains(toolText, "sleep 20") || strings.Contains(toolText, "Status: running") {
+		t.Fatalf("rendered tool = %q, want running command hidden", toolText)
+	}
+	if !strings.Contains(toolText, "printf") || !strings.Contains(toolText, "Status: completed") {
+		t.Fatalf("rendered tool = %q, want last completed command", toolText)
+	}
+	outputText, _ := service.renderOutputPanel(ctx, thread, &current)
+	if !strings.Contains(outputText, "alpha") || strings.Contains(outputText, "slow-command-done") {
+		t.Fatalf("rendered output = %q, want last completed output", outputText)
 	}
 
 	current.LatestToolStatus = "completed"
@@ -701,6 +761,226 @@ func TestLiveToolNotificationUpdatesRunningCommandBeforeThreadReadCompletion(t *
 	}
 	if got, want := current.LatestToolStatus, "completed"; got != want {
 		t.Fatalf("LatestToolStatus(after late live update) = %q, want %q", got, want)
+	}
+}
+
+func TestLiveToolNotificationIgnoresOlderTurnAfterNewerCompletion(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "thread-old-live-tool",
+		Title:       "Old live tool",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		UpdatedAt:   time.Now().UTC().Unix(),
+		Status:      "idle",
+	}
+	current := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "01900000-0000-7000-8000-000000000020",
+		LatestTurnStatus: "completed",
+		LatestToolID:     "cmd-new",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "printf 'alpha\\nbeta\\n'",
+		LatestToolStatus: "completed",
+		LatestToolOutput: "alpha\nbeta\n",
+		LatestToolFP:     "tool-new-completed",
+		LatestFinalText:  "OK_LIVE_COMMANDS_printf",
+		LatestFinalFP:    "final-new",
+	}
+	state := appserver.CompactSnapshot(nil, current, time.Now().UTC())
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, state); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+
+	applied := service.applyLiveToolSnapshot(ctx, thread.ID, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "01900000-0000-7000-8000-000000000010",
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "cmd-old",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "date",
+		LatestToolStatus: "completed",
+		LatestToolOutput: "Sat May  2\n",
+		LatestToolFP:     "tool-old-completed",
+	})
+	if applied {
+		t.Fatal("older live tool update overwrote newer completed turn")
+	}
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	var compact appserver.ThreadReadSnapshot
+	if err := json.Unmarshal(stored.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot: %v", err)
+	}
+	if compact.LatestTurnID != current.LatestTurnID {
+		t.Fatalf("LatestTurnID = %q, want %q", compact.LatestTurnID, current.LatestTurnID)
+	}
+	if strings.Contains(compact.LatestToolLabel, "date") {
+		t.Fatalf("LatestToolLabel = %q, want newer command preserved", compact.LatestToolLabel)
+	}
+}
+
+func TestLiveToolNotificationIgnoresOlderSameTurnToolAfterNewerTool(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:           "thread-old-same-turn-tool",
+		Title:        "Old same turn tool",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: "turn-same",
+	}
+	current := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-same",
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "cmd-range-3",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "/tmp/math.py 60001 90000",
+		LatestToolStatus: "completed",
+		LatestToolOutput: "RANGE 60001 90000\n",
+		LatestToolFP:     "tool-range-3-completed",
+		DetailItems: []model.DetailItem{
+			{ID: "cmd-range-1", Kind: model.DetailItemTool, Label: "/tmp/math.py 1 30000", Status: "completed"},
+			{ID: "cmd-range-1:output", Kind: model.DetailItemOutput, Output: "RANGE 1 30000\n"},
+			{ID: "cmd-range-2", Kind: model.DetailItemTool, Label: "/tmp/math.py 30001 60000", Status: "completed"},
+			{ID: "cmd-range-2:output", Kind: model.DetailItemOutput, Output: "RANGE 30001 60000\n"},
+			{ID: "cmd-range-3", Kind: model.DetailItemTool, Label: "/tmp/math.py 60001 90000", Status: "completed"},
+			{ID: "cmd-range-3:output", Kind: model.DetailItemOutput, Output: "RANGE 60001 90000\n"},
+		},
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, appserver.CompactSnapshot(nil, current, time.Now().UTC())); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+
+	applied := service.applyLiveToolSnapshot(ctx, thread.ID, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-same",
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "cmd-range-1",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "/tmp/math.py 1 30000",
+		LatestToolStatus: "running",
+		LatestToolFP:     "tool-range-1-late-running",
+	})
+	if applied {
+		t.Fatal("older same-turn live tool update overwrote newer tool")
+	}
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	var compact appserver.ThreadReadSnapshot
+	if err := json.Unmarshal(stored.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot: %v", err)
+	}
+	if compact.LatestToolID != current.LatestToolID {
+		t.Fatalf("LatestToolID = %q, want %q", compact.LatestToolID, current.LatestToolID)
+	}
+
+	applied = service.applyLiveToolSnapshot(ctx, thread.ID, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-same",
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "cmd-range-4",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "/tmp/math.py 90001 120000",
+		LatestToolStatus: "running",
+		LatestToolFP:     "tool-range-4-running",
+	})
+	if !applied {
+		t.Fatal("new same-turn live tool update was rejected")
+	}
+	stored, err = service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot(after newer tool) failed: %v", err)
+	}
+	if err := json.Unmarshal(stored.CompactJSON, &compact); err != nil {
+		t.Fatalf("unmarshal compact snapshot(after newer tool): %v", err)
+	}
+	if compact.LatestToolID != "cmd-range-4" {
+		t.Fatalf("LatestToolID(after newer tool) = %q, want cmd-range-4", compact.LatestToolID)
+	}
+}
+
+func TestPollSnapshotWithoutToolDoesNotPreserveSameTurnRunningToolAsCurrent(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	turnID := "turn-live-tool-preserve"
+	thread := model.Thread{
+		ID:           "thread-live-tool-preserve",
+		Title:        "Live tool preserve",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	firstSeen := time.Date(2026, time.May, 1, 23, 46, 1, 0, time.UTC)
+	previousCurrent := appserver.ThreadReadSnapshot{
+		Thread:              thread,
+		LatestTurnID:        turnID,
+		LatestTurnStatus:    "inProgress",
+		LatestToolID:        "cmd-slow",
+		LatestToolKind:      "commandExecution",
+		LatestToolLabel:     "sleep 20; printf 'slow-command-done\\n'",
+		LatestToolStatus:    "running",
+		LatestToolFP:        "cmd-slow-running-fp",
+		LatestToolStartedAt: firstSeen.Format(time.RFC3339Nano),
+		LatestToolUpdatedAt: firstSeen.Format(time.RFC3339Nano),
+	}
+	previous := appserver.CompactSnapshot(nil, previousCurrent, firstSeen)
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, previous); err != nil {
+		t.Fatalf("UpsertSnapshot(previous) failed: %v", err)
+	}
+	pollWithoutTool := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+	}
+	next := appserver.CompactSnapshot(&previous, pollWithoutTool, firstSeen.Add(8*time.Second))
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, next); err != nil {
+		t.Fatalf("UpsertSnapshot(next) failed: %v", err)
+	}
+	_, current, err := service.loadThreadPanelSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("loadThreadPanelSnapshot failed: %v", err)
+	}
+
+	text, _ := service.renderToolPanelAt(ctx, thread, current, firstSeen.Add(8*time.Second))
+
+	if strings.Contains(text, "sleep 20") || strings.Contains(text, "Status: running") {
+		t.Fatalf("rendered tool = %q, want omitted running tool hidden", text)
+	}
+	if !strings.Contains(text, "No completed tool yet.") {
+		t.Fatalf("rendered tool = %q, want neutral completed-tool absence", text)
+	}
+	summaryMessages := service.renderSummaryPanelMarkdownAt(ctx, thread, current, nil, nil, firstSeen.Add(8*time.Second))
+	if len(summaryMessages) != 1 {
+		t.Fatalf("len(summaryMessages) = %d, want 1", len(summaryMessages))
+	}
+	if !strings.Contains(summaryMessages[0].Text, "Run active for: 8s") {
+		t.Fatalf("rendered summary = %q, want elapsed run time", summaryMessages[0].Text)
 	}
 }
 
@@ -948,6 +1228,151 @@ func TestPollTrackedDefersTelegramOriginPartialInterruptedAndKeepsActiveState(t 
 	requireLogContains(t, got, `"reason":"partial_interrupted"`)
 	if strings.Contains(got, `"event":"telegram_origin_turn_terminal"`) {
 		t.Fatalf("terminal log should be deferred, got:\n%s", got)
+	}
+}
+
+func TestPollTrackedDefersTelegramOriginFinalInterruptedAndKeepsActiveState(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	logs := captureServiceLogs(service)
+	ctx := context.Background()
+	turnID := "turn-final-interrupted"
+	thread := model.Thread{
+		ID:           "thread-final-interrupted",
+		Title:        "Final interrupted",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	previousCurrent := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+		LatestToolID:     "cmd-pwd",
+		LatestToolKind:   "commandExecution",
+		LatestToolLabel:  "pwd",
+		LatestToolStatus: "completed",
+		LatestToolFP:     "cmd-pwd-completed",
+	}
+	previous := appserver.CompactSnapshot(nil, previousCurrent, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, previous); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	service.poll = &stubSession{
+		threadReads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayloadWithFinal(thread, turnID, "interrupted", "OK_FINAL"),
+		},
+	}
+	service.pollConnected = true
+
+	service.pollTracked(ctx)
+
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("snapshot = nil")
+	}
+	if stored.LastSeenTurnStatus != "inProgress" {
+		t.Fatalf("LastSeenTurnStatus = %q, want inProgress", stored.LastSeenTurnStatus)
+	}
+	if stored.LastCompletionFP != "" {
+		t.Fatalf("LastCompletionFP = %q, want empty while final interrupted is deferred", stored.LastCompletionFP)
+	}
+	if stored.NextPollAfter == "" {
+		t.Fatal("NextPollAfter is empty, want hot polling while final interrupted is deferred")
+	}
+	state := loadTerminalGateState(t, service, ctx, terminalGateDeferKey(thread.ID, turnID))
+	if state.LastReason != "final_interrupted" || state.LastDecision != string(terminalGateDefer) {
+		t.Fatalf("defer state = %#v, want final_interrupted defer", state)
+	}
+	got := logs.String()
+	requireLogContains(t, got, `"event":"telegram_origin_terminal_deferred"`)
+	requireLogContains(t, got, `"reason":"final_interrupted"`)
+	if strings.Contains(got, `"event":"telegram_origin_turn_terminal"`) {
+		t.Fatalf("terminal log should be deferred, got:\n%s", got)
+	}
+}
+
+func TestTelegramOriginHotPollCapturesRunningTool(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	turnID := "turn-hot-poll-tool"
+	thread := model.Thread{
+		ID:           "thread-hot-poll-tool",
+		Title:        "Hot poll tool",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	previous := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, previous); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	payload := diagnosticThreadReadPayloadWithTool(thread, turnID, "inProgress")
+	threadPayload := payload["thread"].(map[string]any)
+	threadPayload["status"] = "active"
+	threadPayload["activeTurnId"] = turnID
+	turn := threadPayload["turns"].([]any)[0].(map[string]any)
+	items := turn["items"].([]any)
+	tool := items[1].(map[string]any)
+	tool["status"] = "inProgress"
+	tool["aggregatedOutput"] = nil
+	service.poll = &stubSession{
+		threadReads: map[string]map[string]any{
+			thread.ID: payload,
+		},
+	}
+	service.pollConnected = true
+
+	keepGoing := service.telegramOriginHotPollOnce(ctx, thread.ID, turnID)
+
+	if !keepGoing {
+		t.Fatal("telegramOriginHotPollOnce returned false for in-progress turn")
+	}
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("snapshot = nil")
+	}
+	if stored.LastSeenTurnStatus != "inProgress" {
+		t.Fatalf("LastSeenTurnStatus = %q, want inProgress", stored.LastSeenTurnStatus)
+	}
+	_, current, err := service.loadThreadPanelSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("loadThreadPanelSnapshot failed: %v", err)
+	}
+	if !strings.Contains(current.LatestToolLabel, "sleep 20") || current.LatestToolStatus != "inProgress" {
+		t.Fatalf("stored tool = %q/%q, want running sleep command", current.LatestToolLabel, current.LatestToolStatus)
+	}
+	if stored.NextPollAfter == "" {
+		t.Fatal("NextPollAfter is empty, want hot poll continuation")
 	}
 }
 
@@ -1398,8 +1823,8 @@ func TestActiveTurnMismatchRetriesFoundTurn(t *testing.T) {
 
 	service := newTestService(t)
 	ctx := context.Background()
-	oldTurnID := "019dd9db-2c71-7180-9c56-7aeb99f28f18"
-	foundTurnID := "019dda1b-fc45-72d3-8dfb-03dc4c708b8b"
+	oldTurnID := "01900000-0000-7000-8000-000000000101"
+	foundTurnID := "01900000-0000-7000-8000-000000000102"
 	thread := model.Thread{
 		ID:           "active-mismatch-thread",
 		Title:        "Active mismatch",
@@ -1630,7 +2055,7 @@ func TestPlanCommandUUIDLikeHeadStaysExplicit(t *testing.T) {
 	if err := service.store.SetBinding(ctx, 123456789, 0, bound.ID, model.BindingModeBound); err != nil {
 		t.Fatalf("SetBinding failed: %v", err)
 	}
-	explicitID := "019dd663-d19b-7740-ad85-36ddb517ef39"
+	explicitID := "01900000-0000-7000-8000-000000000999"
 
 	response, err := service.handleCommand(ctx, 123456789, 0, "/plan "+explicitID+" propose options", 0)
 	if err != nil {
@@ -2317,6 +2742,36 @@ func TestFinalCardGetThreadIDButtonSendsCopyableIDs(t *testing.T) {
 	}
 }
 
+func TestFinalCardShowsRunDuration(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "final-duration-thread",
+		Title:       "Final duration",
+		ProjectName: "Codex",
+		Status:      "idle",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:              thread,
+		LatestTurnID:        "final-duration-turn",
+		LatestTurnStatus:    "completed",
+		LatestTurnStartedAt: "2026-05-02T12:00:00Z",
+		LatestTurnUpdatedAt: "2026-05-02T12:01:12Z",
+		LatestFinalText:     "Done.",
+		LatestFinalFP:       "final-duration-fp",
+	}
+
+	message, _, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
+	if !strings.Contains(message.Text, "Done.") {
+		t.Fatalf("final card = %q, want final answer", message.Text)
+	}
+	if !strings.Contains(message.Text, "Run duration: 1m 12s") {
+		t.Fatalf("final card = %q, want run duration footer", message.Text)
+	}
+}
+
 func TestReplyCommandKeepsDefaultCollaborationMode(t *testing.T) {
 	t.Parallel()
 
@@ -2649,6 +3104,21 @@ func diagnosticThreadReadPayloadWithTool(thread model.Thread, turnID, status str
 			"aggregatedOutput": "slow-command-done\n",
 		},
 	}
+	return payload
+}
+
+func diagnosticThreadReadPayloadWithFinal(thread model.Thread, turnID, status, finalText string) map[string]any {
+	payload := diagnosticThreadReadPayloadWithTool(thread, turnID, status)
+	threadPayload := payload["thread"].(map[string]any)
+	turns := threadPayload["turns"].([]any)
+	turn := turns[0].(map[string]any)
+	items := turn["items"].([]any)
+	turn["items"] = append(items, map[string]any{
+		"id":    "final-item",
+		"type":  "agentMessage",
+		"phase": "final_answer",
+		"text":  finalText,
+	})
 	return payload
 }
 

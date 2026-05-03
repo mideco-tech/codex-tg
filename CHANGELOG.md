@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.1.2 - 2026-05-03
+
+- Made the Telegram live trio honest about App Server visibility: `[commentary]` owns whole-run timing, `[Tool]` shows the last completed tool, and `[Output]` shows the last completed tool output.
+- Added `Run active for: ...` while a run is active and `Run duration: ...` on the terminal `[Final]` card.
+- Removed running-tool preservation from compact snapshots so missing App Server tool state cannot be rendered as an authoritative current command.
+- Hardened late live-tool handling so older turn/tool updates cannot overwrite newer completed state.
+- Retired session-tail overlay from live UI paths; session JSONL remains only for explicit exports/full-log flows.
+- Added public-safe Telegram live E2E coverage for sequential commands, `sleep 20`, and a multi-command math run that verifies last-completed tool/output updates and run timing.
+- Filtered internal/ephemeral App Server threads from public thread lists.
+- Updated ADR/testing notes for the correctness-over-current-command-visibility contract.
+
+## v0.1.1 - 2026-04-29
+
 - Added bounded daemon diagnostics for Telegram-originated turn lifecycle, app-server calls, session repair, transport failures, and first terminal status of Telegram-originated turns.
 - Normalized App Server snapshots that contain a `final_answer` but still report `inProgress`, clearing stale active-turn state before Telegram routing.
 - Treated `no active turn to steer` as stale active-turn evidence so Telegram input can start a new turn instead of returning a false parallel-turn warning.
@@ -10,9 +23,6 @@
 - Sanitized Telegram-visible rendering so missing App Server command/status/request fields never appear as literal `"<nil>"`, with unit coverage and a local live nil-guard E2E path documented.
 - Serialized App Server session lifecycle repair/startup so stale old live loops cannot clear newer sessions or create duplicate live subscriptions.
 - Gated transient Telegram-origin empty `interrupted` snapshots so Telegram does not collapse into a false terminal card before App Server catch-up.
-
-## v0.1.1 - 2026-04-29
-
 - Changed observer chronology so `New run` is an orientation card without run status.
 - Kept run status only on live `[commentary]` and terminal `[Final]` cards.
 - Stopped `[User]` cards from showing or updating run status after the prompt is delivered.

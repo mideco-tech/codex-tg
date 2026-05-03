@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/appserver"
 	"github.com/mideco-tech/codex-tg/internal/model"
@@ -78,7 +79,14 @@ func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread mod
 		s.visualHeader(ctx, "Final", thread, snapshot.LatestTurnID),
 		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
 	}, "\n")
-	message := renderSingleMarkdownCard(header, snapshot.LatestFinalText)
+	body := strings.TrimSpace(snapshot.LatestFinalText)
+	if line := runTimingFooter(snapshot, time.Now().UTC()); line != "" {
+		if body != "" {
+			body += "\n\n"
+		}
+		body += line
+	}
+	message := renderSingleMarkdownCard(header, body)
 	return message, buttons, hashStrings(tgformat.HashRendered(message), flattenButtonSpecs(buttons))
 }
 

@@ -85,7 +85,17 @@ func isDeferrableInterruptedSnapshot(snapshot *appserver.ThreadReadSnapshot) boo
 	if snapshot.WaitingOnApproval || snapshot.WaitingOnReply {
 		return false
 	}
-	return !snapshotHasFinalSignal(snapshot)
+	return true
+}
+
+func interruptedDeferReason(snapshot *appserver.ThreadReadSnapshot) string {
+	if isEmptyInterruptedSnapshot(snapshot) {
+		return "empty_interrupted"
+	}
+	if snapshotHasFinalSignal(snapshot) {
+		return "final_interrupted"
+	}
+	return "partial_interrupted"
 }
 
 func snapshotHasFinalSignal(snapshot *appserver.ThreadReadSnapshot) bool {
@@ -241,10 +251,7 @@ func (s *Service) decideTelegramOriginEmptyInterruptedTerminal(ctx context.Conte
 
 	state := existing
 	if !hasExisting {
-		reason := "partial_interrupted"
-		if emptyInterrupted {
-			reason = "empty_interrupted"
-		}
+		reason := interruptedDeferReason(snapshot)
 		state = terminalGateState{
 			ThreadID:     threadID,
 			TurnID:       turnID,
@@ -284,10 +291,7 @@ func (s *Service) decideTelegramOriginEmptyInterruptedTerminal(ctx context.Conte
 	}
 
 	decision.Action = terminalGateDefer
-	decision.Reason = "partial_interrupted"
-	if emptyInterrupted {
-		decision.Reason = "empty_interrupted"
-	}
+	decision.Reason = interruptedDeferReason(snapshot)
 	decision.HotPoll = true
 	decision.NextPollAfter = terminalGateNextPollAfter(now, s.cfg.ObserverPollInterval)
 	state.NextPollAfter = decision.NextPollAfter

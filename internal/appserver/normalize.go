@@ -15,6 +15,8 @@ type ThreadReadSnapshot struct {
 	Thread                    model.Thread
 	LatestTurnID              string
 	LatestTurnStatus          string
+	LatestTurnStartedAt       string
+	LatestTurnUpdatedAt       string
 	WaitingOnApproval         bool
 	WaitingOnReply            bool
 	LatestAgentMessages       []string
@@ -32,6 +34,8 @@ type ThreadReadSnapshot struct {
 	LatestToolStatus          string
 	LatestToolOutput          string
 	LatestToolFP              string
+	LatestToolStartedAt       string
+	LatestToolUpdatedAt       string
 	PlanPrompt                *model.PlanPrompt
 	DetailItems               []model.DetailItem
 }
@@ -47,7 +51,11 @@ func ThreadsFromList(result map[string]any) []model.Thread {
 	items := iterThreadItems(result)
 	out := make([]model.Thread, 0, len(items))
 	for _, item := range items {
-		out = append(out, ThreadFromPayload(item))
+		thread := ThreadFromPayload(item)
+		if thread.IsInternal() {
+			continue
+		}
+		out = append(out, thread)
 	}
 	return out
 }
@@ -307,6 +315,8 @@ func DiffSnapshot(previous *model.ThreadSnapshotState, current ThreadReadSnapsho
 }
 
 func CompactSnapshot(previous *model.ThreadSnapshotState, current ThreadReadSnapshot, polledAt time.Time) model.ThreadSnapshotState {
+	applyLatestTurnTiming(previous, &current, polledAt)
+	applyLatestToolTiming(previous, &current, polledAt)
 	out := model.ThreadSnapshotState{
 		ThreadUpdatedAt:      current.Thread.UpdatedAt,
 		LastSeenThreadStatus: current.Thread.Status,
@@ -338,6 +348,100 @@ func CompactSnapshot(previous *model.ThreadSnapshotState, current ThreadReadSnap
 	raw, _ := json.Marshal(current)
 	out.CompactJSON = raw
 	return out
+}
+
+func applyLatestTurnTiming(previous *model.ThreadSnapshotState, current *ThreadReadSnapshot, observedAt time.Time) {
+	if current == nil || strings.TrimSpace(current.LatestTurnID) == "" {
+		return
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	} else {
+		observedAt = observedAt.UTC()
+	}
+	observedText := observedAt.Format(time.RFC3339Nano)
+
+	var previousSnapshot ThreadReadSnapshot
+	if previous != nil && len(previous.CompactJSON) > 0 {
+		_ = json.Unmarshal(previous.CompactJSON, &previousSnapshot)
+	}
+	sameTurn := strings.TrimSpace(previousSnapshot.LatestTurnID) == strings.TrimSpace(current.LatestTurnID)
+	if strings.TrimSpace(current.LatestTurnStartedAt) == "" {
+		if sameTurn && strings.TrimSpace(previousSnapshot.LatestTurnStartedAt) != "" {
+			current.LatestTurnStartedAt = previousSnapshot.LatestTurnStartedAt
+		} else {
+			current.LatestTurnStartedAt = observedText
+		}
+	}
+	if strings.TrimSpace(current.LatestTurnUpdatedAt) == "" {
+		current.LatestTurnUpdatedAt = observedText
+	}
+}
+
+func applyLatestToolTiming(previous *model.ThreadSnapshotState, current *ThreadReadSnapshot, observedAt time.Time) {
+	if current == nil || latestToolTimingKey(*current) == "" {
+		return
+	}
+	observedAt = observedAt.UTC()
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	observedText := observedAt.Format(time.RFC3339Nano)
+
+	var previousSnapshot ThreadReadSnapshot
+	if previous != nil && len(previous.CompactJSON) > 0 {
+		_ = json.Unmarshal(previous.CompactJSON, &previousSnapshot)
+	}
+	sameTool := sameLatestTool(previousSnapshot, *current)
+
+	if strings.TrimSpace(current.LatestToolStartedAt) == "" {
+		if sameTool && strings.TrimSpace(previousSnapshot.LatestToolStartedAt) != "" {
+			current.LatestToolStartedAt = previousSnapshot.LatestToolStartedAt
+		} else {
+			current.LatestToolStartedAt = observedText
+		}
+	}
+	if strings.TrimSpace(current.LatestToolUpdatedAt) == "" {
+		if sameTool &&
+			strings.TrimSpace(previousSnapshot.LatestToolUpdatedAt) != "" &&
+			strings.TrimSpace(previousSnapshot.LatestToolFP) == strings.TrimSpace(current.LatestToolFP) {
+			current.LatestToolUpdatedAt = previousSnapshot.LatestToolUpdatedAt
+		} else {
+			current.LatestToolUpdatedAt = observedText
+		}
+	}
+}
+
+func sameLatestTool(left, right ThreadReadSnapshot) bool {
+	leftKey := latestToolTimingKey(left)
+	rightKey := latestToolTimingKey(right)
+	if leftKey == "" || rightKey == "" || leftKey != rightKey {
+		return false
+	}
+	leftTurnID := strings.TrimSpace(left.LatestTurnID)
+	rightTurnID := strings.TrimSpace(right.LatestTurnID)
+	return leftTurnID == "" || rightTurnID == "" || leftTurnID == rightTurnID
+}
+
+func latestToolTimingKey(snapshot ThreadReadSnapshot) string {
+	if id := strings.TrimSpace(snapshot.LatestToolID); id != "" {
+		return "id:" + id
+	}
+	kind := strings.TrimSpace(snapshot.LatestToolKind)
+	label := strings.TrimSpace(snapshot.LatestToolLabel)
+	if kind == "" && label == "" {
+		return ""
+	}
+	return "fallback:" + kind + ":" + label
+}
+
+func terminalLatestToolStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "succeeded", "failed", "interrupted", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func NormalizeLiveNotification(event Event, thread model.Thread) []model.ObserverEvent {

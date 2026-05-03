@@ -737,8 +737,9 @@ func (s *Service) renderSummaryPanel(ctx context.Context, thread model.Thread, s
 		}
 	}
 	entries := append([]appserver.AgentMessageEntry(nil), snapshot.LatestAgentMessageEntries...)
+	now := time.Now().UTC()
 	for {
-		rendered := s.renderSummaryPanelMarkdown(ctx, thread, snapshot, entries, pending)
+		rendered := s.renderSummaryPanelMarkdownAt(ctx, thread, snapshot, entries, pending, now)
 		if len(rendered) <= 1 {
 			message := firstRenderedMessage(rendered)
 			return message, buttons, hashStrings(tgformat.HashRendered(message), flattenButtonSpecs(buttons))
@@ -752,6 +753,10 @@ func (s *Service) renderSummaryPanel(ctx context.Context, thread model.Thread, s
 }
 
 func (s *Service) renderSummaryPanelMarkdown(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, entries []appserver.AgentMessageEntry, pending *model.PendingApproval) []model.RenderedMessage {
+	return s.renderSummaryPanelMarkdownAt(ctx, thread, snapshot, entries, pending, time.Now().UTC())
+}
+
+func (s *Service) renderSummaryPanelMarkdownAt(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, entries []appserver.AgentMessageEntry, pending *model.PendingApproval, now time.Time) []model.RenderedMessage {
 	segments := []tgformat.Segment{tgformat.Plain(strings.Join([]string{
 		s.visualHeader(ctx, "commentary", thread, snapshot.LatestTurnID),
 		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
@@ -780,6 +785,9 @@ func (s *Service) renderSummaryPanelMarkdown(ctx context.Context, thread model.T
 		}
 	} else if snapshot != nil && snapshot.PlanPrompt != nil {
 		segments = append(segments, tgformat.Plain("\n\n[Plan]\nWaiting for input. Reply to the [Plan] message or use /reply."))
+	}
+	if line := runTimingFooter(snapshot, now); line != "" {
+		segments = append(segments, tgformat.Plain("\n\n"+line))
 	}
 	return tgformat.RenderSegments(segments, tgformat.TelegramMessageLimit)
 }
@@ -821,39 +829,147 @@ func chronologicalAgentEntries(entries []appserver.AgentMessageEntry) []appserve
 }
 
 func (s *Service) renderToolPanel(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (string, string) {
+	return s.renderToolPanelAt(ctx, thread, snapshot, time.Now().UTC())
+}
+
+func (s *Service) renderToolPanelAt(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, now time.Time) (string, string) {
 	header := s.visualHeader(ctx, "Tool", thread, snapshot.LatestTurnID)
-	label := strings.TrimSpace(cleanTelegramNilLiteral(snapshot.LatestToolLabel))
+	tool, _ := lastCompletedTool(snapshot)
+	label := strings.TrimSpace(cleanTelegramNilLiteral(tool.Label))
 	if label == "" {
-		text := strings.Join([]string{header, "No tool activity yet."}, "\n")
+		lines := []string{header, "No completed tool yet."}
+		text := strings.Join(lines, "\n")
 		return text, hashStrings(text)
 	}
 
 	escapedHeader := html.EscapeString(header)
 	renderedTool := renderToolCommandBlock(label, outputMessageLimit-len(escapedHeader)-2)
-	lines := []string{escapedHeader, renderedTool}
-	if status := strings.TrimSpace(snapshot.LatestToolStatus); status != "" {
+	lines := []string{escapedHeader, "Last completed tool:", renderedTool}
+	if status := strings.TrimSpace(tool.Status); status != "" {
 		lines = append(lines, html.EscapeString(fmt.Sprintf("Status: %s", status)))
 	}
 	text := strings.Join(lines, "\n")
 	return text, hashStrings(text)
 }
 
+func runTimingFooter(snapshot *appserver.ThreadReadSnapshot, now time.Time) string {
+	if snapshot == nil {
+		return ""
+	}
+	startedAt := parseTime(model.TimeString(snapshot.LatestTurnStartedAt))
+	if startedAt.IsZero() {
+		return ""
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if isTerminalStatus(snapshot.LatestTurnStatus) {
+		endedAt := parseTime(model.TimeString(snapshot.LatestTurnUpdatedAt))
+		if endedAt.IsZero() {
+			endedAt = now
+		}
+		return fmt.Sprintf("Run duration: %s", formatToolDuration(endedAt.Sub(startedAt)))
+	}
+	return fmt.Sprintf("Run active for: %s", formatToolDuration(now.Sub(startedAt)))
+}
+
+func formatToolDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	seconds := int(duration.Truncate(time.Second).Seconds())
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	seconds = seconds % 60
+	if minutes < 60 {
+		if seconds == 0 {
+			return fmt.Sprintf("%dm", minutes)
+		}
+		return fmt.Sprintf("%dm %02ds", minutes, seconds)
+	}
+	hours := minutes / 60
+	minutes = minutes % 60
+	if hours < 48 {
+		return fmt.Sprintf("%dh %02dm", hours, minutes)
+	}
+	days := hours / 24
+	hours = hours % 24
+	return fmt.Sprintf("%dd %02dh", days, hours)
+}
+
 func (s *Service) renderOutputPanel(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (string, string) {
 	header := s.visualHeader(ctx, "Output", thread, snapshot.LatestTurnID)
-	output := strings.ReplaceAll(snapshot.LatestToolOutput, "\r\n", "\n")
+	tool, _ := lastCompletedTool(snapshot)
+	output := strings.ReplaceAll(tool.Output, "\r\n", "\n")
 	output = cleanTelegramNilLiteral(output)
 	output = strings.TrimSpace(output)
 	if output == "" {
-		text := strings.Join([]string{header, "No tool output yet."}, "\n")
+		text := strings.Join([]string{header, "No completed tool output yet."}, "\n")
 		return text, hashStrings(text)
 	}
 
 	escapedHeader := html.EscapeString(header)
+	prefix := strings.Join([]string{escapedHeader, "Last completed output:"}, "\n")
 	text := strings.Join([]string{
-		escapedHeader,
-		renderHTMLCodeBlockTail(trimOutputTail(output, outputMessageLimit), outputMessageLimit-len(escapedHeader)-1, ""),
+		prefix,
+		renderHTMLCodeBlockTail(trimOutputTail(output, outputMessageLimit-len(prefix)-1), outputMessageLimit-len(prefix)-1, ""),
 	}, "\n")
 	return text, hashStrings(text)
+}
+
+type completedToolView struct {
+	ID     string
+	Label  string
+	Status string
+	Output string
+}
+
+func lastCompletedTool(snapshot *appserver.ThreadReadSnapshot) (completedToolView, bool) {
+	if snapshot == nil {
+		return completedToolView{}, false
+	}
+	outputByToolID := make(map[string]string)
+	for _, item := range snapshot.DetailItems {
+		if item.Kind != model.DetailItemOutput {
+			continue
+		}
+		if id := strings.TrimSuffix(strings.TrimSpace(item.ID), ":output"); id != "" {
+			outputByToolID[id] = item.Output
+		}
+	}
+	for i := len(snapshot.DetailItems) - 1; i >= 0; i-- {
+		item := snapshot.DetailItems[i]
+		if item.Kind != model.DetailItemTool || !terminalToolStatus(item.Status) {
+			continue
+		}
+		label := strings.TrimSpace(cleanTelegramNilLiteral(item.Label))
+		if label == "" {
+			continue
+		}
+		id := strings.TrimSpace(item.ID)
+		return completedToolView{
+			ID:     id,
+			Label:  label,
+			Status: item.Status,
+			Output: outputByToolID[id],
+		}, true
+	}
+	if terminalToolStatus(snapshot.LatestToolStatus) {
+		label := strings.TrimSpace(cleanTelegramNilLiteral(snapshot.LatestToolLabel))
+		if label != "" {
+			return completedToolView{
+				ID:     strings.TrimSpace(snapshot.LatestToolID),
+				Label:  label,
+				Status: snapshot.LatestToolStatus,
+				Output: snapshot.LatestToolOutput,
+			}, true
+		}
+	}
+	return completedToolView{}, false
 }
 
 func renderToolCommandBlock(label string, maxLen int) string {

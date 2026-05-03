@@ -45,13 +45,29 @@ The daemon owns one live App Server session and one poll App Server session at a
 - stale old-session close/error events may be logged with `current=false`, but they must not invalidate the current session
 - lifecycle diagnostics may include role, generation, operation, thread/turn ids, durations, and sanitized errors, but not raw prompt text, local session paths, SQLite paths, env paths, or unbounded stderr
 
+## Daemon Restart Boundary
+
+A Telegram-originated turn runs through the daemon-owned App Server stdio session. If the daemon is killed while that turn is active, the App Server transport for the turn is closed and the turn may become `interrupted`.
+
+The bridge must treat this as a restart-safety boundary, not as a rendering-only bug:
+
+- a safe restart should drain or reject restart while Telegram-origin turns are active
+- graceful shutdown should stop accepting new Telegram-origin turns and wait for active turns when possible
+- forced process termination may still interrupt the active App Server turn
+- current architecture does not promise reattach/resume after daemon death
+
+Future work should prefer a small safe-restart guard before adding a heavier runtime. The following are explicit non-goals unless a separate ADR accepts the complexity:
+
+- moving App Server ownership into a separate broker process that survives Telegram daemon restarts
+- reattaching to or resuming an already-running App Server turn after daemon death
+- changing the backend integration protocol away from local App Server stdio
+
 ## Transient Interrupted Contract
 
-App Server can transiently report a Telegram-origin turn as `interrupted` before later recovering the same turn to `inProgress` or `completed`. The first observed form was an empty user-only snapshot, but live validation also showed a partial tool/output snapshot briefly reporting `interrupted` before the final answer arrived. The bridge treats non-final Telegram-origin `interrupted` as ambiguous drift:
+App Server can transiently report a Telegram-origin turn as `interrupted` before later recovering the same turn to `inProgress` or `completed`. The first observed form was an empty user-only snapshot, but live validation later showed both partial tool/output snapshots and final-bearing snapshots briefly reporting `interrupted` before recovering to `completed`. The bridge treats implicit Telegram-origin `interrupted` as ambiguous drift:
 
 - applies only to Telegram-origin turns
-- applies only when no final-answer signal is present
-- without an explicit `/stop`, non-final `interrupted` is deferred for a short grace window instead of being compacted, rendered terminal, or logged terminal
+- without an explicit `/stop`, `interrupted` is deferred for a short grace window instead of being compacted, rendered terminal, or logged terminal
 - if the same turn later shows active/waiting or final evidence, the defer marker is cleared and normal rendering resumes
 - if the defer window expires, the `interrupted` snapshot is accepted as terminal
 - explicit `/stop` or Stop button writes an explicit interrupt marker so its terminal `interrupted` bypasses deferral
@@ -74,8 +90,9 @@ Nil-safe rendering is part of turn lifecycle normalization because the bad state
 - Final Card collapse can happen even when App Server status lags behind the final item.
 - Telegram UI must never expose literal `"<nil>"`; missing App Server fields are treated as data-shape drift, not as meaningful user-facing content.
 - Duplicate live App Server session loops are treated as lifecycle bugs, not harmless diagnostics.
-- Non-final Telegram-origin `interrupted` snapshots do not erase active UI or create a false terminal card until confirmed.
+- Implicit Telegram-origin `interrupted` snapshots do not erase active UI or create a false terminal card until confirmed.
 - New agents should debug lifecycle issues from normalized snapshot behavior, not raw `thread/read` status alone.
+- Restart safety must be handled before killing the daemon that owns an active Telegram-origin turn.
 - Tests must cover both parts of the contract:
   - final-answer normalization clears active turn state
   - `no active turn to steer` falls back to a new turn
@@ -83,10 +100,11 @@ Nil-safe rendering is part of turn lifecycle normalization because the bad state
   - global observer does not duplicate Telegram-origin panels
   - nil-like payload values do not leak into command, Details, summary, tool, output, or RPC request rendering
   - old live loops cannot clear newer session state
-  - non-final Telegram-origin `interrupted` is deferred, recovered, expired, or bypassed for explicit stop
+  - implicit Telegram-origin `interrupted` is deferred, recovered, expired, or bypassed for explicit stop
 
 ## Non-goals
 
 - This does not introduce a second backend runtime or `codex exec resume`.
 - This does not treat every steer failure as safe to retry with `turn/start`.
 - This does not rewrite old Telegram history or delete already-sent duplicate cards automatically.
+- This does not make forced daemon termination transparent to active Telegram-origin turns.
