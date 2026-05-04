@@ -204,6 +204,8 @@ Contract notes:
 
 ADR: `docs/adr/ADR-013-retire-session-tail-tool-overlay.md`
 
+Feature brief: `docs/process/v0.2.0-live-appserver-events-brief.md`
+
 Primary tests:
 
 - `internal/daemon/session_tail_overlay_test.go::TestPollTrackedIgnoresStaleSessionTailTool`
@@ -216,19 +218,27 @@ Primary tests:
 - `internal/daemon/service_test.go::TestLiveToolNotificationStoresRunningCommandWithoutRenderingItAsCurrent`
 - `internal/daemon/service_test.go::TestPollSnapshotWithoutToolDoesNotPreserveSameTurnRunningToolAsCurrent`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelShowsLastCompletedToolInsteadOfRunningTool`
+- `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelShowsTelegramOriginCurrentTool`
+- `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelKeepsForeignRunningToolHidden`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderSummaryPanelShowsActiveRunElapsedTimeAtBottom`
 - `internal/daemon/service_test.go::TestFinalCardShowsRunDuration`
 
 Contract notes:
 
 - App Server `thread/read` snapshots remain the durable source.
-- App Server live item notifications may update snapshot/detail history, but Telegram `[Tool]` does not promise authoritative current command visibility.
+- App Server live item notifications may update snapshot/detail history.
+- Telegram-origin turns may render current command visibility from live `item/started` and `item/updated` only after matching the marked `thread_id + turn_id`.
+- Foreign GUI/CLI runs do not promise authoritative current command visibility.
 - Long-running active runs render elapsed runtime in `[commentary]`; completed Final Cards render total `Run duration`.
-- `[Tool]` renders the last completed tool, or `No completed tool yet.` when no completed tool is available.
+- `[Tool]` renders the current tool only for eligible Telegram-origin active turns; otherwise it renders the last completed tool, or `No completed tool yet.` when no completed tool is available.
 - `[Output]` renders the last completed tool output when available.
 - Session JSONL is not a live Telegram UI source.
 - Missing App Server tool state renders as neutral absence, not as a guessed command.
 - Session JSONL can still be used for explicit full-log export paths.
+
+Slice gate:
+
+- Each v0.2.0 live-event slice must add or update tests first, pass targeted checks, run the relevant live Telegram E2E case, and only then be committed.
 
 ## Baseline Commands
 
