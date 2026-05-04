@@ -69,6 +69,7 @@ type Client struct {
 	pending        map[uint64]chan rpcResponse
 	subscribers    []chan Event
 	nextID         uint64
+	generation     uint64
 	stderrLines    []string
 	started        bool
 	readerDone     chan struct{}
@@ -127,12 +128,14 @@ func (c *Client) Start(ctx context.Context) error {
 	c.stdout = stdout
 	c.stderr = stderr
 	c.started = true
+	c.generation++
+	generation := c.generation
 	c.readerDone = make(chan struct{})
 	c.stderrDone = make(chan struct{})
 	c.mu.Unlock()
 
-	go c.readStdout()
-	go c.readStderr()
+	go c.readStdout(generation)
+	go c.readStderr(generation)
 	if _, err := c.Request(ctx, "initialize", map[string]any{
 		"capabilities": map[string]any{"experimentalApi": true},
 		"clientInfo": map[string]any{
@@ -168,6 +171,7 @@ func (c *Client) closeRunning() error {
 	pending := c.pending
 	c.pending = map[uint64]chan rpcResponse{}
 	c.started = false
+	c.generation++
 	c.cmd = nil
 	c.stdin = nil
 	c.stdout = nil
@@ -639,7 +643,7 @@ func (c *Client) buildCommand() (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-func (c *Client) readStdout() {
+func (c *Client) readStdout(generation uint64) {
 	defer close(c.readerDone)
 	c.mu.Lock()
 	stdout := c.stdout
@@ -650,31 +654,34 @@ func (c *Client) readStdout() {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
+		if !c.isStartedGeneration(generation) {
+			return
+		}
 		line := scanner.Bytes()
 		var payload map[string]any
 		if err := json.Unmarshal(line, &payload); err != nil {
-			c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdout", "error": err.Error(), "line_len": len(line), "stderr_tail": c.StderrTail()}})
+			c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdout", "generation": generation, "error": err.Error(), "line_len": len(line), "stderr_tail": c.StderrTail()}})
 			continue
 		}
-		c.handlePayload(payload)
+		c.handlePayload(payload, generation)
 	}
-	if !c.isStarted() {
+	if !c.isStartedGeneration(generation) {
 		return
 	}
 	if err := scanner.Err(); err != nil {
-		c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdout", "error": err.Error(), "stderr_tail": c.StderrTail()}})
+		c.broadcast(Event{Channel: "transport_error", Params: map[string]any{"stream": "stdout", "generation": generation, "error": err.Error(), "stderr_tail": c.StderrTail()}})
 		return
 	}
-	c.broadcast(Event{Channel: "transport_closed", Params: map[string]any{"stream": "stdout", "reason": "eof", "stderr_tail": c.StderrTail()}})
+	c.broadcast(Event{Channel: "transport_closed", Params: map[string]any{"stream": "stdout", "generation": generation, "reason": "eof", "stderr_tail": c.StderrTail()}})
 }
 
-func (c *Client) isStarted() bool {
+func (c *Client) isStartedGeneration(generation uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.started
+	return c.started && c.generation == generation
 }
 
-func (c *Client) readStderr() {
+func (c *Client) readStderr(generation uint64) {
 	defer close(c.stderrDone)
 	c.mu.Lock()
 	stderr := c.stderr
@@ -685,6 +692,9 @@ func (c *Client) readStderr() {
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 0, 512), 64*1024)
 	for scanner.Scan() {
+		if !c.isStartedGeneration(generation) {
+			return
+		}
 		line := scanner.Text()
 		c.mu.Lock()
 		c.stderrLines = append(c.stderrLines, line)
@@ -695,11 +705,15 @@ func (c *Client) readStderr() {
 	}
 }
 
-func (c *Client) handlePayload(payload map[string]any) {
+func (c *Client) handlePayload(payload map[string]any, generation uint64) {
 	if id, ok := payload["id"]; ok {
 		if _, hasResult := payload["result"]; hasResult || payload["error"] != nil {
 			responseID := uint64FromAny(id)
 			c.mu.Lock()
+			if !c.started || c.generation != generation {
+				c.mu.Unlock()
+				return
+			}
 			reply := c.pending[responseID]
 			delete(c.pending, responseID)
 			c.mu.Unlock()
@@ -720,6 +734,10 @@ func (c *Client) handlePayload(payload map[string]any) {
 			}
 			params := asMap(payload["params"])
 			c.mu.Lock()
+			if !c.started || c.generation != generation {
+				c.mu.Unlock()
+				return
+			}
 			c.serverRequests[requestID] = params
 			c.mu.Unlock()
 			c.broadcast(Event{Channel: "server_request", Method: method, Params: params, ID: id})
@@ -731,9 +749,16 @@ func (c *Client) handlePayload(payload map[string]any) {
 	if strings.EqualFold(method, "serverRequest/resolved") {
 		if requestID := rpcString(params["requestId"]); requestID != "" {
 			c.mu.Lock()
+			if !c.started || c.generation != generation {
+				c.mu.Unlock()
+				return
+			}
 			delete(c.serverRequests, requestID)
 			c.mu.Unlock()
 		}
+	}
+	if !c.isStartedGeneration(generation) {
+		return
 	}
 	c.broadcast(Event{Channel: "notification", Method: method, Params: params})
 }

@@ -741,6 +741,76 @@ func (s *Service) applyLiveToolSnapshot(ctx context.Context, threadID string, li
 	return true
 }
 
+func (s *Service) preserveTelegramOriginLiveCurrentTool(ctx context.Context, current *appserver.ThreadReadSnapshot, previous *model.ThreadSnapshotState) {
+	if current == nil || previous == nil || len(previous.CompactJSON) == 0 {
+		return
+	}
+	if snapshotHasToolEvidence(*current) || isTerminalStatus(current.LatestTurnStatus) {
+		return
+	}
+	var prev appserver.ThreadReadSnapshot
+	if err := json.Unmarshal(previous.CompactJSON, &prev); err != nil {
+		return
+	}
+	turnID := strings.TrimSpace(current.LatestTurnID)
+	if turnID == "" || turnID != strings.TrimSpace(prev.LatestTurnID) {
+		return
+	}
+	if !prev.LatestToolLiveCurrent || isTerminalStatus(prev.LatestTurnStatus) || terminalToolStatus(prev.LatestToolStatus) {
+		return
+	}
+	threadID := strings.TrimSpace(firstNonEmpty(current.Thread.ID, prev.Thread.ID))
+	if threadID == "" || !s.isTelegramOriginTurn(ctx, threadID, turnID) {
+		return
+	}
+	label := strings.TrimSpace(cleanTelegramNilLiteral(prev.LatestToolLabel))
+	if label == "" || strings.TrimSpace(prev.LatestToolFP) == "" {
+		return
+	}
+	current.LatestToolID = prev.LatestToolID
+	current.LatestToolKind = prev.LatestToolKind
+	current.LatestToolLabel = prev.LatestToolLabel
+	current.LatestToolStatus = prev.LatestToolStatus
+	current.LatestToolOutput = prev.LatestToolOutput
+	current.LatestToolFP = prev.LatestToolFP
+	current.LatestToolLiveCurrent = prev.LatestToolLiveCurrent
+	current.LatestProgressText = prev.LatestProgressText
+	current.LatestProgressFP = prev.LatestProgressFP
+	current.LatestToolStartedAt = prev.LatestToolStartedAt
+	current.LatestToolUpdatedAt = prev.LatestToolUpdatedAt
+	current.DetailItems = upsertLiveToolDetails(current.DetailItems, toolOutputDetailItems(prev.DetailItems))
+}
+
+func snapshotHasToolEvidence(snapshot appserver.ThreadReadSnapshot) bool {
+	if strings.TrimSpace(cleanTelegramNilLiteral(snapshot.LatestToolID)) != "" ||
+		strings.TrimSpace(cleanTelegramNilLiteral(snapshot.LatestToolLabel)) != "" ||
+		strings.TrimSpace(cleanTelegramNilLiteral(snapshot.LatestToolOutput)) != "" ||
+		strings.TrimSpace(snapshot.LatestToolFP) != "" {
+		return true
+	}
+	for _, item := range snapshot.DetailItems {
+		switch item.Kind {
+		case model.DetailItemTool, model.DetailItemOutput:
+			return true
+		}
+	}
+	return false
+}
+
+func toolOutputDetailItems(items []model.DetailItem) []model.DetailItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]model.DetailItem, 0, len(items))
+	for _, item := range items {
+		switch item.Kind {
+		case model.DetailItemTool, model.DetailItemOutput:
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 func turnIDAfter(candidate, current string) bool {
 	candidate = strings.TrimSpace(candidate)
 	current = strings.TrimSpace(current)
@@ -1092,6 +1162,7 @@ func (s *Service) pollTracked(ctx context.Context) {
 		if s.applyTelegramOriginTerminalGate(ctx, "poll_tracked", &current, snapshot) {
 			continue
 		}
+		s.preserveTelegramOriginLiveCurrentTool(ctx, &current, snapshot)
 		_ = s.store.UpsertThread(ctx, current.Thread)
 		nextSnapshot := appserver.CompactSnapshot(snapshot, current, time.Now().UTC())
 		if current.LatestTurnStatus == "inProgress" || current.WaitingOnApproval || current.WaitingOnReply {
@@ -2672,6 +2743,7 @@ func (s *Service) refreshThreadForOperation(ctx context.Context, client Session,
 		}
 		return &thread, nil
 	}
+	s.preserveTelegramOriginLiveCurrentTool(ctx, &current, previous)
 	if err := s.store.UpsertThread(ctx, thread); err != nil {
 		return nil, err
 	}

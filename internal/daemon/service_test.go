@@ -1284,6 +1284,69 @@ func TestPollSnapshotWithoutToolDoesNotPreserveSameTurnRunningToolAsCurrent(t *t
 	}
 }
 
+func TestPollSnapshotWithoutToolPreservesTelegramOriginLiveCurrentTool(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	turnID := "turn-telegram-live-current-preserve"
+	thread := model.Thread{
+		ID:           "thread-telegram-live-current-preserve",
+		Title:        "Telegram live preserve",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	firstSeen := time.Date(2026, time.May, 1, 23, 46, 1, 0, time.UTC)
+	previousCurrent := appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          turnID,
+		LatestTurnStatus:      "inProgress",
+		LatestToolID:          "cmd-slow",
+		LatestToolKind:        "commandExecution",
+		LatestToolLabel:       "sleep 20; printf 'slow-command-done\\n'",
+		LatestToolStatus:      "running",
+		LatestToolFP:          "cmd-slow-running-fp",
+		LatestToolLiveCurrent: true,
+		LatestToolStartedAt:   firstSeen.Format(time.RFC3339Nano),
+		LatestToolUpdatedAt:   firstSeen.Format(time.RFC3339Nano),
+		DetailItems: []model.DetailItem{
+			{ID: "item-user", Kind: model.DetailItemUser, Text: "run slow command"},
+			{ID: "cmd-slow", Kind: model.DetailItemTool, Label: "sleep 20; printf 'slow-command-done\\n'", Status: "running", FP: "cmd-slow-running-fp"},
+		},
+	}
+	previous := appserver.CompactSnapshot(nil, previousCurrent, firstSeen)
+	pollWithoutTool := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+		DetailItems: []model.DetailItem{
+			{ID: "item-user", Kind: model.DetailItemUser, Text: "run slow command"},
+		},
+	}
+
+	service.preserveTelegramOriginLiveCurrentTool(ctx, &pollWithoutTool, &previous)
+
+	if !pollWithoutTool.LatestToolLiveCurrent {
+		t.Fatal("LatestToolLiveCurrent = false, want preserved live current tool")
+	}
+	if got := pollWithoutTool.LatestToolLabel; !strings.Contains(got, "slow-command-done") {
+		t.Fatalf("LatestToolLabel = %q, want preserved live current command", got)
+	}
+	text, _ := service.renderToolPanelAt(ctx, thread, &pollWithoutTool, firstSeen.Add(8*time.Second))
+	if !strings.Contains(text, "Current tool:") || !strings.Contains(text, "slow-command-done") || !strings.Contains(text, "Status: running") {
+		t.Fatalf("rendered tool = %q, want preserved current command", text)
+	}
+	if strings.Contains(text, "item-user") {
+		t.Fatalf("rendered tool = %q, want no duplicated user detail", text)
+	}
+}
+
 func TestSnapshotHasPassiveChangeIgnoresIdenticalTerminalReplay(t *testing.T) {
 	t.Parallel()
 

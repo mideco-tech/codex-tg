@@ -24,6 +24,72 @@ func TestRPCStringSkipsNilLikeValues(t *testing.T) {
 	}
 }
 
+func TestHandlePayloadIgnoresStaleGeneration(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("codex", "stdio", t.TempDir(), time.Second)
+	events := client.Subscribe()
+	reply := make(chan rpcResponse, 1)
+	client.mu.Lock()
+	client.started = true
+	client.generation = 2
+	client.pending[1] = reply
+	client.mu.Unlock()
+
+	client.handlePayload(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      float64(1),
+		"result":  map[string]any{"ok": true},
+	}, 1)
+	select {
+	case response := <-reply:
+		t.Fatalf("stale generation resolved pending response: %#v", response)
+	default:
+	}
+	client.mu.Lock()
+	if _, ok := client.pending[1]; !ok {
+		t.Fatal("stale generation deleted pending response")
+	}
+	client.mu.Unlock()
+
+	client.handlePayload(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "req-stale",
+		"method":  "serverRequest/approval",
+		"params":  map[string]any{"requestId": "req-stale"},
+	}, 1)
+	client.mu.Lock()
+	_, stored := client.serverRequests["req-stale"]
+	client.mu.Unlock()
+	if stored {
+		t.Fatal("stale generation stored server request")
+	}
+	client.handlePayload(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "thread/status/changed",
+		"params":  map[string]any{"threadId": "thread-stale"},
+	}, 1)
+	select {
+	case event := <-events:
+		t.Fatalf("stale generation broadcast event: %#v", event)
+	default:
+	}
+
+	client.handlePayload(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      float64(1),
+		"result":  map[string]any{"ok": true},
+	}, 2)
+	select {
+	case response := <-reply:
+		if response.Error != nil {
+			t.Fatalf("current generation response error: %v", response.Error)
+		}
+	default:
+		t.Fatal("current generation did not resolve pending response")
+	}
+}
+
 func TestTurnStartParamsIncludesCollaborationMode(t *testing.T) {
 	params, err := turnStartParams("thread-1", "Draft a plan", "/tmp/project", TurnStartOptions{
 		CollaborationMode: "plan",
