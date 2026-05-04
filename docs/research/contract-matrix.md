@@ -23,7 +23,7 @@ This file now serves two purposes:
 - `/settings`
 - `/model`
 - `/effort`
-- `/new [project] <prompt>`
+- `/new <project-key-or-number> <prompt>`
 - `/context`
 - `/whereami`
 - `/observe all|off`
@@ -56,6 +56,8 @@ This file now serves two purposes:
 - Telegram-originated Plan Mode starts use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
 - `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
 - After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
+- `/projects` groups cached projects by normalized `cwd`, opens a project menu with `New thread`, `Threads`, and `Bind latest`, and never accepts arbitrary filesystem paths from Telegram.
+- `New thread` creates a one-shot state; the next plain-text message starts a new App Server thread in the selected project cwd and uses that text as the first prompt.
 - `/plan <text>` and `/plan_mode <text>` use reply route, armed state, or current binding when the first token is not a known or UUID-like thread id.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
 - Replies to active turns steer the active turn. If steering is rejected while the thread still looks genuinely active, the bridge must not create a parallel `turn/start`; stale-active errors such as `no active turn to steer` are handled by ADR-012 and may fall back to a new `turn/start` after re-read.
@@ -215,5 +217,6 @@ Plan prompt payload fields:
 - observer delivery must remain durable across daemon restart
 - summary panels must be stable per `(chat, project, thread)` instead of spamming a new actionable message for every event
 - waiting Plan prompts must be visible as `[Plan]` messages and answerable by Telegram Reply
+- Plan answer buttons must stay scoped to their Plan turn; a stale pending input from an older turn must not be attached to a newer `[commentary]` card
 - late foreign `[User]` prompts must edit the existing placeholder, not append below live trio messages
 - duplicate live+poll sync must not create multiple `[Plan]` cards for the same prompt fingerprint

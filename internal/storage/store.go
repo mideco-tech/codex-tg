@@ -764,6 +764,11 @@ func (s *Store) GetState(ctx context.Context, key string) (string, error) {
 	return value, err
 }
 
+func (s *Store) DeleteState(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM daemon_state WHERE key = ?`, key)
+	return err
+}
+
 func (s *Store) ListState(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM daemon_state ORDER BY key`)
 	if err != nil {

@@ -89,6 +89,7 @@ func (s *Service) syncThreadPanelToTarget(ctx context.Context, target model.Obse
 		return
 	}
 	pending, _ := s.store.GetLatestPendingApprovalForThread(ctx, threadID)
+	pending = pendingForSnapshot(pending, snapshot)
 
 	s.panelMu.Lock()
 	defer s.panelMu.Unlock()
@@ -703,6 +704,7 @@ func (s *Service) maybeUpdateRunNotice(ctx context.Context, sender Sender, panel
 }
 
 func (s *Service) renderSummaryPanel(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, pending *model.PendingApproval) (model.RenderedMessage, [][]model.ButtonSpec, string) {
+	pending = pendingForSnapshot(pending, snapshot)
 	buttons := [][]model.ButtonSpec{
 		{
 			s.callbackButton(ctx, "Stop", "stop_turn", thread.ID, snapshot.LatestTurnID, "", nil),
@@ -757,6 +759,7 @@ func (s *Service) renderSummaryPanelMarkdown(ctx context.Context, thread model.T
 }
 
 func (s *Service) renderSummaryPanelMarkdownAt(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, entries []appserver.AgentMessageEntry, pending *model.PendingApproval, now time.Time) []model.RenderedMessage {
+	pending = pendingForSnapshot(pending, snapshot)
 	segments := []tgformat.Segment{tgformat.Plain(strings.Join([]string{
 		s.visualHeader(ctx, "commentary", thread, snapshot.LatestTurnID),
 		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
@@ -1234,6 +1237,7 @@ func pendingInputOptions(pending *model.PendingApproval) []string {
 }
 
 func effectivePlanPrompt(pending *model.PendingApproval, snapshot *appserver.ThreadReadSnapshot) *model.PlanPrompt {
+	pending = pendingForSnapshot(pending, snapshot)
 	if pending != nil && pending.PromptKind == "user_input" {
 		options := pendingInputOptions(pending)
 		fp := hashStrings("planPrompt", model.PromptSourceServerRequest, pending.RequestID, pending.ThreadID, pending.TurnID, pending.Question, strings.Join(options, "\x1f"))
@@ -1254,6 +1258,21 @@ func effectivePlanPrompt(pending *model.PendingApproval, snapshot *appserver.Thr
 		return snapshot.PlanPrompt
 	}
 	return nil
+}
+
+func pendingForSnapshot(pending *model.PendingApproval, snapshot *appserver.ThreadReadSnapshot) *model.PendingApproval {
+	if pending == nil {
+		return nil
+	}
+	if snapshot == nil {
+		return pending
+	}
+	pendingTurnID := strings.TrimSpace(pending.TurnID)
+	snapshotTurnID := strings.TrimSpace(snapshot.LatestTurnID)
+	if pendingTurnID != "" && snapshotTurnID != "" && pendingTurnID != snapshotTurnID {
+		return nil
+	}
+	return pending
 }
 
 func firstNonEmpty(values ...string) string {

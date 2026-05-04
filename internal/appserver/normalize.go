@@ -1132,9 +1132,6 @@ func syntheticPlanPrompt(thread model.Thread, turnID string, items []any, waitin
 	}
 	itemID, question := latestPlanQuestion(items)
 	if question == "" {
-		question = strings.TrimSpace(thread.LastPreview)
-	}
-	if question == "" {
 		question = "Input required."
 	}
 	options := latestChoiceOptions(items)

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -322,6 +321,14 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 		return s.setCodexModel(ctx, chatID, topicID, messageID, payload)
 	case "settings_reasoning_set":
 		return s.setCodexReasoningEffort(ctx, chatID, topicID, messageID, payload)
+	case "project_open":
+		return s.projectMenu(ctx, payload)
+	case "project_new_thread":
+		return s.armProjectNewThread(ctx, chatID, topicID, payload)
+	case "project_threads":
+		return s.projectThreads(ctx, payload)
+	case "project_bind_latest":
+		return s.bindLatestProjectThread(ctx, chatID, topicID, payload)
 	case "show_thread":
 		return s.showThread(ctx, chatID, topicID, route.ThreadID, true)
 	case "show_context":
@@ -1157,7 +1164,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 	case "/start":
 		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -1208,6 +1215,8 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		return s.threadsOverview(ctx, rest)
 	case "/projects":
 		return s.projectsOverview(ctx)
+	case "/new":
+		return s.newThreadCommand(ctx, chatID, topicID, rest)
 	case "/show":
 		decision, err := s.resolveRoute(ctx, chatID, topicID, rest, replyToMessageID)
 		if err != nil {
@@ -1273,6 +1282,9 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 }
 
 func (s *Service) handlePlainText(ctx context.Context, chatID, topicID int64, text string, replyToMessageID int64) (*DirectResponse, error) {
+	if response, consumed, err := s.maybeConsumeNewThreadPrompt(ctx, chatID, topicID, text); consumed {
+		return response, err
+	}
 	decision, err := s.resolveRoute(ctx, chatID, topicID, "", replyToMessageID)
 	if err != nil {
 		return nil, err
@@ -2109,29 +2121,6 @@ func (s *Service) threadsOverview(ctx context.Context, rest string) (*DirectResp
 		buttons = append(buttons, []model.ButtonSpec{s.callbackButton(ctx, fmt.Sprintf("Open %d", index+1), "show_thread", thread.ID, "", "", nil)})
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
-}
-
-func (s *Service) projectsOverview(ctx context.Context) (*DirectResponse, error) {
-	grouped, err := s.store.ListProjectGroups(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(grouped) == 0 {
-		return &DirectResponse{Text: "No cached projects yet. Try /status or wait for sync."}, nil
-	}
-	keys := make([]string, 0, len(grouped))
-	for key := range grouped {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	lines := []string{"Projects"}
-	for _, key := range keys {
-		lines = append(lines, fmt.Sprintf("%s (%d thread(s))", key, len(grouped[key])))
-		for _, thread := range grouped[key] {
-			lines = append(lines, fmt.Sprintf("- %s | %s", thread.Title, thread.ShortID()))
-		}
-	}
-	return &DirectResponse{Text: strings.Join(lines, "\n")}, nil
 }
 
 func (s *Service) showThread(ctx context.Context, chatID, topicID int64, threadID string, forceNew bool) (*DirectResponse, error) {

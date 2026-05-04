@@ -27,6 +27,20 @@ Telegram can start a Codex Plan Mode turn with `/plan <thread> <text>`, `/plan_m
 
 When Codex asks for input, the bridge renders a separate routeable `[Plan]` prompt-card. Replying to that card answers the same run. Structured buttons appear only when Codex provides choices.
 
+Plan answer buttons are scoped to their own turn. A pending Plan prompt from an
+older turn must not appear under a newer `[commentary]` card for the same
+thread.
+
+## New Threads
+
+`/projects` opens a project/workspace menu from cached Codex thread metadata.
+The `New thread` action arms the current chat/topic so the next plain-text
+message creates a new App Server thread in that project cwd and starts the first
+turn with that text.
+
+The Telegram bot does not accept arbitrary filesystem paths for this flow.
+Creating or editing project work directories is a separate future feature.
+
 ## Codex Settings
 
 `/settings`, `/model`, and `/effort` expose Telegram button menus for model selection and reasoning effort used by Telegram-started collaboration-mode turns. The selections are stored in SQLite daemon state and are not configured through public env vars.

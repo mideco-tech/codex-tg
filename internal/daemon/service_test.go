@@ -368,6 +368,306 @@ func TestThreadsCommandHidesInternalSubAgentThreads(t *testing.T) {
 	}
 }
 
+func TestProjectsCommandShowsProjectButtonsGroupedByCWD(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	threads := []model.Thread{
+		{
+			ID:            "workspace-a-1",
+			Title:         "A one",
+			CWD:           "/Users/example/work/a/codex-tg",
+			ProjectName:   "codex-tg",
+			DirectoryName: "codex-tg",
+			UpdatedAt:     30,
+			Raw:           json.RawMessage(`{"id":"workspace-a-1"}`),
+		},
+		{
+			ID:            "workspace-a-2",
+			Title:         "A two",
+			CWD:           "/Users/example/work/a/codex-tg",
+			ProjectName:   "codex-tg",
+			DirectoryName: "codex-tg",
+			UpdatedAt:     40,
+			Raw:           json.RawMessage(`{"id":"workspace-a-2"}`),
+		},
+		{
+			ID:            "workspace-b-1",
+			Title:         "B one",
+			CWD:           "/Users/example/work/b/codex-tg",
+			ProjectName:   "codex-tg",
+			DirectoryName: "codex-tg",
+			UpdatedAt:     20,
+			Raw:           json.RawMessage(`{"id":"workspace-b-1"}`),
+		},
+	}
+	for _, thread := range threads {
+		if err := service.store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread(%s) failed: %v", thread.ID, err)
+		}
+	}
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/projects", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/projects) failed: %v", err)
+	}
+	if response == nil {
+		t.Fatal("handleCommand(/projects) returned nil response")
+	}
+	if !strings.Contains(response.Text, "/Users/example/work/a/codex-tg") || !strings.Contains(response.Text, "/Users/example/work/b/codex-tg") {
+		t.Fatalf("/projects text missing grouped cwd entries:\n%s", response.Text)
+	}
+	if got := countButtonsContaining(response.Buttons, "codex-tg"); got != 2 {
+		t.Fatalf("/projects buttons = %#v, want two project workspace buttons", response.Buttons)
+	}
+}
+
+func TestProjectOpenShowsNewThreadMenu(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:            "project-menu-thread",
+		Title:         "Menu thread",
+		CWD:           "/Users/example/project",
+		ProjectName:   "project",
+		DirectoryName: "project",
+		UpdatedAt:     10,
+		Raw:           json.RawMessage(`{"id":"project-menu-thread"}`),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+
+	projects, err := service.handleCommand(ctx, 123456789, 0, "/projects", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/projects) failed: %v", err)
+	}
+	token := callbackTokenForButton(projects.Buttons, "project")
+	if token == "" {
+		t.Fatalf("/projects buttons = %#v, want project button", projects.Buttons)
+	}
+
+	menu, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(project_open) failed: %v", err)
+	}
+	if menu == nil || !strings.Contains(menu.Text, "Project") || !strings.Contains(menu.Text, "/Users/example/project") {
+		t.Fatalf("project menu = %#v, want project cwd", menu)
+	}
+	for _, label := range []string{"New thread", "Threads", "Bind latest"} {
+		if callbackTokenForButton(menu.Buttons, label) == "" {
+			t.Fatalf("project menu buttons = %#v, want %q", menu.Buttons, label)
+		}
+	}
+}
+
+func TestProjectNewThreadArmsThenPlainTextCreatesThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	project := model.Thread{
+		ID:            "project-source-thread",
+		Title:         "Source",
+		CWD:           "/Users/example/project",
+		ProjectName:   "project",
+		DirectoryName: "project",
+		UpdatedAt:     10,
+		Raw:           json.RawMessage(`{"id":"project-source-thread"}`),
+	}
+	if err := service.store.UpsertThread(ctx, project); err != nil {
+		t.Fatalf("UpsertThread(project) failed: %v", err)
+	}
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "new-thread-id", "cwd": "/Users/example/project", "title": "New thread"}},
+		threadReads: map[string]map[string]any{
+			"new-thread-id": {
+				"thread": map[string]any{
+					"id":     "new-thread-id",
+					"title":  "New thread",
+					"cwd":    "/Users/example/project",
+					"status": "active",
+					"turns": []any{map[string]any{
+						"id":     "started-turn",
+						"status": "inProgress",
+						"items":  []any{map[string]any{"id": "user-item", "type": "userMessage", "content": []any{map[string]any{"text": "first prompt"}}}},
+					}},
+				},
+			},
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	menu := openOnlyProjectMenu(t, service, ctx)
+	armToken := callbackTokenForButton(menu.Buttons, "New thread")
+	if armToken == "" {
+		t.Fatalf("project menu buttons = %#v, want New thread", menu.Buttons)
+	}
+	armed, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, armToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(New thread) failed: %v", err)
+	}
+	if armed == nil || !strings.Contains(armed.Text, "Send the first prompt") {
+		t.Fatalf("armed response = %#v, want prompt instruction", armed)
+	}
+
+	response, err := service.handlePlainText(ctx, 123456789, 0, "first prompt", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText(first prompt) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != "new-thread-id" || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want new thread/turn", response)
+	}
+	if len(stub.threadStartCalls) != 1 || stub.threadStartCalls[0] != "/Users/example/project" {
+		t.Fatalf("threadStartCalls = %#v, want project cwd", stub.threadStartCalls)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one turn start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.threadID != "new-thread-id" || got.message != "first prompt" || got.cwd != "/Users/example/project" {
+		t.Fatalf("turnStartCall = %#v, want new thread first prompt in project cwd", got)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("GetBinding failed: %v", err)
+	}
+	if binding == nil || binding.ThreadID != "new-thread-id" {
+		t.Fatalf("binding = %#v, want new thread binding", binding)
+	}
+}
+
+func TestProjectNewThreadRejectsThreadStartWithoutID(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.UpsertThread(ctx, model.Thread{
+		ID:            "project-source-thread",
+		Title:         "Source",
+		CWD:           "/Users/example/project",
+		ProjectName:   "project",
+		DirectoryName: "project",
+		UpdatedAt:     10,
+		Raw:           json.RawMessage(`{"id":"project-source-thread"}`),
+	}); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{threadStartResult: map[string]any{"thread": map[string]any{"cwd": "/Users/example/project"}}}
+	service.live = stub
+	service.liveConnected = true
+
+	menu := openOnlyProjectMenu(t, service, ctx)
+	_, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, callbackTokenForButton(menu.Buttons, "New thread"))
+	if err != nil {
+		t.Fatalf("HandleCallback(New thread) failed: %v", err)
+	}
+	response, err := service.handlePlainText(ctx, 123456789, 0, "first prompt", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "could not create thread") {
+		t.Fatalf("response = %#v, want missing thread id error", response)
+	}
+	if len(stub.turnStartCalls) != 0 {
+		t.Fatalf("turnStartCalls = %#v, want no turn start without thread id", stub.turnStartCalls)
+	}
+}
+
+func TestProjectNewThreadTurnStartFailureSavesThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.UpsertThread(ctx, model.Thread{
+		ID:            "project-source-thread",
+		Title:         "Source",
+		CWD:           "/Users/example/project",
+		ProjectName:   "project",
+		DirectoryName: "project",
+		UpdatedAt:     10,
+		Raw:           json.RawMessage(`{"id":"project-source-thread"}`),
+	}); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "new-thread-id", "cwd": "/Users/example/project"}},
+		turnStartErr:      errors.New("turn start failed"),
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	menu := openOnlyProjectMenu(t, service, ctx)
+	_, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, callbackTokenForButton(menu.Buttons, "New thread"))
+	if err != nil {
+		t.Fatalf("HandleCallback(New thread) failed: %v", err)
+	}
+	response, err := service.handlePlainText(ctx, 123456789, 0, "first prompt", 0)
+	if err != nil {
+		t.Fatalf("handlePlainText failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "Created thread") || !strings.Contains(response.Text, "could not start first turn") {
+		t.Fatalf("response = %#v, want recoverable turn start failure", response)
+	}
+	thread, err := service.store.GetThread(ctx, "new-thread-id")
+	if err != nil {
+		t.Fatalf("GetThread failed: %v", err)
+	}
+	if thread == nil || thread.CWD != "/Users/example/project" {
+		t.Fatalf("thread = %#v, want saved new thread", thread)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("GetBinding failed: %v", err)
+	}
+	if binding == nil || binding.ThreadID != "new-thread-id" {
+		t.Fatalf("binding = %#v, want new thread binding for recovery", binding)
+	}
+}
+
+func TestSummaryPanelDoesNotShowStalePendingUserInputButtons(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "thread-stale-pending",
+		Title:       "Stale pending",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "active",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:             thread,
+		LatestTurnID:       "new-turn",
+		LatestTurnStatus:   "inProgress",
+		LatestProgressText: "Working on new turn.",
+		LatestProgressFP:   "new-progress",
+	}
+	pending := &model.PendingApproval{
+		RequestID:   "old-request",
+		ThreadID:    thread.ID,
+		TurnID:      "old-turn",
+		PromptKind:  "user_input",
+		Question:    "Old choice?",
+		Status:      "pending",
+		PayloadJSON: `{"questions":[{"id":"choice","question":"Old choice?","options":[{"label":"Old option","description":"Old."}]}]}`,
+	}
+
+	message, buttons, _ := service.renderSummaryPanel(ctx, thread, snapshot, pending)
+	if strings.Contains(message.Text, "Old choice?") {
+		t.Fatalf("summary text = %q, want no stale pending question", message.Text)
+	}
+	if callbackTokenForButton(buttons, "Old option") != "" {
+		t.Fatalf("summary buttons = %#v, want no stale pending choice button", buttons)
+	}
+}
+
 func TestTrackedThreadsIncludesRecentlyChangedTerminalThreadForGlobalObserver(t *testing.T) {
 	t.Parallel()
 
@@ -3133,6 +3433,38 @@ func callbackTokenForButton(rows [][]model.ButtonSpec, label string) string {
 	return ""
 }
 
+func countButtonsContaining(rows [][]model.ButtonSpec, label string) int {
+	count := 0
+	for _, row := range rows {
+		for _, button := range row {
+			if strings.Contains(button.Text, label) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func openOnlyProjectMenu(t *testing.T, service *Service, ctx context.Context) *DirectResponse {
+	t.Helper()
+	projects, err := service.handleCommand(ctx, 123456789, 0, "/projects", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/projects) failed: %v", err)
+	}
+	token := callbackTokenForButton(projects.Buttons, "project")
+	if token == "" {
+		t.Fatalf("/projects buttons = %#v, want project button", projects.Buttons)
+	}
+	menu, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(project_open) failed: %v", err)
+	}
+	if menu == nil {
+		t.Fatal("HandleCallback(project_open) returned nil response")
+	}
+	return menu
+}
+
 type startCountingSession struct {
 	stubSession
 	mu       sync.Mutex
@@ -3199,9 +3531,12 @@ type stubSession struct {
 	collaborationModes  []appserver.CollaborationModeOption
 	threadReadErr       error
 	threadResumeErr     error
+	threadStartErr      error
+	threadStartResult   map[string]any
 	turnStartErr        error
 	turnSteerErr        error
 	turnSteerErrs       []error
+	threadStartCalls    []string
 	threadResumeCalls   []threadResumeCall
 	turnSteerCalls      []turnCall
 	turnStartCalls      []turnCall
@@ -3255,7 +3590,11 @@ func (s *stubSession) ThreadResume(ctx context.Context, threadID, cwd string) (m
 	return nil, nil
 }
 func (s *stubSession) ThreadStart(ctx context.Context, cwd string) (map[string]any, error) {
-	return nil, nil
+	s.threadStartCalls = append(s.threadStartCalls, cwd)
+	if s.threadStartErr != nil {
+		return nil, s.threadStartErr
+	}
+	return s.threadStartResult, nil
 }
 func (s *stubSession) TurnStart(ctx context.Context, threadID, message, cwd string, options appserver.TurnStartOptions) (map[string]any, error) {
 	if s.turnStartErr != nil {

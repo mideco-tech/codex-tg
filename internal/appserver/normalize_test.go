@@ -656,6 +656,41 @@ func TestSnapshotFromThreadReadTreatsWaitingOnInputAsPlanPrompt(t *testing.T) {
 	}
 }
 
+func TestSnapshotFromThreadReadDoesNotUseStalePreviewForSyntheticPlanPrompt(t *testing.T) {
+	t.Parallel()
+
+	snapshot := SnapshotFromThreadRead(map[string]any{
+		"id":      "thread-plan-stale-preview",
+		"name":    "Plan prompt stale preview",
+		"cwd":     `C:\Users\you\Projects\Codex`,
+		"preview": "Old completed prompt from a previous turn.",
+		"status":  "waitingOnInput",
+		"turns": []any{
+			map[string]any{
+				"id":     "turn-old",
+				"status": "completed",
+				"items": []any{
+					map[string]any{"id": "user-old", "type": "userMessage", "text": "Old completed prompt from a previous turn."},
+				},
+			},
+			map[string]any{
+				"id":     "turn-plan",
+				"status": "waitingOnInput",
+				"items": []any{
+					map[string]any{"id": "user-new", "type": "userMessage", "text": "Start a plan flow without a structured question yet."},
+				},
+			},
+		},
+	})
+
+	if snapshot.PlanPrompt == nil {
+		t.Fatal("PlanPrompt = nil, want fallback prompt")
+	}
+	if got, want := snapshot.PlanPrompt.Question, "Input required."; got != want {
+		t.Fatalf("PlanPrompt.Question = %q, want %q", got, want)
+	}
+}
+
 func TestSnapshotFromThreadReadSummaryUsesLatestTurnOnly(t *testing.T) {
 	t.Parallel()
 

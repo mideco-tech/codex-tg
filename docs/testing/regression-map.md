@@ -29,6 +29,33 @@ Contract notes:
 - `/plan <text>` uses reply, armed state, or bound thread routing.
 - `/plan <thread> <text>` is explicit only for known or UUID-like thread ids.
 - `/reply --plan <thread> <text>` remains strict.
+- Plan choice buttons must stay scoped to the same turn as the `[Plan]` card.
+- Stale pending `user_input` from an older turn must not add `answer_choice` buttons to a newer `[commentary]` panel.
+
+## Project Thread Creation
+
+ADR: none yet; feature brief is `docs/process/create-thread-from-project-brief.md`.
+
+Primary tests:
+
+- `internal/daemon/service_test.go::TestProjectsCommandShowsProjectButtonsGroupedByCWD`
+- `internal/daemon/service_test.go::TestProjectOpenShowsNewThreadMenu`
+- `internal/daemon/service_test.go::TestProjectNewThreadArmsThenPlainTextCreatesThread`
+- `internal/daemon/service_test.go::TestProjectNewThreadRejectsThreadStartWithoutID`
+- `internal/daemon/service_test.go::TestProjectNewThreadTurnStartFailureSavesThread`
+- `internal/daemon/service_test.go::TestSummaryPanelDoesNotShowStalePendingUserInputButtons`
+
+Live E2E:
+
+- Open `/projects`, choose a project, press `New thread`, send a prompt, and verify a new thread/run reaches `[Final]`.
+- Send a plain reply after creation and verify it routes to the newly bound thread.
+- Run a Plan Mode prompt with structured choices and verify choice buttons appear only on the current `[Plan]` card.
+
+Contract notes:
+
+- Project/workspace identity comes from cached thread `cwd`; this flow does not create or edit work directories.
+- Telegram must not accept arbitrary local filesystem paths for thread creation.
+- The first prompt is required; create-only threads are out of scope for this slice.
 
 ## Full Thread ID Access
 

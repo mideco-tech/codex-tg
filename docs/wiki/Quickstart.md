@@ -26,7 +26,11 @@ In Telegram:
 /start
 /observe all
 /threads
+/projects
 ```
 
 Start or continue a Codex thread from GUI/CLI. The bot should render the run in Telegram.
 
+To start a new thread from Telegram, open `/projects`, choose a project, press
+`New thread`, then send the first prompt as the next message. The selected
+project must already exist in the cached Codex thread list.

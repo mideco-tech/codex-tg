@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.1.3 - 2026-05-04
+
+- Added project-first thread creation from Telegram: `/projects` opens cached workspaces by normalized `cwd`, project menus expose `New thread`, and the next message starts a new App Server thread in that project.
+- Added `/new <project-key-or-number> <prompt>` as a direct new-thread shortcut for cached projects.
+- Bound the chat/topic to the newly created thread after success, seeded the Telegram-origin snapshot, and started hot polling for the first turn.
+- Preserved created thread recovery when the first `turn/start` fails, while refusing to start a turn if `thread/start` does not return a thread id.
+- Scoped Plan answer buttons to the current turn so stale `user_input` choices from an older turn cannot appear under a newer `[commentary]` card.
+- Made synthetic Plan fallback neutral (`Input required.`) instead of reusing stale thread preview text from a previous turn.
+- Added docs, regression map entries, unit coverage, and live Telegram readback validation for the new project-thread flow and Plan fallback behavior.
+
 ## v0.1.2 - 2026-05-03
 
 - Made the Telegram live trio honest about App Server visibility: `[commentary]` owns whole-run timing, `[Tool]` shows the last completed tool, and `[Output]` shows the last completed tool output.
