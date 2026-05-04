@@ -62,10 +62,10 @@ Telegram-origin `[Tool]` shows the live `Current tool` before completion.
 and validates that Telegram-origin `[Tool]` moves through live `Current tool`
 states before completed tool/output cards settle.
 
-`current_tool_priority` asks the agent to run `sleep 10` and then `sleep 20`
-as separate commands. After the second command appears as `Current tool`, the
-harness fails if `[Tool]` reverts to the first completed command before the
-second command completes.
+`current_tool_priority` asks the agent to run two separate long-running shell
+commands that print progress lines while they work. After the second command
+appears as `Current tool`, the harness fails if `[Tool]` reverts to the first
+completed command before the second command completes.
 
 `complex_math` asks the agent, through `/reply`, to create a temporary Python
 helper and run four separate range commands for a number-theory task. It passes

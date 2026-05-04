@@ -445,14 +445,14 @@ async def multi_tool_current_case(client, bot, thread_id: str, stamp: str) -> No
 
 async def current_tool_priority_case(client, bot, thread_id: str, stamp: str) -> None:
     marker = f"OK_LIVE_CURRENT_PRIORITY_{stamp}"
-    first_label = f"PRIORITY_SLEEP10_{stamp}"
-    second_label = f"PRIORITY_SLEEP20_{stamp}"
+    first_label = f"PRIORITY_HEAVY_A_{stamp}"
+    second_label = f"PRIORITY_HEAVY_B_{stamp}"
     commands = [
-        f"sleep 10; printf '{first_label}\\n'",
-        f"sleep 20; printf '{second_label}\\n'",
+        f"for i in 1 2 3 4 5; do echo {first_label} progress $i/5; sleep 2; done; echo {first_label} done",
+        f"for i in 1 2 3 4 5; do echo {second_label} progress $i/5; sleep 2; done; echo {second_label} done",
     ]
     prompt = (
-        "Run these two shell command tool calls as two separate tool calls, strictly one after another, "
+        "Run these two long-running shell command tool calls as two separate tool calls, strictly one after another, "
         "waiting for the first command to finish before starting the second. Do not combine them into a script. Commands:\n"
         + "\n".join(f"{index}. {command}" for index, command in enumerate(commands, start=1))
         + f"\nAfter the second command finishes, final answer exactly: {marker}"
