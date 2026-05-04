@@ -814,3 +814,123 @@ func TestToolSnapshotFromLiveNotificationMapsRunningCommand(t *testing.T) {
 		t.Fatalf("DetailItems = %#v, want one tool item", snapshot.DetailItems)
 	}
 }
+
+func TestNormalizeAppServerLiveEventMapsToolLifecycle(t *testing.T) {
+	t.Parallel()
+
+	thread := model.Thread{ID: "thread-1", Title: "Observer smoke", ProjectName: "Codex"}
+	live, ok := NormalizeAppServerLiveEvent(Event{
+		Channel: "notification",
+		Method:  "item/completed",
+		Params: map[string]any{
+			"threadId": "thread-1",
+			"turn":     map[string]any{"id": "turn-9"},
+			"item": map[string]any{
+				"id":               "cmd-done",
+				"type":             "commandExecution",
+				"command":          "printf 'done\\n'",
+				"status":           "completed",
+				"aggregatedOutput": "done\n",
+			},
+		},
+	}, thread)
+	if !ok {
+		t.Fatal("NormalizeAppServerLiveEvent returned ok=false")
+	}
+	if got, want := live.Kind, LiveEventToolCompleted; got != want {
+		t.Fatalf("Kind = %q, want %q", got, want)
+	}
+	if got, want := live.TurnID, "turn-9"; got != want {
+		t.Fatalf("TurnID = %q, want %q", got, want)
+	}
+	if got, want := live.Label, "printf 'done\\n'"; got != want {
+		t.Fatalf("Label = %q, want %q", got, want)
+	}
+	if got, want := live.Output, "done\n"; got != want {
+		t.Fatalf("Output = %q, want %q", got, want)
+	}
+	snapshot, ok := live.ToolSnapshot(thread)
+	if !ok {
+		t.Fatal("ToolSnapshot returned ok=false")
+	}
+	if got, want := snapshot.LatestToolStatus, "completed"; got != want {
+		t.Fatalf("LatestToolStatus = %q, want %q", got, want)
+	}
+	if len(snapshot.DetailItems) != 2 || snapshot.DetailItems[1].Kind != model.DetailItemOutput {
+		t.Fatalf("DetailItems = %#v, want tool and output", snapshot.DetailItems)
+	}
+}
+
+func TestNormalizeAppServerLiveEventMapsTurnAndStatus(t *testing.T) {
+	t.Parallel()
+
+	thread := model.Thread{ID: "thread-1", ActiveTurnID: "turn-prev"}
+	started, ok := NormalizeAppServerLiveEvent(Event{
+		Channel: "notification",
+		Method:  "turn/started",
+		Params: map[string]any{
+			"threadId": "thread-1",
+			"turn":     map[string]any{"id": "turn-10"},
+		},
+	}, thread)
+	if !ok {
+		t.Fatal("NormalizeAppServerLiveEvent(turn/started) returned ok=false")
+	}
+	if got, want := started.Kind, LiveEventTurnStarted; got != want {
+		t.Fatalf("Kind = %q, want %q", got, want)
+	}
+	if got, want := started.TurnID, "turn-10"; got != want {
+		t.Fatalf("TurnID = %q, want %q", got, want)
+	}
+	if got, want := started.TurnStatus, "inProgress"; got != want {
+		t.Fatalf("TurnStatus = %q, want %q", got, want)
+	}
+
+	completed, ok := NormalizeAppServerLiveEvent(Event{
+		Channel: "notification",
+		Method:  "turn/completed",
+		Params: map[string]any{
+			"threadId": "thread-1",
+			"turn": map[string]any{
+				"id":     "turn-10",
+				"status": "completed",
+			},
+		},
+	}, thread)
+	if !ok {
+		t.Fatal("NormalizeAppServerLiveEvent(turn/completed) returned ok=false")
+	}
+	if got, want := completed.Kind, LiveEventTurnCompleted; got != want {
+		t.Fatalf("Kind = %q, want %q", got, want)
+	}
+	if got, want := completed.TurnStatus, "completed"; got != want {
+		t.Fatalf("TurnStatus = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeAppServerLiveEventMapsLegacyExecEvent(t *testing.T) {
+	t.Parallel()
+
+	live, ok := NormalizeAppServerLiveEvent(Event{
+		Channel: "notification",
+		Method:  "codex/event/exec_command_begin",
+		Params: map[string]any{
+			"msg": map[string]any{
+				"type":      "exec_command_begin",
+				"turn_id":   "turn-legacy",
+				"thread_id": "thread-legacy",
+				"call_id":   "call-legacy",
+				"command":   []any{"/bin/zsh", "-lc", "pwd"},
+			},
+		},
+	}, model.Thread{})
+	if !ok {
+		t.Fatal("NormalizeAppServerLiveEvent(legacy) returned ok=false")
+	}
+	if got, want := live.Kind, LiveEventToolStarted; got != want {
+		t.Fatalf("Kind = %q, want %q", got, want)
+	}
+	if got, want := live.Label, "/bin/zsh -lc pwd"; got != want {
+		t.Fatalf("Label = %q, want %q", got, want)
+	}
+}
