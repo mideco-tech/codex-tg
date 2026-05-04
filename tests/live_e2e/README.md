@@ -25,7 +25,7 @@ Optional:
 - `CODEX_TG_E2E_POLL_SECONDS`
 - `CODEX_TG_E2E_READBACK_LIMIT`
 - `CODEX_TG_E2E_CASES`: comma-separated subset of
-  `sequential_commands,sleep20_timing,multi_tool_current,complex_math`.
+  `sequential_commands,sleep20_timing,multi_tool_current,current_tool_priority,complex_math`.
 
 The env file and Telethon session files must stay local. `.gitignore` blocks
 `.env*`, `telegram.env`, and `*.session*` as a belt-and-suspenders guard.
@@ -61,6 +61,11 @@ Telegram-origin `[Tool]` shows the live `Current tool` before completion.
 `multi_tool_current` asks the agent to run three separate slow shell commands
 and validates that Telegram-origin `[Tool]` moves through live `Current tool`
 states before completed tool/output cards settle.
+
+`current_tool_priority` asks the agent to run `sleep 10` and then `sleep 20`
+as separate commands. After the second command appears as `Current tool`, the
+harness fails if `[Tool]` reverts to the first completed command before the
+second command completes.
 
 `complex_math` asks the agent, through `/reply`, to create a temporary Python
 helper and run four separate range commands for a number-theory task. It passes

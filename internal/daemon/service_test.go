@@ -1347,6 +1347,86 @@ func TestPollSnapshotWithoutToolPreservesTelegramOriginLiveCurrentTool(t *testin
 	}
 }
 
+func TestPollSnapshotWithOlderCompletedToolPreservesTelegramOriginLiveCurrentTool(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	turnID := "turn-telegram-live-current-over-completed"
+	thread := model.Thread{
+		ID:           "thread-telegram-live-current-over-completed",
+		Title:        "Telegram live preserve over completed",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	firstSeen := time.Date(2026, time.May, 1, 23, 48, 1, 0, time.UTC)
+	previousCurrent := appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          turnID,
+		LatestTurnStatus:      "inProgress",
+		LatestToolID:          "cmd-sleep20",
+		LatestToolKind:        "commandExecution",
+		LatestToolLabel:       "sleep 20",
+		LatestToolStatus:      "running",
+		LatestToolFP:          "cmd-sleep20-running-fp",
+		LatestToolLiveCurrent: true,
+		LatestToolStartedAt:   firstSeen.Add(10 * time.Second).Format(time.RFC3339Nano),
+		LatestToolUpdatedAt:   firstSeen.Add(10 * time.Second).Format(time.RFC3339Nano),
+		DetailItems: []model.DetailItem{
+			{ID: "item-user", Kind: model.DetailItemUser, Text: "run two sleeps"},
+			{ID: "cmd-sleep10", Kind: model.DetailItemTool, Label: "sleep 10", Status: "completed", FP: "cmd-sleep10-completed-fp"},
+			{ID: "cmd-sleep10:output", Kind: model.DetailItemOutput, Output: "sleep10 done\n"},
+			{ID: "cmd-sleep20", Kind: model.DetailItemTool, Label: "sleep 20", Status: "running", FP: "cmd-sleep20-running-fp"},
+		},
+	}
+	previous := appserver.CompactSnapshot(nil, previousCurrent, firstSeen.Add(12*time.Second))
+	pollWithOlderCompleted := appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          turnID,
+		LatestTurnStatus:      "inProgress",
+		LatestToolID:          "cmd-sleep10",
+		LatestToolKind:        "commandExecution",
+		LatestToolLabel:       "sleep 10",
+		LatestToolStatus:      "completed",
+		LatestToolOutput:      "sleep10 done\n",
+		LatestToolFP:          "cmd-sleep10-completed-fp",
+		LatestToolStartedAt:   firstSeen.Format(time.RFC3339Nano),
+		LatestToolUpdatedAt:   firstSeen.Add(10 * time.Second).Format(time.RFC3339Nano),
+		LatestToolLiveCurrent: false,
+		DetailItems: []model.DetailItem{
+			{ID: "item-user", Kind: model.DetailItemUser, Text: "run two sleeps"},
+			{ID: "cmd-sleep10", Kind: model.DetailItemTool, Label: "sleep 10", Status: "completed", FP: "cmd-sleep10-completed-fp"},
+			{ID: "cmd-sleep10:output", Kind: model.DetailItemOutput, Output: "sleep10 done\n"},
+		},
+	}
+
+	service.preserveTelegramOriginLiveCurrentTool(ctx, &pollWithOlderCompleted, &previous)
+
+	if !pollWithOlderCompleted.LatestToolLiveCurrent {
+		t.Fatal("LatestToolLiveCurrent = false, want preserved live current tool")
+	}
+	if got := pollWithOlderCompleted.LatestToolLabel; got != "sleep 20" {
+		t.Fatalf("LatestToolLabel = %q, want preserved live current command", got)
+	}
+	text, _ := service.renderToolPanelAt(ctx, thread, &pollWithOlderCompleted, firstSeen.Add(15*time.Second))
+	if !strings.Contains(text, "Current tool:") || !strings.Contains(text, "sleep 20") || !strings.Contains(text, "Status: running") {
+		t.Fatalf("rendered tool = %q, want preserved current command", text)
+	}
+	if strings.Contains(text, "Last completed tool:") || strings.Contains(text, "sleep 10") {
+		t.Fatalf("rendered tool = %q, want older completed command hidden while current command is live", text)
+	}
+	outputText, _ := service.renderOutputPanel(ctx, thread, &pollWithOlderCompleted)
+	if !strings.Contains(outputText, "sleep10 done") {
+		t.Fatalf("rendered output = %q, want last completed output preserved", outputText)
+	}
+}
+
 func TestSnapshotHasPassiveChangeIgnoresIdenticalTerminalReplay(t *testing.T) {
 	t.Parallel()
 

@@ -745,7 +745,7 @@ func (s *Service) preserveTelegramOriginLiveCurrentTool(ctx context.Context, cur
 	if current == nil || previous == nil || len(previous.CompactJSON) == 0 {
 		return
 	}
-	if snapshotHasToolEvidence(*current) || isTerminalStatus(current.LatestTurnStatus) {
+	if isTerminalStatus(current.LatestTurnStatus) {
 		return
 	}
 	var prev appserver.ThreadReadSnapshot
@@ -767,6 +767,9 @@ func (s *Service) preserveTelegramOriginLiveCurrentTool(ctx context.Context, cur
 	if label == "" || strings.TrimSpace(prev.LatestToolFP) == "" {
 		return
 	}
+	if !shouldPreserveTelegramOriginLiveCurrentTool(*current, prev) {
+		return
+	}
 	current.LatestToolID = prev.LatestToolID
 	current.LatestToolKind = prev.LatestToolKind
 	current.LatestToolLabel = prev.LatestToolLabel
@@ -779,6 +782,18 @@ func (s *Service) preserveTelegramOriginLiveCurrentTool(ctx context.Context, cur
 	current.LatestToolStartedAt = prev.LatestToolStartedAt
 	current.LatestToolUpdatedAt = prev.LatestToolUpdatedAt
 	current.DetailItems = upsertLiveToolDetails(current.DetailItems, toolOutputDetailItems(prev.DetailItems))
+}
+
+func shouldPreserveTelegramOriginLiveCurrentTool(current, previous appserver.ThreadReadSnapshot) bool {
+	if !snapshotHasToolEvidence(current) {
+		return true
+	}
+	if sameToolSnapshot(current, previous) {
+		return !terminalToolStatus(current.LatestToolStatus)
+	}
+	previousIndex := latestToolDetailIndex(previous.DetailItems, previous.LatestToolID, previous.LatestToolLabel)
+	currentIndex := latestToolDetailIndex(previous.DetailItems, current.LatestToolID, current.LatestToolLabel)
+	return previousIndex >= 0 && currentIndex >= 0 && currentIndex < previousIndex
 }
 
 func snapshotHasToolEvidence(snapshot appserver.ThreadReadSnapshot) bool {

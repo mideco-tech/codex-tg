@@ -217,6 +217,7 @@ Primary tests:
 - `internal/appserver/normalize_test.go::TestCompactSnapshotDoesNotPreserveLiveToolAcrossTurns`
 - `internal/daemon/service_test.go::TestLiveToolNotificationStoresRunningCommandWithoutRenderingItAsCurrent`
 - `internal/daemon/service_test.go::TestPollSnapshotWithoutToolDoesNotPreserveSameTurnRunningToolAsCurrent`
+- `internal/daemon/service_test.go::TestPollSnapshotWithOlderCompletedToolPreservesTelegramOriginLiveCurrentTool`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelShowsLastCompletedToolInsteadOfRunningTool`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelShowsTelegramOriginCurrentTool`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelKeepsForeignRunningToolHidden`
@@ -231,6 +232,7 @@ Contract notes:
 - Foreign GUI/CLI runs do not promise authoritative current command visibility.
 - Long-running active runs render elapsed runtime in `[commentary]`; completed Final Cards render total `Run duration`.
 - `[Tool]` renders the current tool only for eligible Telegram-origin active turns; otherwise it renders the last completed tool, or `No completed tool yet.` when no completed tool is available.
+- While a Telegram-origin live current tool is active, older completed tool evidence from same-turn `thread/read` may update `[Output]`, but must not make `[Tool]` revert from the current command to the older completed command.
 - `[Output]` renders the last completed tool output when available.
 - Session JSONL is not a live Telegram UI source.
 - Missing App Server tool state renders as neutral absence, not as a guessed command.

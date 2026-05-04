@@ -35,7 +35,13 @@ REJECT_BITS = (
 RANGE_LABELS = ("1 30000", "30001 60000", "60001 90000", "90001 120000")
 EXPECTED_COMPLEX_COUNT = "2034"
 EXPECTED_COMPLEX_SUM = "115514223"
-DEFAULT_CASES = ("sequential_commands", "sleep20_timing", "multi_tool_current", "complex_math")
+DEFAULT_CASES = (
+    "sequential_commands",
+    "sleep20_timing",
+    "multi_tool_current",
+    "current_tool_priority",
+    "complex_math",
+)
 
 
 def load_env_file(path: str) -> None:
@@ -437,6 +443,89 @@ async def multi_tool_current_case(client, bot, thread_id: str, stamp: str) -> No
     )
 
 
+async def current_tool_priority_case(client, bot, thread_id: str, stamp: str) -> None:
+    marker = f"OK_LIVE_CURRENT_PRIORITY_{stamp}"
+    first_label = f"PRIORITY_SLEEP10_{stamp}"
+    second_label = f"PRIORITY_SLEEP20_{stamp}"
+    commands = [
+        f"sleep 10; printf '{first_label}\\n'",
+        f"sleep 20; printf '{second_label}\\n'",
+    ]
+    prompt = (
+        "Run these two shell command tool calls as two separate tool calls, strictly one after another, "
+        "waiting for the first command to finish before starting the second. Do not combine them into a script. Commands:\n"
+        + "\n".join(f"{index}. {command}" for index, command in enumerate(commands, start=1))
+        + f"\nAfter the second command finishes, final answer exactly: {marker}"
+    )
+    since = utc_now()
+    sent = await client.send_message(bot, f"/reply {thread_id} {prompt}")
+    print(f"SENT case=current_tool_priority message_id={sent.id} marker={marker}", flush=True)
+    deadline = time.time() + 240
+    seen = set()
+    active_wait_seen = False
+    first_completed_seen = False
+    first_output_seen = False
+    second_current_seen = False
+    second_completed_seen = False
+    second_output_seen = False
+    final_seen = False
+    while time.time() < deadline:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, sent.id):
+            text = (message.raw_text or "").strip()
+            key = (message.id, text)
+            if key not in seen:
+                seen.add(key)
+                print(f"BOT case=current_tool_priority message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, "current_tool_priority")
+            if "[commentary]" in text and "Run active for:" in text:
+                active_wait_seen = True
+            if "[Tool]" in text:
+                if "Current tool:" in text and second_label in text:
+                    second_current_seen = True
+                if second_current_seen and not second_completed_seen and "Last completed tool:" in text and first_label in text:
+                    raise SystemExit(f"CURRENT_TOOL_PRIORITY_REVERTED preview={preview(text)}")
+                if second_current_seen and not second_completed_seen and "Current tool:" in text and first_label in text:
+                    raise SystemExit(f"CURRENT_TOOL_PRIORITY_STALE_CURRENT preview={preview(text)}")
+                if "Last completed tool:" in text and first_label in text:
+                    first_completed_seen = True
+                if "Last completed tool:" in text and second_label in text:
+                    second_completed_seen = True
+            if "[Output]" in text and "Last completed output:" in text:
+                if first_label in text:
+                    first_output_seen = True
+                if second_label in text:
+                    second_output_seen = True
+            if is_final_with_marker(text, marker):
+                final_seen = True
+                if "Run duration:" not in text:
+                    raise SystemExit(f"CURRENT_PRIORITY_FINAL_DURATION_MISSING preview={preview(text)}")
+        if final_seen and active_wait_seen and second_current_seen and second_completed_seen and second_output_seen:
+            break
+    if not final_seen:
+        raise SystemExit(f"FINAL_TIMEOUT case=current_tool_priority marker={marker}")
+    if not active_wait_seen:
+        raise SystemExit("CURRENT_PRIORITY_RUN_TIMER_NOT_SEEN")
+    if not second_current_seen:
+        raise SystemExit("CURRENT_PRIORITY_SECOND_CURRENT_NOT_SEEN")
+    if not first_output_seen:
+        raise SystemExit(
+            "CURRENT_PRIORITY_FIRST_OUTPUT_MISSING "
+            f"first_tool_seen={first_completed_seen}"
+        )
+    if not second_completed_seen or not second_output_seen:
+        raise SystemExit(
+            "CURRENT_PRIORITY_SECOND_COMPLETED_MISSING "
+            f"tool={second_completed_seen} output={second_output_seen}"
+        )
+    fail_if_bad_logs(since, thread_id, "current_tool_priority")
+    print(
+        "RESULT case=current_tool_priority ok "
+        f"first={first_label} second={second_label}",
+        flush=True,
+    )
+
+
 async def complex_math_case(client, bot, thread_id: str, stamp: str) -> None:
     marker = f"OK_LIVE_COMPLEX_MATH_{stamp}"
     script_path = f"/tmp/codex_tg_live_math_{stamp}.py"
@@ -543,6 +632,8 @@ async def main() -> None:
                 await sleep20_timing_case(client, bot, thread_id, stamp)
             elif case == "multi_tool_current":
                 await multi_tool_current_case(client, bot, thread_id, stamp)
+            elif case == "current_tool_priority":
+                await current_tool_priority_case(client, bot, thread_id, stamp)
             elif case == "complex_math":
                 await complex_math_case(client, bot, thread_id, stamp)
         print("ALL_OK", flush=True)
