@@ -34,6 +34,7 @@ type ThreadReadSnapshot struct {
 	LatestToolStatus          string
 	LatestToolOutput          string
 	LatestToolFP              string
+	LatestToolLiveCurrent     bool
 	LatestToolStartedAt       string
 	LatestToolUpdatedAt       string
 	PlanPrompt                *model.PlanPrompt

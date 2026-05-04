@@ -861,6 +861,85 @@ func TestNormalizeAppServerLiveEventMapsToolLifecycle(t *testing.T) {
 	}
 }
 
+func TestLiveToolSnapshotMarksCurrentOnlyForStartedOrUpdatedWithTurn(t *testing.T) {
+	t.Parallel()
+
+	thread := model.Thread{ID: "thread-current"}
+	started, ok := NormalizeAppServerLiveEvent(Event{
+		Channel: "notification",
+		Method:  "item/started",
+		Params: map[string]any{
+			"threadId": "thread-current",
+			"turnId":   "turn-current",
+			"item": map[string]any{
+				"id":      "cmd-current",
+				"type":    "commandExecution",
+				"command": "sleep 20",
+				"status":  "running",
+			},
+		},
+	}, thread)
+	if !ok {
+		t.Fatal("NormalizeAppServerLiveEvent(item/started) returned ok=false")
+	}
+	startedSnapshot, ok := started.ToolSnapshot(thread)
+	if !ok {
+		t.Fatal("ToolSnapshot(started) returned ok=false")
+	}
+	if !startedSnapshot.LatestToolLiveCurrent {
+		t.Fatal("LatestToolLiveCurrent = false, want true for live started event with turn id")
+	}
+
+	completed, ok := NormalizeAppServerLiveEvent(Event{
+		Channel: "notification",
+		Method:  "item/completed",
+		Params: map[string]any{
+			"threadId": "thread-current",
+			"turnId":   "turn-current",
+			"item": map[string]any{
+				"id":      "cmd-current",
+				"type":    "commandExecution",
+				"command": "sleep 20",
+				"status":  "completed",
+			},
+		},
+	}, thread)
+	if !ok {
+		t.Fatal("NormalizeAppServerLiveEvent(item/completed) returned ok=false")
+	}
+	completedSnapshot, ok := completed.ToolSnapshot(thread)
+	if !ok {
+		t.Fatal("ToolSnapshot(completed) returned ok=false")
+	}
+	if completedSnapshot.LatestToolLiveCurrent {
+		t.Fatal("LatestToolLiveCurrent = true, want false for completed event")
+	}
+
+	withoutTurn, ok := NormalizeAppServerLiveEvent(Event{
+		Channel: "notification",
+		Method:  "item/started",
+		Params: map[string]any{
+			"threadId": "thread-current",
+			"item": map[string]any{
+				"id":      "cmd-current",
+				"type":    "commandExecution",
+				"command": "sleep 20",
+				"status":  "running",
+			},
+		},
+	}, thread)
+	if !ok {
+		t.Fatal("NormalizeAppServerLiveEvent(item/started without turn) returned ok=false")
+	}
+	withoutTurnSnapshot, ok := withoutTurn.ToolSnapshot(thread)
+	if !ok {
+		t.Fatal("ToolSnapshot(withoutTurn) returned ok=false")
+	}
+	if withoutTurnSnapshot.LatestToolLiveCurrent {
+		t.Fatal("LatestToolLiveCurrent = true, want false when live event has no turn id")
+	}
+}
+
 func TestNormalizeAppServerLiveEventMapsTurnAndStatus(t *testing.T) {
 	t.Parallel()
 

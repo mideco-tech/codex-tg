@@ -245,6 +245,9 @@ func (e NormalizedLiveEvent) ToolSnapshot(thread model.Thread) (ThreadReadSnapsh
 		LatestToolLabel:    label,
 		LatestToolStatus:   status,
 		LatestToolOutput:   output,
+		LatestToolLiveCurrent: e.Kind != LiveEventToolCompleted &&
+			turnID != "" &&
+			!terminalLatestToolStatus(status),
 	}
 	snapshot.LatestProgressFP = fingerprint("live-progress", itemKind, toolID, progressText, status, output)
 	snapshot.LatestToolFP = fingerprint("live-tool", itemKind, toolID, label, status, output)

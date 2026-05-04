@@ -35,6 +35,7 @@ REJECT_BITS = (
 RANGE_LABELS = ("1 30000", "30001 60000", "60001 90000", "90001 120000")
 EXPECTED_COMPLEX_COUNT = "2034"
 EXPECTED_COMPLEX_SUM = "115514223"
+DEFAULT_CASES = ("sequential_commands", "sleep20_timing", "multi_tool_current", "complex_math")
 
 
 def load_env_file(path: str) -> None:
@@ -139,6 +140,17 @@ def readback_limit() -> int:
         return 100
 
 
+def selected_cases() -> list[str]:
+    raw = os.environ.get("CODEX_TG_E2E_CASES", "").strip()
+    if not raw:
+        return list(DEFAULT_CASES)
+    requested = [part.strip() for part in raw.split(",") if part.strip()]
+    unknown = sorted(set(requested) - set(DEFAULT_CASES))
+    if unknown:
+        raise SystemExit(f"Unknown CODEX_TG_E2E_CASES values: {unknown}; valid={list(DEFAULT_CASES)}")
+    return requested
+
+
 def is_bot_message(message, bot) -> bool:
     return getattr(message, "sender_id", None) == bot.id or getattr(message.sender, "id", None) == bot.id
 
@@ -153,8 +165,10 @@ def fail_if_bad_text(text: str, context: str) -> None:
             raise SystemExit(f"BAD_TEXT context={context} bit={bit!r} preview={preview(text)}")
     if "Status: interrupted" in text:
         raise SystemExit(f"VISIBLE_INTERRUPTED context={context} preview={preview(text)}")
-    if "[Tool]" in text and ("Status: inProgress" in text or "Running for:" in text):
+    if "[Tool]" in text and "Current tool:" not in text and "Status: inProgress" in text:
         raise SystemExit(f"CURRENT_TOOL_RENDERED context={context} preview={preview(text)}")
+    if "[Tool]" in text and "Running for:" in text:
+        raise SystemExit(f"TOOL_TIMER_RENDERED context={context} preview={preview(text)}")
 
 
 def fail_if_bad_logs(since: datetime, thread_id: str, context: str) -> None:
@@ -301,6 +315,7 @@ async def sleep20_timing_case(client, bot, thread_id: str, stamp: str) -> None:
     deadline = time.time() + 180
     seen = set()
     tool_seen = False
+    current_seen = False
     active_wait_seen = False
     output_seen = False
     final_seen = False
@@ -318,6 +333,8 @@ async def sleep20_timing_case(client, bot, thread_id: str, stamp: str) -> None:
             if "[commentary]" in text and "Run active for:" in text:
                 active_wait_seen = True
             if "[Tool]" in text:
+                if "Current tool:" in text and "sleep 20" in text and done in text and not final_seen:
+                    current_seen = True
                 if tool_seen and not output_seen and "No completed tool yet." in text:
                     raise SystemExit(f"SLEEP20_TOOL_DISAPPEARED preview={preview(text)}")
                 if "Last completed tool:" in text and "sleep 20" in text and done in text:
@@ -335,6 +352,8 @@ async def sleep20_timing_case(client, bot, thread_id: str, stamp: str) -> None:
             break
     if not active_wait_seen:
         raise SystemExit("SLEEP20_RUN_TIMER_NOT_SEEN")
+    if not current_seen:
+        raise SystemExit("SLEEP20_CURRENT_TOOL_NOT_SEEN")
     if not final_seen:
         raise SystemExit(f"FINAL_TIMEOUT case=sleep20_timing marker={marker}")
     fail_if_bad_logs(since, thread_id, "sleep20_timing")
@@ -342,6 +361,80 @@ async def sleep20_timing_case(client, bot, thread_id: str, stamp: str) -> None:
     if tool_first_at is not None and final_at is not None:
         visible_for = final_at - tool_first_at
     print(f"RESULT case=sleep20_timing ok visible_for={visible_for:.1f}", flush=True)
+
+
+async def multi_tool_current_case(client, bot, thread_id: str, stamp: str) -> None:
+    marker = f"OK_LIVE_CURRENT_TOOLS_{stamp}"
+    labels = [
+        f"CURRENT_STEP_A_{stamp}",
+        f"CURRENT_STEP_B_{stamp}",
+        f"CURRENT_STEP_C_{stamp}",
+    ]
+    commands = [
+        f"sleep 7; printf '{labels[0]}\\n'",
+        f"sleep 7; printf '{labels[1]}\\n'",
+        f"sleep 7; printf '{labels[2]}\\n'",
+    ]
+    prompt = (
+        "Run these three shell command tool calls as three separate tool calls, strictly one after another, "
+        "waiting for each to finish before starting the next. Do not combine them into a script. Commands:\n"
+        + "\n".join(f"{index}. {command}" for index, command in enumerate(commands, start=1))
+        + f"\nAfter the third command finishes, final answer exactly: {marker}"
+    )
+    since = utc_now()
+    sent = await client.send_message(bot, f"/reply {thread_id} {prompt}")
+    print(f"SENT case=multi_tool_current message_id={sent.id} marker={marker}", flush=True)
+    deadline = time.time() + 240
+    seen = set()
+    current_seen = set()
+    completed_seen = set()
+    output_seen = set()
+    active_wait_seen = False
+    final_seen = False
+    while time.time() < deadline:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, sent.id):
+            text = (message.raw_text or "").strip()
+            key = (message.id, text)
+            if key not in seen:
+                seen.add(key)
+                print(f"BOT case=multi_tool_current message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, "multi_tool_current")
+            if "[commentary]" in text and "Run active for:" in text:
+                active_wait_seen = True
+            if "[Tool]" in text and "Current tool:" in text:
+                for label in labels:
+                    if label in text:
+                        current_seen.add(label)
+            if "[Tool]" in text and "Last completed tool:" in text:
+                for label in labels:
+                    if label in text:
+                        completed_seen.add(label)
+            if "[Output]" in text and "Last completed output:" in text:
+                for label in labels:
+                    if label in text:
+                        output_seen.add(label)
+            if is_final_with_marker(text, marker):
+                final_seen = True
+        if final_seen and active_wait_seen and len(current_seen) >= 2 and len(completed_seen) >= 2 and len(output_seen) >= 2:
+            break
+    if not final_seen:
+        raise SystemExit(f"FINAL_TIMEOUT case=multi_tool_current marker={marker}")
+    if not active_wait_seen:
+        raise SystemExit("MULTI_TOOL_RUN_TIMER_NOT_SEEN")
+    if len(current_seen) < 2:
+        raise SystemExit(f"MULTI_TOOL_CURRENT_TOO_FEW current={sorted(current_seen)}")
+    if len(completed_seen) < 2 or len(output_seen) < 2:
+        raise SystemExit(
+            "MULTI_TOOL_COMPLETED_TOO_FEW "
+            f"completed={sorted(completed_seen)} outputs={sorted(output_seen)}"
+        )
+    fail_if_bad_logs(since, thread_id, "multi_tool_current")
+    print(
+        "RESULT case=multi_tool_current ok "
+        f"current={sorted(current_seen)} completed={sorted(completed_seen)} outputs={sorted(output_seen)}",
+        flush=True,
+    )
 
 
 async def complex_math_case(client, bot, thread_id: str, stamp: str) -> None:
@@ -429,6 +522,7 @@ async def main() -> None:
     require_env()
     thread_id = os.environ["CODEX_TG_E2E_THREAD_ID"].strip()
     stamp = str(int(time.time()))
+    cases = selected_cases()
     client = TelegramClient(
         os.environ["TG_SESSION"],
         int(os.environ["TG_API_ID"]),
@@ -441,10 +535,16 @@ async def main() -> None:
             raise SystemExit("Telegram user session is not authorized")
         bot_peer_id = os.environ.get("TG_BOT_PEER_ID", "").strip()
         bot = await client.get_entity(int(bot_peer_id) if bot_peer_id else os.environ["TG_BOT_USERNAME"])
-        print("LIVE_E2E start cases=sequential_commands,sleep20_timing,complex_math", flush=True)
-        await sequential_commands_case(client, bot, thread_id, stamp)
-        await sleep20_timing_case(client, bot, thread_id, stamp)
-        await complex_math_case(client, bot, thread_id, stamp)
+        print(f"LIVE_E2E start cases={','.join(cases)}", flush=True)
+        for case in cases:
+            if case == "sequential_commands":
+                await sequential_commands_case(client, bot, thread_id, stamp)
+            elif case == "sleep20_timing":
+                await sleep20_timing_case(client, bot, thread_id, stamp)
+            elif case == "multi_tool_current":
+                await multi_tool_current_case(client, bot, thread_id, stamp)
+            elif case == "complex_math":
+                await complex_math_case(client, bot, thread_id, stamp)
         print("ALL_OK", flush=True)
     finally:
         await client.disconnect()

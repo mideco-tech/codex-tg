@@ -724,6 +724,7 @@ func (s *Service) applyLiveToolSnapshot(ctx context.Context, threadID string, li
 	current.LatestToolStatus = liveTool.LatestToolStatus
 	current.LatestToolOutput = liveTool.LatestToolOutput
 	current.LatestToolFP = liveTool.LatestToolFP
+	current.LatestToolLiveCurrent = liveTool.LatestToolLiveCurrent
 	current.LatestProgressText = liveTool.LatestProgressText
 	current.LatestProgressFP = liveTool.LatestProgressFP
 	current.DetailItems = upsertLiveToolDetails(current.DetailItems, liveTool.DetailItems)

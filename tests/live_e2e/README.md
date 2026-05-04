@@ -24,6 +24,8 @@ Optional:
 - `TG_PROXY`: `socks5://`, `socks4://`, `http://`, or `https://` proxy URL.
 - `CODEX_TG_E2E_POLL_SECONDS`
 - `CODEX_TG_E2E_READBACK_LIMIT`
+- `CODEX_TG_E2E_CASES`: comma-separated subset of
+  `sequential_commands,sleep20_timing,multi_tool_current,complex_math`.
 
 The env file and Telethon session files must stay local. `.gitignore` blocks
 `.env*`, `telegram.env`, and `*.session*` as a belt-and-suspenders guard.
@@ -54,7 +56,11 @@ run duration in `[Final]`.
 
 `sleep20_timing` asks the agent to run one `sleep 20; printf ...` command and
 validates that `[commentary]` keeps showing active run elapsed time while
-`[Tool]` does not pretend to know an authoritative current command.
+Telegram-origin `[Tool]` shows the live `Current tool` before completion.
+
+`multi_tool_current` asks the agent to run three separate slow shell commands
+and validates that Telegram-origin `[Tool]` moves through live `Current tool`
+states before completed tool/output cards settle.
 
 `complex_math` asks the agent, through `/reply`, to create a temporary Python
 helper and run four separate range commands for a number-theory task. It passes
@@ -67,4 +73,5 @@ COUNT=2034 SUM=115514223
 
 All cases fail on visible `Status: interrupted`, literal `"<nil>"`, stale known
 commands from earlier regressions, parallel-turn rejection text, or `[Tool]`
-rendering a running/in-progress command as authoritative current state.
+putting run timing in the tool card. Running/in-progress tool status is allowed
+only under the explicit Telegram-origin `Current tool:` heading.

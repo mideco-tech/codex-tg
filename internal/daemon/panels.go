@@ -837,6 +837,17 @@ func (s *Service) renderToolPanel(ctx context.Context, thread model.Thread, snap
 
 func (s *Service) renderToolPanelAt(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, now time.Time) (string, string) {
 	header := s.visualHeader(ctx, "Tool", thread, snapshot.LatestTurnID)
+	if current, ok := s.currentTelegramOriginTool(ctx, thread, snapshot); ok {
+		escapedHeader := html.EscapeString(header)
+		renderedTool := renderToolCommandBlock(current.Label, outputMessageLimit-len(escapedHeader)-2)
+		lines := []string{escapedHeader, "Current tool:", renderedTool}
+		if status := strings.TrimSpace(current.Status); status != "" {
+			lines = append(lines, html.EscapeString(fmt.Sprintf("Status: %s", status)))
+		}
+		text := strings.Join(lines, "\n")
+		return text, hashStrings(text)
+	}
+
 	tool, _ := lastCompletedTool(snapshot)
 	label := strings.TrimSpace(cleanTelegramNilLiteral(tool.Label))
 	if label == "" {
@@ -853,6 +864,30 @@ func (s *Service) renderToolPanelAt(ctx context.Context, thread model.Thread, sn
 	}
 	text := strings.Join(lines, "\n")
 	return text, hashStrings(text)
+}
+
+func (s *Service) currentTelegramOriginTool(ctx context.Context, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (completedToolView, bool) {
+	if snapshot == nil || !snapshot.LatestToolLiveCurrent {
+		return completedToolView{}, false
+	}
+	turnID := strings.TrimSpace(snapshot.LatestTurnID)
+	if turnID == "" || isTerminalStatus(snapshot.LatestTurnStatus) || terminalToolStatus(snapshot.LatestToolStatus) {
+		return completedToolView{}, false
+	}
+	threadID := firstNonEmpty(strings.TrimSpace(thread.ID), strings.TrimSpace(snapshot.Thread.ID))
+	if threadID == "" || !s.isTelegramOriginTurn(ctx, threadID, turnID) {
+		return completedToolView{}, false
+	}
+	label := strings.TrimSpace(cleanTelegramNilLiteral(snapshot.LatestToolLabel))
+	if label == "" {
+		return completedToolView{}, false
+	}
+	return completedToolView{
+		ID:     strings.TrimSpace(snapshot.LatestToolID),
+		Label:  label,
+		Status: strings.TrimSpace(snapshot.LatestToolStatus),
+		Output: snapshot.LatestToolOutput,
+	}, true
 }
 
 func runTimingFooter(snapshot *appserver.ThreadReadSnapshot, now time.Time) string {

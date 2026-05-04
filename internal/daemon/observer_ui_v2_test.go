@@ -1407,6 +1407,86 @@ func TestRenderToolPanelShowsLastCompletedToolInsteadOfRunningTool(t *testing.T)
 	}
 }
 
+func TestRenderToolPanelShowsTelegramOriginCurrentTool(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "thread-telegram-current-tool",
+		Title:       "Long command",
+		ProjectName: "Codex",
+	}
+	turnID := "turn-telegram-current-tool"
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	text, _ := service.renderToolPanelAt(ctx, thread, &appserver.ThreadReadSnapshot{
+		LatestTurnID:          turnID,
+		LatestTurnStatus:      "inProgress",
+		LatestToolLabel:       `sleep 20; printf 'slow-command-done\n'`,
+		LatestToolStatus:      "running",
+		LatestToolLiveCurrent: true,
+		DetailItems: []model.DetailItem{
+			{
+				ID:     "tool-prev",
+				Kind:   model.DetailItemTool,
+				Label:  `printf 'previous\n'`,
+				Status: "completed",
+			},
+			{
+				ID:     "tool-prev:output",
+				Kind:   model.DetailItemOutput,
+				Output: "previous\n",
+			},
+		},
+	}, time.Date(2026, time.May, 1, 23, 19, 21, 0, time.UTC))
+
+	if !strings.Contains(text, "Current tool:") {
+		t.Fatalf("rendered tool = %q, want current tool heading", text)
+	}
+	if !strings.Contains(text, "slow-command-done") || !strings.Contains(text, "Status: running") {
+		t.Fatalf("rendered tool = %q, want running current command", text)
+	}
+	if strings.Contains(text, "Last completed tool:") || strings.Contains(text, "previous") {
+		t.Fatalf("rendered tool = %q, want current command to take precedence", text)
+	}
+}
+
+func TestRenderToolPanelKeepsForeignRunningToolHidden(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "thread-foreign-running-tool",
+		Title:       "Foreign command",
+		ProjectName: "Codex",
+	}
+	text, _ := service.renderToolPanelAt(ctx, thread, &appserver.ThreadReadSnapshot{
+		LatestTurnID:          "turn-foreign-running-tool",
+		LatestTurnStatus:      "inProgress",
+		LatestToolLabel:       `sleep 20; printf 'slow-command-done\n'`,
+		LatestToolStatus:      "running",
+		LatestToolLiveCurrent: true,
+		DetailItems: []model.DetailItem{
+			{
+				ID:     "tool-prev",
+				Kind:   model.DetailItemTool,
+				Label:  `printf 'previous\n'`,
+				Status: "completed",
+			},
+		},
+	}, time.Date(2026, time.May, 1, 23, 19, 21, 0, time.UTC))
+
+	if !strings.Contains(text, "Last completed tool:") || !strings.Contains(text, "previous") {
+		t.Fatalf("rendered tool = %q, want last completed foreign command", text)
+	}
+	if strings.Contains(text, "Current tool:") || strings.Contains(text, "slow-command-done") || strings.Contains(text, "Status: running") {
+		t.Fatalf("rendered tool = %q, want foreign running command hidden", text)
+	}
+}
+
 func TestRenderSummaryPanelShowsActiveRunElapsedTimeAtBottom(t *testing.T) {
 	t.Parallel()
 
