@@ -54,7 +54,7 @@ Regression tests should cover:
 - startup/reconcile/repair cannot create duplicate live subscriptions.
 - stale old live loops cannot clear newer session state or trigger repair loops.
 - Telegram-origin `interrupted` does not compact or render terminal during the grace window, even when partial tool/output or final evidence is already present.
-- Telegram-origin active turns have a short App Server `thread/read` hot-poll window after start, so a long-running command can appear in `[Tool]` even when live events do not report it.
+- Telegram-origin active turns use App Server live `item/*` events for authoritative current tool visibility; `thread/read` remains the reconciliation source for completed/foreign state.
 - explicit `/stop` accepts `interrupted` immediately.
 - recovered turns clear the defer marker and continue normal live panel rendering.
 
@@ -94,17 +94,18 @@ Validation expectations:
 - unit tests cover nil-like map/slice extraction, command rendering, stale session-tail command suppression, summary Markdown rendering, App Server RPC id stringification, and snapshot string normalization.
 - live validation must read edited Telegram messages, not only newly delivered messages.
 - the checked-in public-safe harness `tests/live_e2e/telegram_readback_e2e.py` exercises sequential `pwd`, `date`, `printf`, a dedicated sleep-20 timing run, and a multi-command math run against a dedicated private test thread configured only through local env.
-- when validating stale-command regressions manually, prefer one private test-thread turn that runs several safe shell commands sequentially as separate tool calls; watch Telegram `MessageEdited` updates and verify `[commentary]` shows whole-run elapsed time while `[Tool]`/`[Output]` only show last completed tool state.
-- current command visibility is not part of the live Telegram contract until App Server socket/event streaming is reliable enough to reconstruct ordered tool state.
+- when validating stale-command regressions manually, prefer one private test-thread turn that runs several safe shell commands sequentially as separate tool calls; watch Telegram `MessageEdited` updates and verify `[commentary]` shows whole-run elapsed time while Telegram-origin `[Tool]` shows live `Current tool:` and then settles to `Last completed tool:`.
+- current command visibility is part of the live Telegram-origin contract only when it comes from App Server live events for the matching `thread_id + turn_id`; foreign GUI/CLI observer panels remain completed-tool only.
 - while a run is active, `[commentary]` must show `Run active for: ...`; after Final Card collapse, `[Final]` must show `Run duration: ...`.
 - after a later turn completes, delayed live tool notifications from an earlier turn must not create a new observer panel or re-render stale tool/output content.
-- `[Tool]` must not show a running/in-progress tool as if it were authoritative current state. It should show `Last completed tool:` when available, otherwise `No completed tool yet.`.
+- `[Tool]` may show `Current tool:` for a matching Telegram-origin live event. Otherwise it should show `Last completed tool:` when available, or `No completed tool yet.`.
 - `[Output]` should show `Last completed output:` for the same completed tool when output is available.
 - Details view should be checked during E2E when the button is available.
 - do not commit Telegram sessions, target thread ids, raw message ids, logs, env files, or screenshots.
 
 Latest local validation note:
 
+- 2026-05-04 PDT macOS v0.2.0 live-event refactor E2E rebuilt and restarted the LaunchAgent daemon, then used MTProto readback against a private test thread. `sleep20_timing` showed `Current tool:` for `sleep 20; printf ...` before completion, then `Last completed tool:`, `[Output]`, and `[Final]` with run duration. `multi_tool_current` showed two separate live current tool transitions and all three completed tool/output transitions. A follow-up lifecycle smoke exposed an upstream App Server/tool-run failure (`write_stdin failed: stdin is closed for this session`) on one intentionally strict sequential-command prompt; after preserving live current state across tool-less same-turn `thread/read`, a fresh `sleep20_timing` retry passed with no `<nil>`, stale command, false parallel-turn rejection, or visible non-final interrupted state.
 - 2026-05-03 PDT macOS create-thread live readback verified `/projects -> project menu -> New thread -> first prompt -> [Final]` and a plain follow-up routed to the newly bound thread. The same pass exposed a synthetic Plan fallback bug: a later Plan turn with no structured question rendered the previous turn preview as the `[Plan]` prompt. After the normalizer fix, the Plan-only live retry rendered `Input required.` with no stale previous prompt and no choice buttons outside `[Plan]`.
 - 2026-05-03 PDT macOS live readback found a stale Plan button regression: a newer `[commentary]` card for turn `...efda` displayed structured answer buttons whose callback routes still targeted older Plan turn `...eea2` / item `...a08f`. Sanitized daemon evidence showed the older turn repeatedly alternating `interrupted` and `inProgress` with `waiting_reply=true`, then a newer turn entering `inProgress`; the pending `user_input` row remained attached to the older turn and must be filtered by turn before rendering summary buttons.
 - 2026-04-30 PDT macOS live complex `/reply` E2E reproduced a transient partial `interrupted` snapshot with tool/output evidence before final completion. After extending the terminal gate to defer non-final Telegram-origin `interrupted`, the same E2E passed: sequential command updates stayed visible, then a multi-command number-theory task created a temporary helper and ran four Python range commands before reaching `[Final]` with `COUNT=2034 SUM=115514223`; no visible interrupted state, literal `"<nil>"`, stale command, or input rejection appeared.
@@ -119,7 +120,7 @@ The checked-in public-safe harness `tests/live_e2e/telegram_readback_e2e.py` val
 Acceptance checks:
 
 - sequential command run reaches `[Final]`.
-- slow command becomes visible in `[Tool]` before `[Output]` contains its completion text.
+- Telegram-origin slow command becomes visible as `Current tool:` before `[Output]` contains its completion text.
 - complex `/reply` math run uses multiple shell commands and reaches `[Final]` with the expected aggregate answer.
 - Telegram readback contains no false parallel-turn warning, literal `"<nil>"`, stale known command, or false visible `Status: interrupted`.
 - optional daemon log correlation for the scenario window contains no premature interrupted terminal before recovery/expiry, no input rejection, and no `telegram_render_contains_nil`.

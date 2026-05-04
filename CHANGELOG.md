@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.2.0 - 2026-05-04
+
+- Added a normalized App Server live event layer for `item/*`, `turn/*`, `thread/status/changed`, and legacy `codex/event/*` notifications.
+- Restored honest current-command visibility for Telegram-origin turns: `[Tool]` now shows `Current tool:` from live App Server events during execution, then returns to `Last completed tool:` after completion.
+- Preserved v0.1.3 safety for foreign GUI/CLI observer panels: they still show only completed tool/output state from durable `thread/read`.
+- Hardened App Server client lifecycle with per-process generations so stale stdout/stderr, responses, server requests, and notifications from a closed session cannot affect the next session.
+- Preserved Telegram-origin live current tool state when a same-turn `thread/read` snapshot omits in-progress tool details, while still allowing completed/final snapshots to reconcile durable state.
+- Upgraded live Telegram E2E harness with selectable cases, `sleep20_timing` current-tool acceptance, and a multi-tool current/completed transition scenario.
+- Added docs, ADR/regression-map updates, validation notes, and public release notes for the v0.2.0 live event refactor.
+
 ## v0.1.3 - 2026-05-04
 
 - Added project-first thread creation from Telegram: `/projects` opens cached workspaces by normalized `cwd`, project menus expose `New thread`, and the next message starts a new App Server thread in that project.
