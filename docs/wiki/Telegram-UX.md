@@ -19,7 +19,7 @@ New run
 
 ## Final Card
 
-The active commentary card owns run status and becomes `[Final]` when the final answer is available. `[Final]` shows final-answer text/status only; completed commentary and tool/output history stay in Details. Details pagination edits the same message instead of sending more messages.
+The active commentary card owns run status and becomes `[Final]` when the final answer is available. `[Final]` shows final-answer text/status only; completed commentary and tool/output history stay in Details. Details pagination edits the same message instead of sending more messages, and Details/Back buttons stay bound to the completed run card that created them.
 
 ## Plan Mode
 

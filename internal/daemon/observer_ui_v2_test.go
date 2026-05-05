@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -1891,6 +1892,7 @@ func TestDetailsCallbacksUsePanelTurnInsteadOfLatestThreadTurn(t *testing.T) {
 		},
 	}
 	latest := appserver.SnapshotFromThreadRead(threadPayload)
+	latest.Thread.Raw = json.RawMessage(model.MustJSON(map[string]any{"thread": threadPayload}))
 	if err := service.store.UpsertThread(ctx, latest.Thread); err != nil {
 		t.Fatalf("UpsertThread failed: %v", err)
 	}
@@ -1931,6 +1933,217 @@ func TestDetailsCallbacksUsePanelTurnInsteadOfLatestThreadTurn(t *testing.T) {
 	if !strings.Contains(text, "Old commentary.") || strings.Contains(text, "New commentary must not leak.") {
 		t.Fatalf("details text = %q, want panel turn details only", text)
 	}
+}
+
+func TestDetailsCallbacksStayBoundToOriginalPanelAfterNewerRunCompletes(t *testing.T) {
+	t.Parallel()
+
+	service, sender, thread, oldPanel, newPanel := setupDetailsHistoryPanels(t)
+	ctx := context.Background()
+
+	token := service.callbackButton(ctx, "Details", "details_open", thread.ID, "turn-old", "", map[string]any{"panel_id": oldPanel.ID, "page": 0}).CallbackData
+	if _, err := service.HandleCallback(ctx, oldPanel.ChatID, oldPanel.TopicID, oldPanel.SummaryMessageID, oldPanel.ChatID, token); err != nil {
+		t.Fatalf("HandleCallback(details) failed: %v", err)
+	}
+	if len(sender.edits) != 1 {
+		t.Fatalf("edits = %#v, want one old details edit", sender.edits)
+	}
+	details := sender.edits[0]
+	if details.messageID != oldPanel.SummaryMessageID {
+		t.Fatalf("details message id = %d, want old summary %d", details.messageID, oldPanel.SummaryMessageID)
+	}
+	if !strings.Contains(details.text, "Old commentary.") || strings.Contains(details.text, "New commentary must not leak.") {
+		t.Fatalf("details text = %q, want old turn details only", details.text)
+	}
+
+	backToken := buttonToken(details.buttons, "Back")
+	if backToken == "" {
+		t.Fatalf("details buttons = %#v, want Back", details.buttons)
+	}
+	if _, err := service.HandleCallback(ctx, oldPanel.ChatID, oldPanel.TopicID, oldPanel.SummaryMessageID, oldPanel.ChatID, backToken); err != nil {
+		t.Fatalf("HandleCallback(back) failed: %v", err)
+	}
+	if len(sender.edits) != 2 {
+		t.Fatalf("edits = %#v, want details and back edits only", sender.edits)
+	}
+	back := sender.edits[1]
+	if back.messageID != oldPanel.SummaryMessageID {
+		t.Fatalf("back message id = %d, want old summary %d", back.messageID, oldPanel.SummaryMessageID)
+	}
+	if !hasHeaderKind(back.text, "Final") || !strings.Contains(back.text, "Old final.") || strings.Contains(back.text, "New final must not leak.") {
+		t.Fatalf("back text = %q, want old final card only", back.text)
+	}
+	for _, edit := range sender.edits {
+		if edit.messageID == newPanel.SummaryMessageID {
+			t.Fatalf("new panel message was edited by old Details callback: %#v", edit)
+		}
+	}
+	oldRoute, err := service.store.ResolveMessageRoute(ctx, oldPanel.ChatID, oldPanel.TopicID, oldPanel.SummaryMessageID)
+	if err != nil {
+		t.Fatalf("ResolveMessageRoute(old) failed: %v", err)
+	}
+	if oldRoute == nil || oldRoute.TurnID != "turn-old" {
+		t.Fatalf("old message route = %#v, want turn-old", oldRoute)
+	}
+	newRoute, err := service.store.ResolveMessageRoute(ctx, newPanel.ChatID, newPanel.TopicID, newPanel.SummaryMessageID)
+	if err != nil {
+		t.Fatalf("ResolveMessageRoute(new) failed: %v", err)
+	}
+	if newRoute == nil || newRoute.TurnID != "turn-new" {
+		t.Fatalf("new message route = %#v, want turn-new", newRoute)
+	}
+}
+
+func TestDetailsCallbackWithoutPanelIDDoesNotFallbackToCurrentPanel(t *testing.T) {
+	t.Parallel()
+
+	service, sender, thread, oldPanel, _ := setupDetailsHistoryPanels(t)
+	ctx := context.Background()
+
+	token := service.callbackButton(ctx, "Details", "details_open", thread.ID, "turn-old", "", map[string]any{"page": 0}).CallbackData
+	response, err := service.HandleCallback(ctx, oldPanel.ChatID, oldPanel.TopicID, oldPanel.SummaryMessageID, oldPanel.ChatID, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(details missing panel) failed: %v", err)
+	}
+	if len(sender.edits) != 0 {
+		t.Fatalf("edits = %#v, want no edit for missing panel_id", sender.edits)
+	}
+	if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+		t.Fatalf("response = %#v, want stale details response", response)
+	}
+}
+
+func TestDetailsCallbackRejectsMismatchedMessageID(t *testing.T) {
+	t.Parallel()
+
+	service, sender, thread, oldPanel, newPanel := setupDetailsHistoryPanels(t)
+	ctx := context.Background()
+
+	token := service.callbackButton(ctx, "Details", "details_open", thread.ID, "turn-old", "", map[string]any{"panel_id": oldPanel.ID, "page": 0}).CallbackData
+	response, err := service.HandleCallback(ctx, oldPanel.ChatID, oldPanel.TopicID, newPanel.SummaryMessageID, oldPanel.ChatID, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(details wrong message) failed: %v", err)
+	}
+	if len(sender.edits) != 0 {
+		t.Fatalf("edits = %#v, want no edit for mismatched details message", sender.edits)
+	}
+	if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+		t.Fatalf("response = %#v, want stale details response", response)
+	}
+}
+
+func TestDetailsToolsFileRejectsMismatchedPanelRoute(t *testing.T) {
+	t.Parallel()
+
+	service, sender, thread, oldPanel, _ := setupDetailsHistoryPanels(t)
+	ctx := context.Background()
+
+	token := service.callbackButton(ctx, "Tools file", "details_tools_file", thread.ID, "turn-new", "", map[string]any{"panel_id": oldPanel.ID, "commentary_index": 1}).CallbackData
+	response, err := service.HandleCallback(ctx, oldPanel.ChatID, oldPanel.TopicID, oldPanel.SummaryMessageID, oldPanel.ChatID, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(tools file wrong turn) failed: %v", err)
+	}
+	if len(sender.documents) != 0 {
+		t.Fatalf("documents = %#v, want no export for mismatched details route", sender.documents)
+	}
+	if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+		t.Fatalf("response = %#v, want stale details response", response)
+	}
+}
+
+func setupDetailsHistoryPanels(t *testing.T) (*Service, *recordingSender, model.Thread, *model.ThreadPanel, *model.ThreadPanel) {
+	t.Helper()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	threadPayload := map[string]any{
+		"id":     "thread-details-binding",
+		"name":   "Details binding",
+		"cwd":    `C:\Users\you\Projects\Codex`,
+		"status": "completed",
+		"turns": []any{
+			map[string]any{
+				"id":     "turn-old",
+				"status": "completed",
+				"items": []any{
+					map[string]any{"id": "old-c1", "type": "agentMessage", "phase": "commentary", "text": "Old commentary."},
+					map[string]any{"id": "old-cmd", "type": "commandExecution", "command": "printf old", "status": "completed", "aggregatedOutput": "old output\n"},
+					map[string]any{"id": "old-f1", "type": "agentMessage", "phase": "final_answer", "text": "Old final."},
+				},
+			},
+			map[string]any{
+				"id":     "turn-new",
+				"status": "completed",
+				"items": []any{
+					map[string]any{"id": "new-c1", "type": "agentMessage", "phase": "commentary", "text": "New commentary must not leak."},
+					map[string]any{"id": "new-cmd", "type": "commandExecution", "command": "printf new", "status": "completed", "aggregatedOutput": "new output\n"},
+					map[string]any{"id": "new-f1", "type": "agentMessage", "phase": "final_answer", "text": "New final must not leak."},
+				},
+			},
+		},
+	}
+	latest := appserver.SnapshotFromThreadRead(threadPayload)
+	latest.Thread.Raw = json.RawMessage(model.MustJSON(map[string]any{"thread": threadPayload}))
+	if err := service.store.UpsertThread(ctx, latest.Thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.UpsertSnapshot(ctx, latest.Thread.ID, appserver.CompactSnapshot(nil, latest, time.Now().UTC())); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	oldPanel, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
+		ChatID:            123456789,
+		TopicID:           0,
+		ProjectName:       latest.Thread.ProjectName,
+		ThreadID:          latest.Thread.ID,
+		SourceMode:        model.PanelSourceExplicit,
+		SummaryMessageID:  101,
+		ToolMessageID:     102,
+		OutputMessageID:   103,
+		CurrentTurnID:     "turn-old",
+		Status:            "completed",
+		ArchiveEnabled:    true,
+		LastFinalNoticeFP: "old-final-fp",
+		LastFinalCardHash: "old-card-hash",
+		DetailsViewJSON:   model.MustJSON(model.DetailsViewState{}),
+		LastSummaryHash:   "old-card-hash",
+		LastToolHash:      "old-tool",
+		LastOutputHash:    "old-output",
+	})
+	if err != nil {
+		t.Fatalf("CreateThreadPanel(old) failed: %v", err)
+	}
+	newPanel, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
+		ChatID:            123456789,
+		TopicID:           0,
+		ProjectName:       latest.Thread.ProjectName,
+		ThreadID:          latest.Thread.ID,
+		SourceMode:        model.PanelSourceExplicit,
+		SummaryMessageID:  201,
+		ToolMessageID:     202,
+		OutputMessageID:   203,
+		CurrentTurnID:     "turn-new",
+		Status:            "completed",
+		ArchiveEnabled:    true,
+		LastFinalNoticeFP: "new-final-fp",
+		LastFinalCardHash: "new-card-hash",
+		DetailsViewJSON:   model.MustJSON(model.DetailsViewState{}),
+		LastSummaryHash:   "new-card-hash",
+		LastToolHash:      "new-tool",
+		LastOutputHash:    "new-output",
+	})
+	if err != nil {
+		t.Fatalf("CreateThreadPanel(new) failed: %v", err)
+	}
+	if err := service.store.PutMessageRoute(ctx, model.MessageRoute{ChatID: oldPanel.ChatID, TopicID: oldPanel.TopicID, MessageID: oldPanel.SummaryMessageID, ThreadID: latest.Thread.ID, TurnID: "turn-old", EventID: "old-final-fp", CreatedAt: model.NowString()}); err != nil {
+		t.Fatalf("PutMessageRoute(old) failed: %v", err)
+	}
+	if err := service.store.PutMessageRoute(ctx, model.MessageRoute{ChatID: newPanel.ChatID, TopicID: newPanel.TopicID, MessageID: newPanel.SummaryMessageID, ThreadID: latest.Thread.ID, TurnID: "turn-new", EventID: "new-final-fp", CreatedAt: model.NowString()}); err != nil {
+		t.Fatalf("PutMessageRoute(new) failed: %v", err)
+	}
+	return service, sender, latest.Thread, oldPanel, newPanel
 }
 
 func TestTerminalSyncAdoptsActivePanelWithoutTurnID(t *testing.T) {

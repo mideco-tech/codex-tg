@@ -88,6 +88,25 @@ Contract notes:
 - Header chips like `T:d663` and `R:d9bc` are visual hints only.
 - Operators must be able to retrieve copyable full ids from Telegram without SQLite/log access.
 
+## Final Card Details Binding
+
+ADR: `docs/adr/ADR-004-final-card-details-ux.md`
+
+Primary tests:
+
+- `internal/daemon/observer_ui_v2_test.go::TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile`
+- `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbacksUsePanelTurnInsteadOfLatestThreadTurn`
+- `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbacksStayBoundToOriginalPanelAfterNewerRunCompletes`
+- `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbackWithoutPanelIDDoesNotFallbackToCurrentPanel`
+- `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbackRejectsMismatchedMessageID`
+- `internal/daemon/observer_ui_v2_test.go::TestDetailsToolsFileRejectsMismatchedPanelRoute`
+
+Contract notes:
+
+- `Details`, pagination, `Tool on`, `Tools file`, and `Back` are bound to the completed panel/card that produced the callback.
+- A Details callback without a valid `panel_id`, with a mismatched thread/turn, or from another Telegram message is stale and must not edit/export current run data.
+- Pressing `Back` on an older completed run must restore that older Final Card in the same message, not duplicate or replace it with the latest run.
+
 ## Turn Lifecycle And Stale Active Recovery
 
 ADR: `docs/adr/ADR-012-turn-lifecycle-normalization.md`

@@ -12,11 +12,13 @@
 - Tool and output content remains available on demand in Details tool mode.
 - Full tool and output content is also available as a `.txt` file when message-sized rendering is not practical.
 - Deletion of old live tool/output messages after finalization is best-effort.
+- Details callbacks are bound to the completed run panel/card that created them. Missing, stale, or mismatched panel metadata must fail closed instead of falling back to the current panel for the thread.
 
 ## Consequences
 
 - The completed-run operator surface is one stable message with Final and Details states.
 - Callback handlers must edit the existing card whenever Telegram permits it instead of emitting a new stream of messages.
 - Pagination state belongs to the card view and must be recoverable from callback payloads or persisted card metadata.
+- Callback handlers must verify the panel, thread, turn, chat/topic, and message id before editing a Details/Final card or exporting Details tools.
 - Tool/output live messages must not be treated as durable final history; the final card and on-demand `.txt` export are the durable review surface.
 - Cleanup failures for old live tool/output messages must not fail final delivery.

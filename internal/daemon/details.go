@@ -15,6 +15,7 @@ import (
 const (
 	detailsPageSize     = 4
 	detailsToolMaxBytes = 2800
+	staleDetailsText    = "Details panel is stale. Use /show <thread>."
 )
 
 func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, target model.ObserverTarget, panel *model.ThreadPanel, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) error {
@@ -118,24 +119,21 @@ func renderSingleMarkdownCard(header, markdown string) model.RenderedMessage {
 }
 
 func (s *Service) handleDetailsCallback(ctx context.Context, chatID, topicID, callbackMessageID int64, route *model.CallbackRoute, payload map[string]any) (*DirectResponse, error) {
-	panelID := payloadInt64(payload, "panel_id")
-	if panelID == 0 && route != nil {
-		if panel, _ := s.store.GetCurrentThreadPanel(ctx, chatID, topicID, route.ThreadID); panel != nil {
-			panelID = panel.ID
-		}
-	}
-	panel, err := s.store.GetThreadPanelByID(ctx, panelID)
+	panel, response, err := s.detailsPanelForCallback(ctx, chatID, topicID, callbackMessageID, route, payload, true)
 	if err != nil {
 		return nil, err
 	}
-	if panel == nil {
-		return &DirectResponse{Text: "Details panel is stale. Use /show <thread>."}, nil
+	if response != nil {
+		return response, nil
 	}
 	thread, snapshot, err := s.loadThreadPanelSnapshot(ctx, panel.ThreadID)
 	if err != nil || thread == nil || snapshot == nil {
 		return &DirectResponse{Text: "Could not load thread details. Try /repair or /show <thread>."}, nil
 	}
-	snapshot = snapshotForPanelTurn(*thread, snapshot, panel)
+	snapshot, ok := snapshotForPanelTurn(*thread, snapshot, panel)
+	if !ok {
+		return staleDetailsResponse(), nil
+	}
 	state := detailsStateFromPayload(payload)
 	commentaryCount := len(detailCommentaries(snapshot))
 	if route != nil {
@@ -300,20 +298,22 @@ func (s *Service) detailsButtons(ctx context.Context, panelID int64, threadID, t
 	return rows
 }
 
-func (s *Service) sendDetailsToolsFile(ctx context.Context, chatID, topicID int64, route *model.CallbackRoute, payload map[string]any) (*DirectResponse, error) {
-	panelID := payloadInt64(payload, "panel_id")
-	panel, err := s.store.GetThreadPanelByID(ctx, panelID)
+func (s *Service) sendDetailsToolsFile(ctx context.Context, chatID, topicID, callbackMessageID int64, route *model.CallbackRoute, payload map[string]any) (*DirectResponse, error) {
+	panel, response, err := s.detailsPanelForCallback(ctx, chatID, topicID, callbackMessageID, route, payload, true)
 	if err != nil {
 		return nil, err
 	}
-	if panel == nil {
-		return &DirectResponse{Text: "Details panel is stale. Use /show <thread>."}, nil
+	if response != nil {
+		return response, nil
 	}
 	thread, snapshot, err := s.loadThreadPanelSnapshot(ctx, panel.ThreadID)
 	if err != nil || thread == nil || snapshot == nil {
 		return &DirectResponse{Text: "Could not load thread details for export."}, nil
 	}
-	snapshot = snapshotForPanelTurn(*thread, snapshot, panel)
+	snapshot, ok := snapshotForPanelTurn(*thread, snapshot, panel)
+	if !ok {
+		return staleDetailsResponse(), nil
+	}
 	index := payloadInt(payload, "commentary_index")
 	if index == 0 {
 		index = 1
@@ -335,6 +335,39 @@ func (s *Service) sendDetailsToolsFile(ctx context.Context, chatID, topicID int6
 	}
 	_ = route
 	return &DirectResponse{CallbackText: "Tools file sent."}, nil
+}
+
+func (s *Service) detailsPanelForCallback(ctx context.Context, chatID, topicID, callbackMessageID int64, route *model.CallbackRoute, payload map[string]any, requireMessageMatch bool) (*model.ThreadPanel, *DirectResponse, error) {
+	panelID := payloadInt64(payload, "panel_id")
+	if panelID == 0 {
+		return nil, staleDetailsResponse(), nil
+	}
+	panel, err := s.store.GetThreadPanelByID(ctx, panelID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if panel == nil {
+		return nil, staleDetailsResponse(), nil
+	}
+	if panel.ChatID != chatID || panel.TopicID != topicID {
+		return nil, staleDetailsResponse(), nil
+	}
+	if route != nil {
+		if threadID := strings.TrimSpace(route.ThreadID); threadID != "" && strings.TrimSpace(panel.ThreadID) != threadID {
+			return nil, staleDetailsResponse(), nil
+		}
+		if turnID := strings.TrimSpace(route.TurnID); turnID != "" && strings.TrimSpace(panel.CurrentTurnID) != turnID {
+			return nil, staleDetailsResponse(), nil
+		}
+	}
+	if requireMessageMatch && callbackMessageID != panel.SummaryMessageID {
+		return nil, staleDetailsResponse(), nil
+	}
+	return panel, nil, nil
+}
+
+func staleDetailsResponse() *DirectResponse {
+	return &DirectResponse{Text: staleDetailsText}
 }
 
 func buildDetailsToolsText(thread model.Thread, snapshot *appserver.ThreadReadSnapshot, commentaryIndex int) string {
@@ -396,38 +429,65 @@ func detailCommentaries(snapshot *appserver.ThreadReadSnapshot) []model.DetailIt
 	return out
 }
 
-func snapshotForPanelTurn(thread model.Thread, snapshot *appserver.ThreadReadSnapshot, panel *model.ThreadPanel) *appserver.ThreadReadSnapshot {
+func snapshotForPanelTurn(thread model.Thread, snapshot *appserver.ThreadReadSnapshot, panel *model.ThreadPanel) (*appserver.ThreadReadSnapshot, bool) {
 	if snapshot == nil || panel == nil {
-		return snapshot
+		return snapshot, true
 	}
 	turnID := strings.TrimSpace(panel.CurrentTurnID)
 	if turnID == "" || strings.TrimSpace(snapshot.LatestTurnID) == turnID {
-		return snapshot
+		return snapshot, true
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(snapshot.Thread.Raw, &payload); err != nil || payload == nil {
 		if err := json.Unmarshal(thread.Raw, &payload); err != nil || payload == nil {
-			return snapshot
+			return nil, false
 		}
 	}
-	turns, _ := payload["turns"].([]any)
+	turns := turnsFromThreadPayload(payload)
 	if len(turns) == 0 {
-		return snapshot
+		return nil, false
 	}
 	for _, rawTurn := range turns {
 		turn, _ := rawTurn.(map[string]any)
 		if turn == nil || strings.TrimSpace(stringValueFromMap(turn, "id")) != turnID {
 			continue
 		}
-		panelPayload := shallowCopyMap(payload)
-		panelPayload["turns"] = []any{turn}
+		panelPayload := panelThreadPayloadForTurn(payload, turn)
 		panelSnapshot := appserver.SnapshotFromThreadRead(panelPayload)
 		if panelSnapshot.Thread.ID == "" {
 			panelSnapshot.Thread = thread
 		}
-		return &panelSnapshot
+		return &panelSnapshot, true
 	}
-	return snapshot
+	return nil, false
+}
+
+func panelThreadPayloadForTurn(payload map[string]any, turn map[string]any) map[string]any {
+	if nested, ok := payload["thread"].(map[string]any); ok && nested != nil {
+		out := shallowCopyMap(payload)
+		threadPayload := shallowCopyMap(nested)
+		threadPayload["turns"] = []any{turn}
+		out["thread"] = threadPayload
+		return out
+	}
+	out := shallowCopyMap(payload)
+	out["turns"] = []any{turn}
+	return out
+}
+
+func turnsFromThreadPayload(payload map[string]any) []any {
+	if payload == nil {
+		return nil
+	}
+	if turns, ok := payload["turns"].([]any); ok {
+		return turns
+	}
+	if nested, ok := payload["thread"].(map[string]any); ok && nested != nil {
+		if turns, ok := nested["turns"].([]any); ok {
+			return turns
+		}
+	}
+	return nil
 }
 
 func shallowCopyMap(input map[string]any) map[string]any {

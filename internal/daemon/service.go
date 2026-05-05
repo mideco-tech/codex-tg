@@ -310,7 +310,7 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 	case "details_open", "details_prev", "details_next", "details_back", "details_tool_toggle":
 		return s.handleDetailsCallback(ctx, chatID, topicID, messageID, route, payload)
 	case "details_tools_file":
-		return s.sendDetailsToolsFile(ctx, chatID, topicID, route, payload)
+		return s.sendDetailsToolsFile(ctx, chatID, topicID, messageID, route, payload)
 	case "settings_overview":
 		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Settings", s.codexSettingsOverview)
 	case "settings_model_menu":

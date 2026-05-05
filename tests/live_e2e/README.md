@@ -25,7 +25,7 @@ Optional:
 - `CODEX_TG_E2E_POLL_SECONDS`
 - `CODEX_TG_E2E_READBACK_LIMIT`
 - `CODEX_TG_E2E_CASES`: comma-separated subset of
-  `sequential_commands,sleep20_timing,multi_tool_current,current_tool_priority,complex_math`.
+  `sequential_commands,sleep20_timing,multi_tool_current,current_tool_priority,details_binding,complex_math`.
 
 The env file and Telethon session files must stay local. `.gitignore` blocks
 `.env*`, `telegram.env`, and `*.session*` as a belt-and-suspenders guard.
@@ -66,6 +66,11 @@ states before completed tool/output cards settle.
 commands that print progress lines while they work. After the second command
 appears as `Current tool`, the harness fails if `[Tool]` reverts to the first
 completed command before the second command completes.
+
+`details_binding` creates two completed `/reply` runs in the same thread, opens
+`Details` on the older Final Card, toggles `Tool on`, downloads `Tools file`, and
+presses `Back`. It fails if any Details/Back/export surface shows the newer run
+or if the newer Final Card is edited into the older message.
 
 `complex_math` asks the agent, through `/reply`, to create a temporary Python
 helper and run four separate range commands for a number-theory task. It passes

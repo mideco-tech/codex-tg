@@ -40,6 +40,7 @@ DEFAULT_CASES = (
     "sleep20_timing",
     "multi_tool_current",
     "current_tool_priority",
+    "details_binding",
     "complex_math",
 )
 
@@ -165,6 +166,14 @@ def is_final_with_marker(text: str, marker: str) -> bool:
     return marker in text and "[Final]" in text
 
 
+def has_button(message, text: str) -> bool:
+    for row in message.buttons or []:
+        for button in row:
+            if getattr(button, "text", "") == text:
+                return True
+    return False
+
+
 def fail_if_bad_text(text: str, context: str) -> None:
     for bit in REJECT_BITS:
         if bit in text:
@@ -201,6 +210,56 @@ async def bot_messages_after(client, bot, sent_id: int):
     for message in reversed(messages):
         if message.id > sent_id and is_bot_message(message, bot):
             yield message
+
+
+async def wait_final_message(client, bot, after_id: int, marker: str, context: str, timeout: int = 240):
+    deadline = time.time() + timeout
+    seen = set()
+    while time.time() < deadline:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, after_id):
+            text = (message.raw_text or "").strip()
+            key = (message.id, text)
+            if key not in seen:
+                seen.add(key)
+                print(f"BOT case={context} message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, context)
+            if is_final_with_marker(text, marker) and has_button(message, "Details"):
+                return message
+    raise SystemExit(f"FINAL_TIMEOUT case={context} marker={marker}")
+
+
+async def wait_message_by_id(client, bot, message_id: int, context: str, predicate, timeout: int = 80):
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        await asyncio.sleep(1)
+        message = await client.get_messages(bot, ids=message_id)
+        text = (message.raw_text or "").strip()
+        if text != last:
+            last = text
+            print(f"EDIT case={context} message_id={message_id} preview={preview(text)}", flush=True)
+        fail_if_bad_text(text, context)
+        if predicate(message, text):
+            return message
+    raise SystemExit(f"MESSAGE_TIMEOUT case={context} message_id={message_id} preview={preview(last)}")
+
+
+async def wait_details_document_after(client, bot, after_id: int, context: str, timeout: int = 80) -> str:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, after_id):
+            if not message.file:
+                continue
+            caption = message.raw_text or ""
+            if "[Details tools]" not in caption:
+                continue
+            data = await message.download_media(bytes)
+            body = data.decode("utf-8", errors="replace") if data else ""
+            print(f"DOCUMENT case={context} message_id={message.id} bytes={len(data or b'')}", flush=True)
+            return body
+    raise SystemExit(f"DOCUMENT_TIMEOUT case={context}")
 
 
 async def sequential_commands_case(client, bot, thread_id: str, stamp: str) -> None:
@@ -526,6 +585,99 @@ async def current_tool_priority_case(client, bot, thread_id: str, stamp: str) ->
     )
 
 
+async def details_binding_case(client, bot, thread_id: str, stamp: str) -> None:
+    old_commentary = f"DETAILS_BINDING_OLD_COMMENTARY_{stamp}"
+    new_commentary = f"DETAILS_BINDING_NEW_COMMENTARY_{stamp}"
+    old_tool = f"DETAILS_BINDING_OLD_TOOL_{stamp}"
+    new_tool = f"DETAILS_BINDING_NEW_TOOL_{stamp}"
+    old_final_marker = f"DETAILS_BINDING_OLD_FINAL_{stamp}"
+    new_final_marker = f"DETAILS_BINDING_NEW_FINAL_{stamp}"
+    since = utc_now()
+
+    old_prompt = (
+        f"First write a brief commentary sentence containing exactly {old_commentary}. "
+        "Then run exactly one shell command tool call, verbatim: "
+        f"printf '{old_tool}\\n'. "
+        f"Wait for it to finish. Final answer exactly: {old_final_marker}"
+    )
+    sent_old = await client.send_message(bot, f"/reply {thread_id} {old_prompt}")
+    print(f"SENT case=details_binding phase=old message_id={sent_old.id}", flush=True)
+    old_final = await wait_final_message(client, bot, sent_old.id, old_final_marker, "details_binding")
+
+    new_prompt = (
+        f"First write a brief commentary sentence containing exactly {new_commentary}. "
+        "Then run exactly one shell command tool call, verbatim: "
+        f"printf '{new_tool}\\n'. "
+        f"Wait for it to finish. Final answer exactly: {new_final_marker}"
+    )
+    sent_new = await client.send_message(bot, f"/reply {thread_id} {new_prompt}")
+    print(f"SENT case=details_binding phase=new message_id={sent_new.id}", flush=True)
+    new_final = await wait_final_message(client, bot, sent_new.id, new_final_marker, "details_binding")
+
+    old_final = await client.get_messages(bot, ids=old_final.id)
+    await old_final.click(text="Details")
+    old_details = await wait_message_by_id(
+        client,
+        bot,
+        old_final.id,
+        "details_binding",
+        lambda message, text: (
+            "[Details]" in text
+            and old_commentary in text
+            and new_commentary not in text
+            and new_final_marker not in text
+            and has_button(message, "Tool on")
+        ),
+    )
+
+    await old_details.click(text="Tool on")
+    old_tool_details = await wait_message_by_id(
+        client,
+        bot,
+        old_final.id,
+        "details_binding",
+        lambda message, text: (
+            "[Details]" in text
+            and "[Tool]" in text
+            and old_tool in text
+            and new_tool not in text
+            and has_button(message, "Tools file")
+        ),
+    )
+
+    await old_tool_details.click(text="Tools file")
+    document_body = await wait_details_document_after(client, bot, new_final.id, "details_binding")
+    if old_commentary not in document_body or old_tool not in document_body:
+        raise SystemExit("DETAILS_BINDING_DOCUMENT_OLD_CONTENT_MISSING")
+    if new_commentary in document_body or new_tool in document_body:
+        raise SystemExit("DETAILS_BINDING_DOCUMENT_LEAKED_NEW_RUN")
+
+    old_tool_details = await client.get_messages(bot, ids=old_final.id)
+    await old_tool_details.click(text="Back")
+    old_back = await wait_message_by_id(
+        client,
+        bot,
+        old_final.id,
+        "details_binding",
+        lambda message, text: (
+            "[Final]" in text
+            and old_final_marker in text
+            and new_final_marker not in text
+            and has_button(message, "Details")
+        ),
+    )
+    if new_final_marker in (old_back.raw_text or ""):
+        raise SystemExit("DETAILS_BINDING_BACK_RENDERED_NEW_RUN")
+
+    new_after = await client.get_messages(bot, ids=new_final.id)
+    new_text = (new_after.raw_text or "").strip()
+    if "[Final]" not in new_text or new_final_marker not in new_text or old_final_marker in new_text:
+        raise SystemExit(f"DETAILS_BINDING_NEW_FINAL_CHANGED preview={preview(new_text)}")
+
+    fail_if_bad_logs(since, thread_id, "details_binding")
+    print("RESULT case=details_binding ok", flush=True)
+
+
 async def complex_math_case(client, bot, thread_id: str, stamp: str) -> None:
     marker = f"OK_LIVE_COMPLEX_MATH_{stamp}"
     script_path = f"/tmp/codex_tg_live_math_{stamp}.py"
@@ -634,6 +786,8 @@ async def main() -> None:
                 await multi_tool_current_case(client, bot, thread_id, stamp)
             elif case == "current_tool_priority":
                 await current_tool_priority_case(client, bot, thread_id, stamp)
+            elif case == "details_binding":
+                await details_binding_case(client, bot, thread_id, stamp)
             elif case == "complex_math":
                 await complex_math_case(client, bot, thread_id, stamp)
         print("ALL_OK", flush=True)
