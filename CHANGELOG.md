@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.2.1 - 2026-05-05
+
+- Preserved the live `Current tool:` display for Telegram-origin turns when durable polling temporarily reports an older completed tool from the same turn.
+- Added a live E2E regression case that exercises two long-running progress-printing commands and fails if `[Tool]` reverts to an older completed command while the newer tool is still running.
+- Split Codex UI `Documents/Codex` chats into a dedicated `Chats` navigation area under `/projects`, with recency sorting, pagination, `/newchat <prompt>`, and configurable preview/page limits.
+- Improved `/projects` readability: project buttons now use `N. Project name`, Chat buttons use `Chat N. Thread name`, and visible internal `key:` rows were replaced with `last thread:`.
+- Updated contract, regression, validation, quickstart, and Telegram UX docs for the Projects/Chats navigation and v0.2.1 live validation.
+
 ## v0.2.0 - 2026-05-04
 
 - Added a normalized App Server live event layer for `item/*`, `turn/*`, `thread/status/changed`, and legacy `codex/event/*` notifications.
