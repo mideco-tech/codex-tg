@@ -93,15 +93,19 @@ go run ./cmd/ctr-go daemon run
 Telegram commands:
 
 - `/start`, `/help`
-- `/threads`, `/projects`, `/new`, `/show`, `/bind`, `/reply`, `/plan`
+- `/threads`, `/projects`, `/new`, `/newchat`, `/show`, `/bind`, `/reply`, `/plan`
 - `/settings`, `/model`, `/effort`
 - `/context`, `/whereami`
 - `/observe all`, `/observe off`
 - `/status`, `/repair`, `/stop`, `/approve`, `/deny`
 
-`/projects` opens a project/workspace menu from cached Codex threads. Use
-`New thread` in that menu to create a new thread in the selected project cwd;
-the next message becomes the first prompt.
+`/projects` opens cached project/workspace navigation sorted by the latest
+thread activity. Codex UI Chats from `Documents/Codex` are grouped under
+`Chats`: the main projects view shows recent Chat previews, `Open Chats` opens
+the full paginated Chat list, and choosing a Chat opens and binds its thread.
+Use `New thread` in a normal project menu to create a new thread in that
+project cwd; use `/newchat <prompt>` to start a new thread without selecting a
+project cwd.
 
 ## Configuration
 
@@ -118,6 +122,9 @@ Primary environment variables:
 - `CTR_GO_DIAGNOSTIC_LOGS` (`true` by default; set `false`/`off`/`0` to keep normal bot logs but suppress structured `daemon_event` diagnostics)
 - `CTR_GO_OBSERVER_POLL_SECONDS`
 - `CTR_GO_REQUEST_TIMEOUT_SECONDS`
+- `CTR_GO_PROJECTS_PROJECT_PREVIEW_LIMIT` (`7` by default)
+- `CTR_GO_PROJECTS_CHAT_PREVIEW_LIMIT` (`3` by default)
+- `CTR_GO_CHATS_PAGE_SIZE` (`8` by default)
 - `CTR_GO_INDEX_REFRESH_SECONDS`
 - `CTR_GO_ATTACH_REFRESH_SECONDS`
 - `CTR_GO_DELIVERY_RETRY_SECONDS`

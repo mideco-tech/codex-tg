@@ -418,8 +418,260 @@ func TestProjectsCommandShowsProjectButtonsGroupedByCWD(t *testing.T) {
 	if !strings.Contains(response.Text, "/Users/example/work/a/codex-tg") || !strings.Contains(response.Text, "/Users/example/work/b/codex-tg") {
 		t.Fatalf("/projects text missing grouped cwd entries:\n%s", response.Text)
 	}
-	if got := countButtonsContaining(response.Buttons, "codex-tg"); got != 2 {
+	if got := countButtonsContaining(response.Buttons, "Project "); got != 2 {
 		t.Fatalf("/projects buttons = %#v, want two project workspace buttons", response.Buttons)
+	}
+}
+
+func TestIsCodexChatsCWDMatchesGenericMacAndWindowsPaths(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		cwd  string
+		want bool
+	}{
+		{cwd: "/Users/alice/Documents/Codex", want: true},
+		{cwd: "/Users/alice/Documents/Codex/2026-04-29/new-chat", want: true},
+		{cwd: `C:\Users\bob\Documents\Codex`, want: true},
+		{cwd: `C:\Users\bob\Documents\Codex\2026-04-28\tool-call`, want: true},
+		{cwd: "/Users/alice/Library/CloudStorage/OneDrive-Personal/Programming/AI/Codex", want: false},
+		{cwd: "/Users/alice/Documents/Codexology", want: false},
+		{cwd: `D:\Users\bob\Documents\Codex`, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cwd, func(t *testing.T) {
+			if got := isCodexChatsCWD(tc.cwd); got != tc.want {
+				t.Fatalf("isCodexChatsCWD(%q) = %v, want %v", tc.cwd, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProjectsCommandShowsChatsSectionAndSortsByRecency(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	threads := []model.Thread{
+		{
+			ID:            "old-project-thread",
+			Title:         "Old project",
+			CWD:           "/Users/example/work/old-project",
+			ProjectName:   "old-project",
+			DirectoryName: "old-project",
+			UpdatedAt:     10,
+			Raw:           json.RawMessage(`{"id":"old-project-thread"}`),
+		},
+		{
+			ID:            "new-project-thread",
+			Title:         "New project",
+			CWD:           "/Users/example/work/new-project",
+			ProjectName:   "new-project",
+			DirectoryName: "new-project",
+			UpdatedAt:     50,
+			Raw:           json.RawMessage(`{"id":"new-project-thread"}`),
+		},
+		{
+			ID:            "older-chat-thread",
+			Title:         "Older Chat",
+			CWD:           "/Users/example/Documents/Codex/2026-04-28/tool-call",
+			ProjectName:   "tool-call",
+			DirectoryName: "tool-call",
+			UpdatedAt:     20,
+			Raw:           json.RawMessage(`{"id":"older-chat-thread"}`),
+		},
+		{
+			ID:            "newer-chat-thread",
+			Title:         "Newer Chat",
+			CWD:           "/Users/example/Documents/Codex/2026-04-29/new-chat",
+			ProjectName:   "new-chat",
+			DirectoryName: "new-chat",
+			UpdatedAt:     60,
+			Raw:           json.RawMessage(`{"id":"newer-chat-thread"}`),
+		},
+		{
+			ID:            "windows-chat-thread",
+			Title:         "Windows Chat",
+			CWD:           `C:\Users\someone\Documents\Codex\2026-04-30\win-chat`,
+			ProjectName:   "win-chat",
+			DirectoryName: "win-chat",
+			UpdatedAt:     30,
+			Raw:           json.RawMessage(`{"id":"windows-chat-thread"}`),
+		},
+	}
+	for _, thread := range threads {
+		if err := service.store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread(%s) failed: %v", thread.ID, err)
+		}
+	}
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/projects", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/projects) failed: %v", err)
+	}
+	if response == nil {
+		t.Fatal("handleCommand(/projects) returned nil response")
+	}
+	for _, needle := range []string{"Projects", "Project page 1/1", "Latest Chats: showing 3 of 3", "Open Chats", "Newer Chat", "Windows Chat", "Older Chat"} {
+		if !strings.Contains(response.Text, needle) {
+			t.Fatalf("/projects text missing %q:\n%s", needle, response.Text)
+		}
+	}
+	requireTextOrder(t, response.Text, "new-project", "old-project")
+	requireTextOrder(t, response.Text, "Newer Chat", "Windows Chat")
+	requireTextOrder(t, response.Text, "Windows Chat", "Older Chat")
+	if strings.Contains(response.Text, "cwd: /Users/example/Documents/Codex") || strings.Contains(response.Text, `cwd: C:\Users\someone\Documents\Codex`) {
+		t.Fatalf("/projects text renders chat cwd as project cwd:\n%s", response.Text)
+	}
+	if got := countButtonsContaining(response.Buttons, "Project "); got != 2 {
+		t.Fatalf("/projects buttons = %#v, want two project buttons", response.Buttons)
+	}
+	if got := countButtonsContaining(response.Buttons, "Chat "); got != 3 {
+		t.Fatalf("/projects buttons = %#v, want three chat preview buttons", response.Buttons)
+	}
+	if callbackTokenForButton(response.Buttons, "Open Chats") == "" {
+		t.Fatalf("/projects buttons = %#v, want Open Chats", response.Buttons)
+	}
+}
+
+func TestProjectsPaginationUsesPreviewLimitsAndKeepsLatestChats(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	service.cfg.ProjectsProjectPreviewLimit = 2
+	service.cfg.ProjectsChatPreviewLimit = 1
+	ctx := context.Background()
+	for i := 1; i <= 5; i++ {
+		thread := model.Thread{
+			ID:            fmt.Sprintf("project-%d-thread", i),
+			Title:         fmt.Sprintf("Project %d thread", i),
+			CWD:           fmt.Sprintf("/Users/example/work/project-%d", i),
+			ProjectName:   fmt.Sprintf("project-%d", i),
+			DirectoryName: fmt.Sprintf("project-%d", i),
+			UpdatedAt:     int64(i * 10),
+			Raw:           json.RawMessage(fmt.Sprintf(`{"id":"project-%d-thread"}`, i)),
+		}
+		if err := service.store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread(%s) failed: %v", thread.ID, err)
+		}
+	}
+	for i := 1; i <= 2; i++ {
+		thread := model.Thread{
+			ID:            fmt.Sprintf("chat-%d-thread", i),
+			Title:         fmt.Sprintf("Chat %d", i),
+			CWD:           fmt.Sprintf("/Users/example/Documents/Codex/2026-04-2%d/chat-%d", i, i),
+			ProjectName:   fmt.Sprintf("chat-%d", i),
+			DirectoryName: fmt.Sprintf("chat-%d", i),
+			UpdatedAt:     int64(100 + i),
+			Raw:           json.RawMessage(fmt.Sprintf(`{"id":"chat-%d-thread"}`, i)),
+		}
+		if err := service.store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread(%s) failed: %v", thread.ID, err)
+		}
+	}
+
+	page1, err := service.handleCommand(ctx, 123456789, 0, "/projects", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/projects) failed: %v", err)
+	}
+	if !strings.Contains(page1.Text, "Project page 1/3") || !strings.Contains(page1.Text, "project-5") || !strings.Contains(page1.Text, "project-4") || strings.Contains(page1.Text, "project-3") {
+		t.Fatalf("page1 text =\n%s\nwant first two recent projects only", page1.Text)
+	}
+	if !strings.Contains(page1.Text, "Latest Chats: showing 1 of 2") || !strings.Contains(page1.Text, "Chat 2") || strings.Contains(page1.Text, "Chat 1") {
+		t.Fatalf("page1 text =\n%s\nwant latest one chat preview", page1.Text)
+	}
+	nextToken := callbackTokenForButton(page1.Buttons, ">")
+	if nextToken == "" {
+		t.Fatalf("page1 buttons = %#v, want next button", page1.Buttons)
+	}
+	page2, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, nextToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(next projects page) failed: %v", err)
+	}
+	if !strings.Contains(page2.Text, "Project page 2/3") || !strings.Contains(page2.Text, "project-3") || !strings.Contains(page2.Text, "project-2") || strings.Contains(page2.Text, "project-5") {
+		t.Fatalf("page2 text =\n%s\nwant second page projects only", page2.Text)
+	}
+	if !strings.Contains(page2.Text, "Chat 2") || strings.Contains(page2.Text, "Chat 1") {
+		t.Fatalf("page2 text =\n%s\nwant same latest chat preview", page2.Text)
+	}
+}
+
+func TestOpenChatsPaginatesAndChatSelectionBindsThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	service.cfg.ChatsPageSize = 3
+	ctx := context.Background()
+	for i := 1; i <= 5; i++ {
+		thread := model.Thread{
+			ID:            fmt.Sprintf("chat-%d-thread", i),
+			Title:         fmt.Sprintf("Chat %d", i),
+			CWD:           fmt.Sprintf("/Users/example/Documents/Codex/2026-04-2%d/chat-%d", i, i),
+			ProjectName:   fmt.Sprintf("chat-%d", i),
+			DirectoryName: fmt.Sprintf("chat-%d", i),
+			UpdatedAt:     int64(i * 10),
+			Raw:           json.RawMessage(fmt.Sprintf(`{"id":"chat-%d-thread"}`, i)),
+		}
+		if err := service.store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread(%s) failed: %v", thread.ID, err)
+		}
+	}
+
+	projects, err := service.handleCommand(ctx, 123456789, 0, "/projects", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/projects) failed: %v", err)
+	}
+	openChats := callbackTokenForButton(projects.Buttons, "Open Chats")
+	if openChats == "" {
+		t.Fatalf("/projects buttons = %#v, want Open Chats", projects.Buttons)
+	}
+	chats, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, openChats)
+	if err != nil {
+		t.Fatalf("HandleCallback(Open Chats) failed: %v", err)
+	}
+	if !strings.Contains(chats.Text, "Chats") || !strings.Contains(chats.Text, "Page 1/2") || !strings.Contains(chats.Text, "Chat 5") || strings.Contains(chats.Text, "Chat 2") {
+		t.Fatalf("chats text =\n%s\nwant first page of recent chats", chats.Text)
+	}
+	if strings.Contains(chats.Text, "New thread") || callbackTokenForButton(chats.Buttons, "New thread") != "" {
+		t.Fatalf("chats response = %#v, want no New thread action", chats)
+	}
+	chatToken := callbackTokenForButton(chats.Buttons, "Chat 1")
+	if chatToken == "" {
+		t.Fatalf("chats buttons = %#v, want first chat button", chats.Buttons)
+	}
+	opened, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, chatToken)
+	if err != nil {
+		t.Fatalf("HandleCallback(Chat 1) failed: %v", err)
+	}
+	if opened == nil || opened.ThreadID != "chat-5-thread" {
+		t.Fatalf("opened = %#v, want newest chat thread", opened)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("GetBinding failed: %v", err)
+	}
+	if binding == nil || binding.ThreadID != "chat-5-thread" {
+		t.Fatalf("binding = %#v, want selected chat binding", binding)
+	}
+}
+
+func TestProjectsCloseDeletesMenuMessage(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	response, err := service.closeProjectsMenu(ctx, 123456789, 0, 42)
+	if err != nil {
+		t.Fatalf("closeProjectsMenu failed: %v", err)
+	}
+	if response == nil || response.CallbackText != "Closed." || response.Text != "" {
+		t.Fatalf("response = %#v, want callback-only closed response", response)
+	}
+	if len(sender.deletes) != 1 || sender.deletes[0].messageID != 42 {
+		t.Fatalf("deletes = %#v, want deleted menu message 42", sender.deletes)
 	}
 }
 
@@ -445,7 +697,7 @@ func TestProjectOpenShowsNewThreadMenu(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleCommand(/projects) failed: %v", err)
 	}
-	token := callbackTokenForButton(projects.Buttons, "project")
+	token := callbackTokenForButton(projects.Buttons, "Project 1")
 	if token == "" {
 		t.Fatalf("/projects buttons = %#v, want project button", projects.Buttons)
 	}
@@ -627,6 +879,121 @@ func TestProjectNewThreadTurnStartFailureSavesThread(t *testing.T) {
 	}
 	if binding == nil || binding.ThreadID != "new-thread-id" {
 		t.Fatalf("binding = %#v, want new thread binding for recovery", binding)
+	}
+}
+
+func TestNewChatCommandCreatesThreadWithoutCWDAndBinds(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "new-chat-thread", "title": "New chat"}},
+		threadReads: map[string]map[string]any{
+			"new-chat-thread": {
+				"thread": map[string]any{
+					"id":     "new-chat-thread",
+					"title":  "New chat",
+					"status": "active",
+					"turns": []any{map[string]any{
+						"id":     "started-turn",
+						"status": "inProgress",
+						"items":  []any{map[string]any{"id": "user-item", "type": "userMessage", "content": []any{map[string]any{"text": "first chat prompt"}}}},
+					}},
+				},
+			},
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/newchat first chat prompt", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != "new-chat-thread" || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want new chat thread/turn", response)
+	}
+	if len(stub.threadStartCalls) != 1 || stub.threadStartCalls[0] != "" {
+		t.Fatalf("threadStartCalls = %#v, want no cwd", stub.threadStartCalls)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one turn start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.threadID != "new-chat-thread" || got.message != "first chat prompt" || got.cwd != "" {
+		t.Fatalf("turnStartCall = %#v, want new chat first prompt without cwd", got)
+	}
+	thread, err := service.store.GetThread(ctx, "new-chat-thread")
+	if err != nil {
+		t.Fatalf("GetThread failed: %v", err)
+	}
+	if thread == nil || thread.ProjectName != "Chats" {
+		t.Fatalf("thread = %#v, want stored Chats project fallback", thread)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("GetBinding failed: %v", err)
+	}
+	if binding == nil || binding.ThreadID != "new-chat-thread" {
+		t.Fatalf("binding = %#v, want new chat binding", binding)
+	}
+}
+
+func TestNewChatCommandRejectsMissingThreadID(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{threadStartResult: map[string]any{"thread": map[string]any{"title": "New chat"}}}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/newchat first chat prompt", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "could not create thread") {
+		t.Fatalf("response = %#v, want missing thread id error", response)
+	}
+	if len(stub.turnStartCalls) != 0 {
+		t.Fatalf("turnStartCalls = %#v, want no turn start without thread id", stub.turnStartCalls)
+	}
+}
+
+func TestNewChatCommandTurnStartFailureSavesAndBindsThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "new-chat-thread", "title": "New chat"}},
+		turnStartErr:      errors.New("turn start failed"),
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/newchat first chat prompt", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/newchat) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "Created thread") || !strings.Contains(response.Text, "could not start first turn") {
+		t.Fatalf("response = %#v, want recoverable turn start failure", response)
+	}
+	thread, err := service.store.GetThread(ctx, "new-chat-thread")
+	if err != nil {
+		t.Fatalf("GetThread failed: %v", err)
+	}
+	if thread == nil || thread.ProjectName != "Chats" {
+		t.Fatalf("thread = %#v, want saved Chats thread", thread)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("GetBinding failed: %v", err)
+	}
+	if binding == nil || binding.ThreadID != "new-chat-thread" {
+		t.Fatalf("binding = %#v, want new chat binding for recovery", binding)
 	}
 }
 
@@ -3588,13 +3955,22 @@ func countButtonsContaining(rows [][]model.ButtonSpec, label string) int {
 	return count
 }
 
+func requireTextOrder(t *testing.T, text, before, after string) {
+	t.Helper()
+	beforeIndex := strings.Index(text, before)
+	afterIndex := strings.Index(text, after)
+	if beforeIndex < 0 || afterIndex < 0 || beforeIndex >= afterIndex {
+		t.Fatalf("text order = before %q at %d, after %q at %d in:\n%s", before, beforeIndex, after, afterIndex, text)
+	}
+}
+
 func openOnlyProjectMenu(t *testing.T, service *Service, ctx context.Context) *DirectResponse {
 	t.Helper()
 	projects, err := service.handleCommand(ctx, 123456789, 0, "/projects", 0)
 	if err != nil {
 		t.Fatalf("handleCommand(/projects) failed: %v", err)
 	}
-	token := callbackTokenForButton(projects.Buttons, "project")
+	token := callbackTokenForButton(projects.Buttons, "Project 1")
 	if token == "" {
 		t.Fatalf("/projects buttons = %#v, want project button", projects.Buttons)
 	}

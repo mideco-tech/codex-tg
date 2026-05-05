@@ -41,22 +41,25 @@ func (p Paths) Ensure() error {
 }
 
 type Config struct {
-	Paths                 Paths
-	CodexBin              string
-	AppServerListen       string
-	TelegramBotToken      string
-	AllowedUserIDs        []int64
-	AllowedChatIDs        []int64
-	DefaultCWD            string
-	PanelMode             string
-	LogEnabled            bool
-	DiagnosticLogs        bool
-	ObserverPollInterval  time.Duration
-	RequestTimeout        time.Duration
-	IndexRefreshInterval  time.Duration
-	AttachRefreshInterval time.Duration
-	DeliveryRetryBase     time.Duration
-	DeliveryMaxAttempts   int
+	Paths                       Paths
+	CodexBin                    string
+	AppServerListen             string
+	TelegramBotToken            string
+	AllowedUserIDs              []int64
+	AllowedChatIDs              []int64
+	DefaultCWD                  string
+	PanelMode                   string
+	LogEnabled                  bool
+	DiagnosticLogs              bool
+	ObserverPollInterval        time.Duration
+	RequestTimeout              time.Duration
+	IndexRefreshInterval        time.Duration
+	AttachRefreshInterval       time.Duration
+	DeliveryRetryBase           time.Duration
+	DeliveryMaxAttempts         int
+	ProjectsProjectPreviewLimit int
+	ProjectsChatPreviewLimit    int
+	ChatsPageSize               int
 }
 
 func FromEnv() Config {
@@ -78,58 +81,67 @@ func FromEnv() Config {
 		token = strings.TrimSpace(os.Getenv("CTR_TELEGRAM_BOT_TOKEN"))
 	}
 	return Config{
-		Paths:                 paths,
-		CodexBin:              codexBin,
-		AppServerListen:       listen,
-		TelegramBotToken:      token,
-		AllowedUserIDs:        parseInt64List(envFirst("CTR_GO_ALLOWED_USER_IDS", "CTR_ALLOWED_USER_IDS")),
-		AllowedChatIDs:        parseInt64List(envFirst("CTR_GO_ALLOWED_CHAT_IDS", "CTR_ALLOWED_CHAT_IDS")),
-		DefaultCWD:            envString("CTR_GO_DEFAULT_CWD", cwd),
-		PanelMode:             normalizePanelMode(envString("CTR_GO_PANEL_MODE", "per_run")),
-		LogEnabled:            envBool("CTR_GO_LOG_ENABLED", true),
-		DiagnosticLogs:        envBool("CTR_GO_DIAGNOSTIC_LOGS", true),
-		ObserverPollInterval:  envDurationSeconds("CTR_GO_OBSERVER_POLL_SECONDS", 5*time.Second),
-		RequestTimeout:        envDurationSeconds("CTR_GO_REQUEST_TIMEOUT_SECONDS", 30*time.Second),
-		IndexRefreshInterval:  envDurationSeconds("CTR_GO_INDEX_REFRESH_SECONDS", 45*time.Second),
-		AttachRefreshInterval: envDurationSeconds("CTR_GO_ATTACH_REFRESH_SECONDS", 20*time.Second),
-		DeliveryRetryBase:     envDurationSeconds("CTR_GO_DELIVERY_RETRY_SECONDS", 5*time.Second),
-		DeliveryMaxAttempts:   envInt("CTR_GO_DELIVERY_MAX_ATTEMPTS", 5),
+		Paths:                       paths,
+		CodexBin:                    codexBin,
+		AppServerListen:             listen,
+		TelegramBotToken:            token,
+		AllowedUserIDs:              parseInt64List(envFirst("CTR_GO_ALLOWED_USER_IDS", "CTR_ALLOWED_USER_IDS")),
+		AllowedChatIDs:              parseInt64List(envFirst("CTR_GO_ALLOWED_CHAT_IDS", "CTR_ALLOWED_CHAT_IDS")),
+		DefaultCWD:                  envString("CTR_GO_DEFAULT_CWD", cwd),
+		PanelMode:                   normalizePanelMode(envString("CTR_GO_PANEL_MODE", "per_run")),
+		LogEnabled:                  envBool("CTR_GO_LOG_ENABLED", true),
+		DiagnosticLogs:              envBool("CTR_GO_DIAGNOSTIC_LOGS", true),
+		ObserverPollInterval:        envDurationSeconds("CTR_GO_OBSERVER_POLL_SECONDS", 5*time.Second),
+		RequestTimeout:              envDurationSeconds("CTR_GO_REQUEST_TIMEOUT_SECONDS", 30*time.Second),
+		IndexRefreshInterval:        envDurationSeconds("CTR_GO_INDEX_REFRESH_SECONDS", 45*time.Second),
+		AttachRefreshInterval:       envDurationSeconds("CTR_GO_ATTACH_REFRESH_SECONDS", 20*time.Second),
+		DeliveryRetryBase:           envDurationSeconds("CTR_GO_DELIVERY_RETRY_SECONDS", 5*time.Second),
+		DeliveryMaxAttempts:         envInt("CTR_GO_DELIVERY_MAX_ATTEMPTS", 5),
+		ProjectsProjectPreviewLimit: envPositiveInt("CTR_GO_PROJECTS_PROJECT_PREVIEW_LIMIT", 7),
+		ProjectsChatPreviewLimit:    envPositiveInt("CTR_GO_PROJECTS_CHAT_PREVIEW_LIMIT", 3),
+		ChatsPageSize:               envPositiveInt("CTR_GO_CHATS_PAGE_SIZE", 8),
 	}
 }
 
 func (c Config) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Home                  string  `json:"home"`
-		DBPath                string  `json:"db_path"`
-		CodexBin              string  `json:"codex_bin"`
-		AppServerListen       string  `json:"app_server_listen"`
-		HasTelegramToken      bool    `json:"telegram_configured"`
-		AllowedUserIDs        []int64 `json:"allowed_user_ids"`
-		AllowedChatIDs        []int64 `json:"allowed_chat_ids"`
-		DefaultCWD            string  `json:"default_cwd"`
-		PanelMode             string  `json:"panel_mode"`
-		LogEnabled            bool    `json:"log_enabled"`
-		DiagnosticLogs        bool    `json:"diagnostic_logs"`
-		ObserverPollSeconds   float64 `json:"observer_poll_seconds"`
-		RequestTimeoutSeconds float64 `json:"request_timeout_seconds"`
-		GoOS                  string  `json:"goos"`
-		GoArch                string  `json:"goarch"`
+		Home                        string  `json:"home"`
+		DBPath                      string  `json:"db_path"`
+		CodexBin                    string  `json:"codex_bin"`
+		AppServerListen             string  `json:"app_server_listen"`
+		HasTelegramToken            bool    `json:"telegram_configured"`
+		AllowedUserIDs              []int64 `json:"allowed_user_ids"`
+		AllowedChatIDs              []int64 `json:"allowed_chat_ids"`
+		DefaultCWD                  string  `json:"default_cwd"`
+		PanelMode                   string  `json:"panel_mode"`
+		LogEnabled                  bool    `json:"log_enabled"`
+		DiagnosticLogs              bool    `json:"diagnostic_logs"`
+		ObserverPollSeconds         float64 `json:"observer_poll_seconds"`
+		RequestTimeoutSeconds       float64 `json:"request_timeout_seconds"`
+		ProjectsProjectPreviewLimit int     `json:"projects_project_preview_limit"`
+		ProjectsChatPreviewLimit    int     `json:"projects_chat_preview_limit"`
+		ChatsPageSize               int     `json:"chats_page_size"`
+		GoOS                        string  `json:"goos"`
+		GoArch                      string  `json:"goarch"`
 	}{
-		Home:                  c.Paths.Home,
-		DBPath:                c.Paths.DBPath,
-		CodexBin:              c.CodexBin,
-		AppServerListen:       c.AppServerListen,
-		HasTelegramToken:      c.TelegramBotToken != "",
-		AllowedUserIDs:        c.AllowedUserIDs,
-		AllowedChatIDs:        c.AllowedChatIDs,
-		DefaultCWD:            c.DefaultCWD,
-		PanelMode:             normalizePanelMode(c.PanelMode),
-		LogEnabled:            c.LogEnabled,
-		DiagnosticLogs:        c.DiagnosticLogs,
-		ObserverPollSeconds:   c.ObserverPollInterval.Seconds(),
-		RequestTimeoutSeconds: c.RequestTimeout.Seconds(),
-		GoOS:                  runtime.GOOS,
-		GoArch:                runtime.GOARCH,
+		Home:                        c.Paths.Home,
+		DBPath:                      c.Paths.DBPath,
+		CodexBin:                    c.CodexBin,
+		AppServerListen:             c.AppServerListen,
+		HasTelegramToken:            c.TelegramBotToken != "",
+		AllowedUserIDs:              c.AllowedUserIDs,
+		AllowedChatIDs:              c.AllowedChatIDs,
+		DefaultCWD:                  c.DefaultCWD,
+		PanelMode:                   normalizePanelMode(c.PanelMode),
+		LogEnabled:                  c.LogEnabled,
+		DiagnosticLogs:              c.DiagnosticLogs,
+		ObserverPollSeconds:         c.ObserverPollInterval.Seconds(),
+		RequestTimeoutSeconds:       c.RequestTimeout.Seconds(),
+		ProjectsProjectPreviewLimit: positiveOrDefault(c.ProjectsProjectPreviewLimit, 7),
+		ProjectsChatPreviewLimit:    positiveOrDefault(c.ProjectsChatPreviewLimit, 3),
+		ChatsPageSize:               positiveOrDefault(c.ChatsPageSize, 8),
+		GoOS:                        runtime.GOOS,
+		GoArch:                      runtime.GOARCH,
 	})
 }
 
@@ -161,6 +173,17 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func envPositiveInt(key string, fallback int) int {
+	return positiveOrDefault(envInt(key, fallback), fallback)
+}
+
+func positiveOrDefault(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func envBool(key string, fallback bool) bool {

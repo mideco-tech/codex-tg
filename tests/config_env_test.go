@@ -25,6 +25,9 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	t.Setenv("CTR_GO_ATTACH_REFRESH_SECONDS", "21")
 	t.Setenv("CTR_GO_DELIVERY_RETRY_SECONDS", "6")
 	t.Setenv("CTR_GO_DELIVERY_MAX_ATTEMPTS", "8")
+	t.Setenv("CTR_GO_PROJECTS_PROJECT_PREVIEW_LIMIT", "11")
+	t.Setenv("CTR_GO_PROJECTS_CHAT_PREVIEW_LIMIT", "4")
+	t.Setenv("CTR_GO_CHATS_PAGE_SIZE", "9")
 
 	cfg := config.FromEnv()
 
@@ -69,6 +72,33 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	}
 	if got, want := cfg.DeliveryMaxAttempts, 8; got != want {
 		t.Fatalf("DeliveryMaxAttempts = %d, want %d", got, want)
+	}
+	if got, want := cfg.ProjectsProjectPreviewLimit, 11; got != want {
+		t.Fatalf("ProjectsProjectPreviewLimit = %d, want %d", got, want)
+	}
+	if got, want := cfg.ProjectsChatPreviewLimit, 4; got != want {
+		t.Fatalf("ProjectsChatPreviewLimit = %d, want %d", got, want)
+	}
+	if got, want := cfg.ChatsPageSize, 9; got != want {
+		t.Fatalf("ChatsPageSize = %d, want %d", got, want)
+	}
+}
+
+func TestFromEnvProjectChatLimitsClampInvalidValues(t *testing.T) {
+	t.Setenv("CTR_GO_PROJECTS_PROJECT_PREVIEW_LIMIT", "0")
+	t.Setenv("CTR_GO_PROJECTS_CHAT_PREVIEW_LIMIT", "-1")
+	t.Setenv("CTR_GO_CHATS_PAGE_SIZE", "wat")
+
+	cfg := config.FromEnv()
+
+	if got, want := cfg.ProjectsProjectPreviewLimit, 7; got != want {
+		t.Fatalf("ProjectsProjectPreviewLimit = %d, want default %d", got, want)
+	}
+	if got, want := cfg.ProjectsChatPreviewLimit, 3; got != want {
+		t.Fatalf("ProjectsChatPreviewLimit = %d, want default %d", got, want)
+	}
+	if got, want := cfg.ChatsPageSize, 8; got != want {
+		t.Fatalf("ChatsPageSize = %d, want default %d", got, want)
 	}
 }
 

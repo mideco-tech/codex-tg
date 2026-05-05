@@ -321,6 +321,14 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 		return s.setCodexModel(ctx, chatID, topicID, messageID, payload)
 	case "settings_reasoning_set":
 		return s.setCodexReasoningEffort(ctx, chatID, topicID, messageID, payload)
+	case "projects_page":
+		return s.projectsPage(ctx, chatID, topicID, messageID, payload)
+	case "projects_close":
+		return s.closeProjectsMenu(ctx, chatID, topicID, messageID)
+	case "chats_open", "chats_page":
+		return s.chatsPage(ctx, chatID, topicID, messageID, payload)
+	case "chat_open":
+		return s.openChatThread(ctx, chatID, topicID, route.ThreadID)
 	case "project_open":
 		return s.projectMenu(ctx, payload)
 	case "project_new_thread":
@@ -1251,7 +1259,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 	case "/start":
 		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/newchat <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -1304,6 +1312,8 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		return s.projectsOverview(ctx)
 	case "/new":
 		return s.newThreadCommand(ctx, chatID, topicID, rest)
+	case "/newchat":
+		return s.newChatCommand(ctx, chatID, topicID, rest)
 	case "/show":
 		decision, err := s.resolveRoute(ctx, chatID, topicID, rest, replyToMessageID)
 		if err != nil {

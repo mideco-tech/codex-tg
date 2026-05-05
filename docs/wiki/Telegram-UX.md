@@ -38,6 +38,13 @@ The `New thread` action arms the current chat/topic so the next plain-text
 message creates a new App Server thread in that project cwd and starts the first
 turn with that text.
 
+Cached threads whose cwd is under `Documents/Codex` are treated as Codex UI
+`Chats`, not normal projects. The main `/projects` view shows recent project
+workspaces and the latest Chat previews; `Open Chats` opens the full paginated
+Chat list. Selecting a Chat opens and binds that single thread. New Chat
+starts use `/newchat <prompt>` and do not go through a project `New thread`
+menu or selected project cwd.
+
 The Telegram bot does not accept arbitrary filesystem paths for this flow.
 Creating or editing project work directories is a separate future feature.
 

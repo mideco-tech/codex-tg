@@ -14,7 +14,13 @@ import (
 	"github.com/mideco-tech/codex-tg/internal/storage"
 )
 
-const newThreadStateTTL = 15 * time.Minute
+const (
+	newThreadStateTTL                  = 15 * time.Minute
+	chatsProjectName                   = "Chats"
+	defaultProjectsProjectPreviewLimit = 7
+	defaultProjectsChatPreviewLimit    = 3
+	defaultChatsPageSize               = 8
+)
 
 type projectWorkspace struct {
 	Key           string `json:"key,omitempty"`
@@ -33,13 +39,23 @@ type pendingNewThreadState struct {
 	ExpiresAt     string `json:"expires_at"`
 }
 
-func (s *Service) projectWorkspaces(ctx context.Context) ([]projectWorkspace, error) {
+type projectCatalog struct {
+	Workspaces []projectWorkspace
+	Chats      []model.Thread
+}
+
+func (s *Service) projectCatalog(ctx context.Context) (projectCatalog, error) {
 	threads, err := s.store.ListThreads(ctx, 500, "")
 	if err != nil {
-		return nil, err
+		return projectCatalog{}, err
 	}
 	grouped := map[string]*projectWorkspace{}
+	chats := []model.Thread{}
 	for _, thread := range threads {
+		if isCodexChatThread(thread) {
+			chats = append(chats, thread)
+			continue
+		}
 		cwdKey := model.NormalizePath(thread.CWD)
 		if cwdKey == "" {
 			cwdKey = "thread:" + thread.ID
@@ -73,6 +89,9 @@ func (s *Service) projectWorkspaces(ctx context.Context) ([]projectWorkspace, er
 		workspaces = append(workspaces, *workspace)
 	}
 	sort.Slice(workspaces, func(i, j int) bool {
+		if workspaces[i].UpdatedAt != workspaces[j].UpdatedAt {
+			return workspaces[i].UpdatedAt > workspaces[j].UpdatedAt
+		}
 		leftName := strings.ToLower(workspaces[i].ProjectName)
 		rightName := strings.ToLower(workspaces[j].ProjectName)
 		if leftName != rightName {
@@ -82,8 +101,60 @@ func (s *Service) projectWorkspaces(ctx context.Context) ([]projectWorkspace, er
 		rightCWD := strings.ToLower(model.NormalizePath(workspaces[j].CWD))
 		return leftCWD < rightCWD
 	})
+	sort.Slice(chats, func(i, j int) bool {
+		if chats[i].UpdatedAt != chats[j].UpdatedAt {
+			return chats[i].UpdatedAt > chats[j].UpdatedAt
+		}
+		return strings.ToLower(chats[i].Label()) < strings.ToLower(chats[j].Label())
+	})
 	assignProjectWorkspaceKeys(workspaces)
-	return workspaces, nil
+	return projectCatalog{Workspaces: workspaces, Chats: chats}, nil
+}
+
+func (s *Service) projectWorkspaces(ctx context.Context) ([]projectWorkspace, error) {
+	catalog, err := s.projectCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return catalog.Workspaces, nil
+}
+
+func isCodexChatThread(thread model.Thread) bool {
+	if isCodexChatsCWD(thread.CWD) {
+		return true
+	}
+	return strings.TrimSpace(thread.CWD) == "" && strings.EqualFold(strings.TrimSpace(thread.ProjectName), chatsProjectName)
+}
+
+func isCodexChatsCWD(cwd string) bool {
+	normalized := strings.ToLower(model.NormalizePath(cwd))
+	if normalized == "" {
+		return false
+	}
+	parts := strings.Split(strings.Trim(normalized, "/"), "/")
+	if len(parts) >= 4 && parts[0] == "users" && parts[2] == "documents" && parts[3] == "codex" {
+		return true
+	}
+	return len(parts) >= 5 && strings.HasSuffix(parts[0], ":") && parts[1] == "users" && parts[3] == "documents" && parts[4] == "codex"
+}
+
+func (s *Service) projectsProjectPreviewLimit() int {
+	return positiveOrDefault(s.cfg.ProjectsProjectPreviewLimit, defaultProjectsProjectPreviewLimit)
+}
+
+func (s *Service) projectsChatPreviewLimit() int {
+	return positiveOrDefault(s.cfg.ProjectsChatPreviewLimit, defaultProjectsChatPreviewLimit)
+}
+
+func (s *Service) chatsPageSize() int {
+	return positiveOrDefault(s.cfg.ChatsPageSize, defaultChatsPageSize)
+}
+
+func positiveOrDefault(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func assignProjectWorkspaceKeys(workspaces []projectWorkspace) {
@@ -124,23 +195,97 @@ func projectWorkspaceKeyBase(workspace projectWorkspace) string {
 }
 
 func (s *Service) projectsOverview(ctx context.Context) (*DirectResponse, error) {
-	workspaces, err := s.projectWorkspaces(ctx)
+	return s.projectsOverviewPage(ctx, 0)
+}
+
+func (s *Service) projectsOverviewPage(ctx context.Context, page int) (*DirectResponse, error) {
+	catalog, err := s.projectCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(workspaces) == 0 {
+	if len(catalog.Workspaces) == 0 && len(catalog.Chats) == 0 {
 		return &DirectResponse{Text: "No cached projects yet. Try /status or wait for sync."}, nil
 	}
-	lines := []string{"Projects"}
-	buttons := make([][]model.ButtonSpec, 0, len(workspaces))
-	for index, workspace := range workspaces {
+	projectLimit := s.projectsProjectPreviewLimit()
+	chatLimit := s.projectsChatPreviewLimit()
+	projectPages := maxInt(1, (len(catalog.Workspaces)+projectLimit-1)/projectLimit)
+	page = clampInt(page, 0, projectPages-1)
+	projectStart := page * projectLimit
+	projectEnd := min(projectStart+projectLimit, len(catalog.Workspaces))
+	chatEnd := min(chatLimit, len(catalog.Chats))
+
+	lines := []string{
+		"Projects",
+		fmt.Sprintf("Project page %d/%d (showing %d of %d)", page+1, projectPages, maxInt(0, projectEnd-projectStart), len(catalog.Workspaces)),
+		fmt.Sprintf("Latest Chats: showing %d of %d", chatEnd, len(catalog.Chats)),
+		"Open Chats to view all Chat threads.",
+	}
+	buttons := [][]model.ButtonSpec{
+		{
+			s.callbackButton(ctx, "<", "projects_page", "", "", "", map[string]any{"page": page - 1}),
+			s.callbackButton(ctx, "Close", "projects_close", "", "", "", nil),
+			s.callbackButton(ctx, ">", "projects_page", "", "", "", map[string]any{"page": page + 1}),
+		},
+		{s.callbackButton(ctx, "Open Chats", "chats_open", "", "", "", map[string]any{"page": 0})},
+	}
+	if len(catalog.Workspaces) == 0 {
+		lines = append(lines, "", "No cached projects outside Chats.")
+	}
+	for index, workspace := range catalog.Workspaces[projectStart:projectEnd] {
+		displayIndex := projectStart + index + 1
 		lines = append(lines,
-			fmt.Sprintf("%d. %s (%d thread(s))", index+1, workspace.ProjectName, workspace.ThreadCount),
+			fmt.Sprintf("%d. %s (%d thread(s))", displayIndex, workspace.ProjectName, workspace.ThreadCount),
 			fmt.Sprintf("   key: %s", workspace.Key),
 			fmt.Sprintf("   cwd: %s", settingValueLabel(workspace.CWD, "unknown")),
 		)
 		buttons = append(buttons, []model.ButtonSpec{
-			s.callbackButton(ctx, shortButtonLabel(fmt.Sprintf("%d. %s", index+1, workspace.ProjectName)), "project_open", "", "", "", projectWorkspacePayload(workspace)),
+			s.callbackButton(ctx, fmt.Sprintf("Project %d", displayIndex), "project_open", "", "", "", projectWorkspacePayload(workspace)),
+		})
+	}
+	if chatEnd > 0 {
+		lines = append(lines, "", "Latest Chats")
+		for index, thread := range catalog.Chats[:chatEnd] {
+			displayIndex := index + 1
+			lines = append(lines, fmt.Sprintf("%d. %s | %s", displayIndex, firstNonEmpty(thread.Title, thread.ShortID()), thread.ShortID()))
+			buttons = append(buttons, []model.ButtonSpec{
+				s.callbackButton(ctx, fmt.Sprintf("Chat %d", displayIndex), "chat_open", thread.ID, "", "", nil),
+			})
+		}
+	}
+	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
+}
+
+func (s *Service) chatsOverviewPage(ctx context.Context, page int) (*DirectResponse, error) {
+	catalog, err := s.projectCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pageSize := s.chatsPageSize()
+	pageCount := maxInt(1, (len(catalog.Chats)+pageSize-1)/pageSize)
+	page = clampInt(page, 0, pageCount-1)
+	start := page * pageSize
+	end := min(start+pageSize, len(catalog.Chats))
+	lines := []string{
+		"Chats",
+		fmt.Sprintf("Page %d/%d (showing %d of %d)", page+1, pageCount, maxInt(0, end-start), len(catalog.Chats)),
+		"Use /newchat <prompt> to create a new Chat.",
+	}
+	buttons := [][]model.ButtonSpec{
+		{
+			s.callbackButton(ctx, "<", "chats_page", "", "", "", map[string]any{"page": page - 1}),
+			s.callbackButton(ctx, "Close", "projects_close", "", "", "", nil),
+			s.callbackButton(ctx, ">", "chats_page", "", "", "", map[string]any{"page": page + 1}),
+		},
+	}
+	if len(catalog.Chats) == 0 {
+		lines = append(lines, "", "No cached Chats yet.")
+		return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
+	}
+	for index, thread := range catalog.Chats[start:end] {
+		displayIndex := start + index + 1
+		lines = append(lines, fmt.Sprintf("%d. %s | %s", displayIndex, firstNonEmpty(thread.Title, thread.ShortID()), thread.ShortID()))
+		buttons = append(buttons, []model.ButtonSpec{
+			s.callbackButton(ctx, fmt.Sprintf("Chat %d", index+1), "chat_open", thread.ID, "", "", nil),
 		})
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
@@ -190,6 +335,53 @@ func payloadMapInt(values map[string]any, key string) int {
 	}
 }
 
+func (s *Service) projectsPage(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
+	return s.editOrSendProjectsResponse(ctx, chatID, topicID, messageID, "Projects", func(ctx context.Context) (*DirectResponse, error) {
+		return s.projectsOverviewPage(ctx, payloadMapInt(payload, "page"))
+	})
+}
+
+func (s *Service) chatsPage(ctx context.Context, chatID, topicID, messageID int64, payload map[string]any) (*DirectResponse, error) {
+	return s.editOrSendProjectsResponse(ctx, chatID, topicID, messageID, "Chats", func(ctx context.Context) (*DirectResponse, error) {
+		return s.chatsOverviewPage(ctx, payloadMapInt(payload, "page"))
+	})
+}
+
+func (s *Service) closeProjectsMenu(ctx context.Context, chatID, topicID, messageID int64) (*DirectResponse, error) {
+	s.mu.RLock()
+	sender := s.sender
+	s.mu.RUnlock()
+	if sender != nil && messageID != 0 {
+		if err := sender.DeleteMessage(ctx, chatID, topicID, messageID); err == nil {
+			return &DirectResponse{CallbackText: "Closed."}, nil
+		}
+		if err := sender.EditMessage(ctx, chatID, topicID, messageID, "Closed.", nil); err == nil {
+			return &DirectResponse{CallbackText: "Closed."}, nil
+		}
+	}
+	return &DirectResponse{Text: "Closed.", CallbackText: "Closed."}, nil
+}
+
+func (s *Service) editOrSendProjectsResponse(ctx context.Context, chatID, topicID, messageID int64, callbackText string, renderer func(context.Context) (*DirectResponse, error)) (*DirectResponse, error) {
+	response, err := renderer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return &DirectResponse{CallbackText: callbackText}, nil
+	}
+	response.CallbackText = callbackText
+	s.mu.RLock()
+	sender := s.sender
+	s.mu.RUnlock()
+	if sender != nil && messageID != 0 && strings.TrimSpace(response.Text) != "" {
+		if err := sender.EditMessage(ctx, chatID, topicID, messageID, response.Text, response.Buttons); err == nil {
+			return &DirectResponse{CallbackText: callbackText}, nil
+		}
+	}
+	return response, nil
+}
+
 func (s *Service) projectWorkspaceFromCallback(ctx context.Context, payload map[string]any) (projectWorkspace, bool) {
 	requested := projectWorkspaceFromPayload(payload)
 	requestedCWD := model.NormalizePath(requested.CWD)
@@ -206,6 +398,33 @@ func (s *Service) projectWorkspaceFromCallback(ctx context.Context, payload map[
 		}
 	}
 	return projectWorkspace{}, false
+}
+
+func (s *Service) openChatThread(ctx context.Context, chatID, topicID int64, threadID string) (*DirectResponse, error) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return &DirectResponse{Text: "This Chat button is stale. Use Open Chats to refresh."}, nil
+	}
+	thread, err := s.store.GetThread(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if thread == nil || !isCodexChatThread(*thread) {
+		return &DirectResponse{Text: "This Chat button is stale. Use Open Chats to refresh."}, nil
+	}
+	if err := s.store.SetBinding(ctx, chatID, topicID, threadID, model.BindingModeBound); err != nil {
+		return nil, err
+	}
+	s.kickBootstrap()
+	response, err := s.showThread(ctx, chatID, topicID, threadID, true)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		response = &DirectResponse{}
+	}
+	response.CallbackText = "Opened Chat."
+	return response, nil
 }
 
 func (s *Service) projectMenu(ctx context.Context, payload map[string]any) (*DirectResponse, error) {
@@ -303,6 +522,16 @@ func (s *Service) newThreadCommand(ctx context.Context, chatID, topicID int64, r
 		DirectoryName: workspace.DirectoryName,
 		CWD:           workspace.CWD,
 	}, strings.TrimSpace(prompt))
+}
+
+func (s *Service) newChatCommand(ctx context.Context, chatID, topicID int64, rest string) (*DirectResponse, error) {
+	prompt := strings.TrimSpace(rest)
+	if prompt == "" {
+		return &DirectResponse{Text: "Usage: /newchat <prompt>"}, nil
+	}
+	return s.createThreadFromProjectPrompt(ctx, chatID, topicID, pendingNewThreadState{
+		ProjectName: chatsProjectName,
+	}, prompt)
 }
 
 func (s *Service) newThreadUsage(ctx context.Context) (*DirectResponse, error) {
@@ -443,6 +672,7 @@ func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, top
 			"error":     refreshErr,
 		})
 	}
+	s.ensureNewChatThreadFallback(ctx, thread.ID, state)
 	if err := s.store.SetBinding(ctx, chatID, topicID, thread.ID, model.BindingModeBound); err != nil {
 		return nil, err
 	}
@@ -454,10 +684,30 @@ func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, top
 	return &DirectResponse{ThreadID: thread.ID, TurnID: turnID}, nil
 }
 
+func (s *Service) ensureNewChatThreadFallback(ctx context.Context, threadID string, state pendingNewThreadState) {
+	if !strings.EqualFold(strings.TrimSpace(state.ProjectName), chatsProjectName) {
+		return
+	}
+	thread, err := s.store.GetThread(ctx, threadID)
+	if err != nil || thread == nil || strings.TrimSpace(thread.CWD) != "" {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(thread.ProjectName), chatsProjectName) {
+		return
+	}
+	thread.ProjectName = chatsProjectName
+	thread.DirectoryName = firstNonEmpty(state.DirectoryName, thread.DirectoryName)
+	_ = s.store.UpsertThread(ctx, *thread)
+}
+
 func threadFromStartPayload(payload map[string]any, state pendingNewThreadState) model.Thread {
 	thread := appserver.ThreadFromPayload(payload)
 	if strings.TrimSpace(thread.CWD) == "" {
 		thread.CWD = state.CWD
+	}
+	if strings.EqualFold(strings.TrimSpace(state.ProjectName), chatsProjectName) && strings.TrimSpace(thread.CWD) == "" {
+		thread.ProjectName = chatsProjectName
+		thread.DirectoryName = firstNonEmpty(state.DirectoryName, thread.DirectoryName)
 	}
 	if strings.TrimSpace(thread.ProjectName) == "" {
 		project, directory := model.ProjectNameFromCWD(thread.CWD)

@@ -17,9 +17,11 @@ Telegram supports a project-first flow: `/projects` -> project menu -> `New thre
 
 ## UX / Operator Flow
 
-`/projects` renders project/workspace buttons grouped by normalized `cwd`. A project menu shows the workspace cwd, cached thread count, and actions: `New thread`, `Threads`, and `Bind latest`.
+`/projects` renders project/workspace buttons grouped by normalized `cwd`. Codex UI Chats under generic `Documents/Codex` paths are shown under the separate `Chats` navigation instead of as normal projects. A project menu shows the workspace cwd, cached thread count, and actions: `New thread`, `Threads`, and `Bind latest`.
 
 `New thread` arms a one-shot state for the current chat/topic. The next plain-text message calls App Server `thread/start` for that project cwd and then `turn/start` with the message text.
+
+`/newchat <prompt>` creates a new App Server thread without a cwd parameter and starts the first turn from the prompt.
 
 ## Domain Model
 

@@ -39,21 +39,35 @@ ADR: none yet; feature brief is `docs/process/create-thread-from-project-brief.m
 Primary tests:
 
 - `internal/daemon/service_test.go::TestProjectsCommandShowsProjectButtonsGroupedByCWD`
+- `internal/daemon/service_test.go::TestIsCodexChatsCWDMatchesGenericMacAndWindowsPaths`
+- `internal/daemon/service_test.go::TestProjectsCommandShowsChatsSectionAndSortsByRecency`
+- `internal/daemon/service_test.go::TestProjectsPaginationUsesPreviewLimitsAndKeepsLatestChats`
+- `internal/daemon/service_test.go::TestOpenChatsPaginatesAndChatSelectionBindsThread`
+- `internal/daemon/service_test.go::TestProjectsCloseDeletesMenuMessage`
 - `internal/daemon/service_test.go::TestProjectOpenShowsNewThreadMenu`
 - `internal/daemon/service_test.go::TestProjectNewThreadArmsThenPlainTextCreatesThread`
 - `internal/daemon/service_test.go::TestProjectNewThreadRejectsThreadStartWithoutID`
 - `internal/daemon/service_test.go::TestProjectNewThreadTurnStartFailureSavesThread`
+- `internal/daemon/service_test.go::TestNewChatCommandCreatesThreadWithoutCWDAndBinds`
+- `internal/daemon/service_test.go::TestNewChatCommandRejectsMissingThreadID`
+- `internal/daemon/service_test.go::TestNewChatCommandTurnStartFailureSavesAndBindsThread`
 - `internal/daemon/service_test.go::TestSummaryPanelDoesNotShowStalePendingUserInputButtons`
+- `tests/config_env_test.go::TestFromEnvProjectChatLimitsClampInvalidValues`
 
 Live E2E:
 
 - Open `/projects`, choose a project, press `New thread`, send a prompt, and verify a new thread/run reaches `[Final]`.
+- Open `/projects`, verify normal projects are sorted by recent activity, `Documents/Codex` threads are shown only as latest Chat previews, then open full `Chats` pagination and select a Chat.
+- Run `/newchat <prompt>`, verify the new thread reaches `[Final]`, then send a plain follow-up and verify it routes to the newly bound Chat thread.
 - Send a plain reply after creation and verify it routes to the newly bound thread.
 - Run a Plan Mode prompt with structured choices and verify choice buttons appear only on the current `[Plan]` card.
 
 Contract notes:
 
 - Project/workspace identity comes from cached thread `cwd`; this flow does not create or edit work directories.
+- Threads under generic `Documents/Codex` cwd roots are Codex UI `Chats`, not normal projects. A Chat selection opens and binds its single thread; Chat lists do not expose project `New thread`.
+- Main `/projects` uses project pagination with configurable preview limits and keeps latest Chat previews newest-first. Full Chat pagination lives behind `Open Chats`.
+- `/newchat <prompt>` creates a new App Server thread without a cwd parameter.
 - Telegram must not accept arbitrary local filesystem paths for thread creation.
 - The first prompt is required; create-only threads are out of scope for this slice.
 

@@ -34,3 +34,7 @@ Start or continue a Codex thread from GUI/CLI. The bot should render the run in 
 To start a new thread from Telegram, open `/projects`, choose a project, press
 `New thread`, then send the first prompt as the next message. The selected
 project must already exist in the cached Codex thread list.
+
+Codex UI Chats stored under `Documents/Codex` appear under the `Chats` section
+instead of as normal projects. Use `Open Chats` for the full paginated list, or
+`/newchat <prompt>` to start a new thread without choosing a project cwd.
