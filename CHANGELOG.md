@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.2.3 - 2026-05-05
+
+- Fixed the public CI secret-pattern smoke scan by replacing private-looking Windows path fixtures in tests with `C:\Users\you\...` examples.
+- Added `/newchat` to the Telegram Bot API command menu registration so the UI command button exposes the existing new Chat flow.
+- Added unit coverage for the Telegram command menu to keep `/newchat` registered and prevent duplicate command names.
+- Rebuilt and restarted the macOS LaunchAgent daemon, then verified Telegram `getMyCommands` readback includes `newchat`.
+
 ## v0.2.2 - 2026-05-05
 
 - Fixed a Details binding regression where pressing `Details` on an older completed run could render the latest run and `Back` could replace the older Final Card with the newer one.
