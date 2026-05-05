@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.2.4 - 2026-05-05
+
+- Changed `/newchat <prompt>` to create a real Codex UI Chat folder under `CTR_GO_CODEX_CHATS_ROOT` before starting the new thread.
+- Added `/newthread <prompt>` as the no-Chat-folder escape hatch for starting without project selection.
+- Added `CTR_GO_CODEX_CHATS_ROOT`, command-menu coverage, unit coverage for prompt slug/collision behavior, and ADR-014 for the new Chat folder contract.
+- Added an opt-in `newchat_folder` live Telegram E2E case and validated `/newchat`, `/newthread`, `/context`, and generated folder behavior on macOS.
+
 ## v0.2.3 - 2026-05-05
 
 - Fixed the public CI secret-pattern smoke scan by replacing private-looking Windows path fixtures in tests with `C:\Users\you\...` examples.
