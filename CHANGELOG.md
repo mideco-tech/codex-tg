@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.2.2 - 2026-05-05
+
+- Fixed a Details binding regression where pressing `Details` on an older completed run could render the latest run and `Back` could replace the older Final Card with the newer one.
+- Bound Details callbacks to their original panel/card using `panel_id`, thread, turn, chat/topic, and message-id guards, with stale callbacks failing closed instead of falling back to the current panel.
+- Restored Details rendering for older turns when App Server raw payloads use the nested `{ "thread": { "turns": [...] } }` shape.
+- Added unit coverage for old/new completed run panels, missing `panel_id`, mismatched message ids, and mismatched `Tools file` routes.
+- Added the checked-in `details_binding` live Telegram E2E case and validation notes for Details, `Tool on`, `Tools file`, and `Back`.
+
 ## v0.2.1 - 2026-05-05
 
 - Preserved the live `Current tool:` display for Telegram-origin turns when durable polling temporarily reports an older completed tool from the same turn.
