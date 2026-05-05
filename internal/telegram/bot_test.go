@@ -38,6 +38,21 @@ func TestSanitizeTelegramLogErrorRedactsBotTokenURL(t *testing.T) {
 	}
 }
 
+func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
+	t.Parallel()
+
+	seen := make(map[string]bool)
+	for _, command := range defaultCommands() {
+		if seen[command.Command] {
+			t.Fatalf("defaultCommands contains duplicate command %q", command.Command)
+		}
+		seen[command.Command] = true
+	}
+	if !seen["newchat"] {
+		t.Fatal("defaultCommands must expose /newchat in the Telegram command menu")
+	}
+}
+
 func TestBotSendMessageChunksAndReturnsLastMessageID(t *testing.T) {
 	t.Parallel()
 

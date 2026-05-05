@@ -306,6 +306,7 @@ func defaultCommands() []BotCommand {
 		{Command: "status", Description: "Daemon and routing status"},
 		{Command: "threads", Description: "List cached Codex threads"},
 		{Command: "projects", Description: "List cached projects"},
+		{Command: "newchat", Description: "Start a new Chat thread"},
 		{Command: "show", Description: "Show a thread card"},
 		{Command: "bind", Description: "Bind this chat to a thread"},
 		{Command: "reply", Description: "Send input to a thread"},
