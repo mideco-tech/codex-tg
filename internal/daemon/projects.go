@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/appserver"
+	"github.com/mideco-tech/codex-tg/internal/config"
 	"github.com/mideco-tech/codex-tg/internal/model"
 	"github.com/mideco-tech/codex-tg/internal/storage"
 )
@@ -20,6 +23,8 @@ const (
 	defaultProjectsProjectPreviewLimit = 7
 	defaultProjectsChatPreviewLimit    = 3
 	defaultChatsPageSize               = 8
+	codexChatSlugMaxLen                = 48
+	codexChatCWDMaxAttempts            = 1000
 )
 
 type projectWorkspace struct {
@@ -53,7 +58,7 @@ func (s *Service) projectCatalog(ctx context.Context) (projectCatalog, error) {
 	grouped := map[string]*projectWorkspace{}
 	chats := []model.Thread{}
 	for _, thread := range threads {
-		if isCodexChatThread(thread) {
+		if s.isCodexChatThread(thread) {
 			chats = append(chats, thread)
 			continue
 		}
@@ -122,11 +127,23 @@ func (s *Service) projectWorkspaces(ctx context.Context) ([]projectWorkspace, er
 	return catalog.Workspaces, nil
 }
 
-func isCodexChatThread(thread model.Thread) bool {
+func (s *Service) isCodexChatThread(thread model.Thread) bool {
 	if isCodexChatsCWD(thread.CWD) {
 		return true
 	}
+	if isPathUnderRoot(thread.CWD, s.codexChatsRoot()) {
+		return true
+	}
 	return strings.TrimSpace(thread.CWD) == "" && strings.EqualFold(strings.TrimSpace(thread.ProjectName), chatsProjectName)
+}
+
+func isPathUnderRoot(value, root string) bool {
+	normalized := strings.ToLower(strings.TrimRight(model.NormalizePath(value), "/"))
+	normalizedRoot := strings.ToLower(strings.TrimRight(model.NormalizePath(root), "/"))
+	if normalized == "" || normalizedRoot == "" {
+		return false
+	}
+	return normalized == normalizedRoot || strings.HasPrefix(normalized, normalizedRoot+"/")
 }
 
 func isCodexChatsCWD(cwd string) bool {
@@ -283,7 +300,7 @@ func (s *Service) chatsOverviewPage(ctx context.Context, page int) (*DirectRespo
 	lines := []string{
 		"Chats",
 		fmt.Sprintf("Page %d/%d (showing %d of %d)", page+1, pageCount, maxInt(0, end-start), len(catalog.Chats)),
-		"Use /newchat <prompt> to create a new Chat.",
+		"Use /newchat <prompt> to create a new Codex UI Chat.",
 	}
 	buttons := [][]model.ButtonSpec{
 		{
@@ -426,7 +443,7 @@ func (s *Service) openChatThread(ctx context.Context, chatID, topicID int64, thr
 	if err != nil {
 		return nil, err
 	}
-	if thread == nil || !isCodexChatThread(*thread) {
+	if thread == nil || !s.isCodexChatThread(*thread) {
 		return &DirectResponse{Text: "This Chat button is stale. Use Open Chats to refresh."}, nil
 	}
 	if err := s.store.SetBinding(ctx, chatID, topicID, threadID, model.BindingModeBound); err != nil {
@@ -546,9 +563,84 @@ func (s *Service) newChatCommand(ctx context.Context, chatID, topicID int64, res
 	if prompt == "" {
 		return &DirectResponse{Text: "Usage: /newchat <prompt>"}, nil
 	}
+	cwd, directoryName, err := createCodexChatCWD(s.codexChatsRoot(), prompt, s.now())
+	if err != nil {
+		return &DirectResponse{Text: fmt.Sprintf("Could not create Codex Chat folder: %v", err)}, nil
+	}
 	return s.createThreadFromProjectPrompt(ctx, chatID, topicID, pendingNewThreadState{
-		ProjectName: chatsProjectName,
+		ProjectName:   chatsProjectName,
+		DirectoryName: directoryName,
+		CWD:           cwd,
 	}, prompt)
+}
+
+func (s *Service) newThreadWithoutCWDCommand(ctx context.Context, chatID, topicID int64, rest string) (*DirectResponse, error) {
+	prompt := strings.TrimSpace(rest)
+	if prompt == "" {
+		return &DirectResponse{Text: "Usage: /newthread <prompt>"}, nil
+	}
+	return s.createThreadFromProjectPrompt(ctx, chatID, topicID, pendingNewThreadState{}, prompt)
+}
+
+func (s *Service) codexChatsRoot() string {
+	root := strings.TrimSpace(s.cfg.CodexChatsRoot)
+	if root == "" {
+		root = config.DefaultCodexChatsRoot()
+	}
+	return filepath.Clean(root)
+}
+
+func createCodexChatCWD(root, prompt string, now time.Time) (string, string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = config.DefaultCodexChatsRoot()
+	}
+	dateDir := filepath.Join(filepath.Clean(root), now.Format("2006-01-02"))
+	if err := os.MkdirAll(dateDir, 0o755); err != nil {
+		return "", "", err
+	}
+	base := codexChatSlugFromPrompt(prompt, now)
+	for attempt := 0; attempt < codexChatCWDMaxAttempts; attempt++ {
+		directoryName := base
+		if attempt > 0 {
+			directoryName = fmt.Sprintf("%s-%d", base, attempt+1)
+		}
+		cwd := filepath.Join(dateDir, directoryName)
+		if err := os.Mkdir(cwd, 0o755); err == nil {
+			return cwd, directoryName, nil
+		} else if os.IsExist(err) {
+			continue
+		} else {
+			return "", "", err
+		}
+	}
+	return "", "", fmt.Errorf("could not allocate unique Chat folder under %s", dateDir)
+}
+
+func codexChatSlugFromPrompt(prompt string, now time.Time) string {
+	source := strings.ToLower(strings.TrimSpace(prompt))
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range source {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastDash = false
+		default:
+			if builder.Len() > 0 && !lastDash {
+				builder.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	slug := strings.Trim(builder.String(), "-")
+	if len(slug) > codexChatSlugMaxLen {
+		slug = strings.Trim(slug[:codexChatSlugMaxLen], "-")
+	}
+	if slug == "" {
+		return "chat-" + now.Format("150405")
+	}
+	return slug
 }
 
 func (s *Service) newThreadUsage(ctx context.Context) (*DirectResponse, error) {
@@ -706,14 +798,21 @@ func (s *Service) ensureNewChatThreadFallback(ctx context.Context, threadID stri
 		return
 	}
 	thread, err := s.store.GetThread(ctx, threadID)
-	if err != nil || thread == nil || strings.TrimSpace(thread.CWD) != "" {
+	if err != nil || thread == nil {
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(thread.ProjectName), chatsProjectName) {
+	changed := false
+	if !strings.EqualFold(strings.TrimSpace(thread.ProjectName), chatsProjectName) {
+		thread.ProjectName = chatsProjectName
+		changed = true
+	}
+	if strings.TrimSpace(state.DirectoryName) != "" && thread.DirectoryName != state.DirectoryName {
+		thread.DirectoryName = state.DirectoryName
+		changed = true
+	}
+	if !changed {
 		return
 	}
-	thread.ProjectName = chatsProjectName
-	thread.DirectoryName = firstNonEmpty(state.DirectoryName, thread.DirectoryName)
 	_ = s.store.UpsertThread(ctx, *thread)
 }
 
@@ -722,7 +821,7 @@ func threadFromStartPayload(payload map[string]any, state pendingNewThreadState)
 	if strings.TrimSpace(thread.CWD) == "" {
 		thread.CWD = state.CWD
 	}
-	if strings.EqualFold(strings.TrimSpace(state.ProjectName), chatsProjectName) && strings.TrimSpace(thread.CWD) == "" {
+	if strings.EqualFold(strings.TrimSpace(state.ProjectName), chatsProjectName) {
 		thread.ProjectName = chatsProjectName
 		thread.DirectoryName = firstNonEmpty(state.DirectoryName, thread.DirectoryName)
 	}

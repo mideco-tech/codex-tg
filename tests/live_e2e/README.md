@@ -24,8 +24,9 @@ Optional:
 - `TG_PROXY`: `socks5://`, `socks4://`, `http://`, or `https://` proxy URL.
 - `CODEX_TG_E2E_POLL_SECONDS`
 - `CODEX_TG_E2E_READBACK_LIMIT`
+- `CODEX_TG_E2E_CODEX_CHATS_ROOT`: local Chats root for `newchat_folder`; defaults to `~/Documents/Codex`.
 - `CODEX_TG_E2E_CASES`: comma-separated subset of
-  `sequential_commands,sleep20_timing,multi_tool_current,current_tool_priority,details_binding,complex_math`.
+  `sequential_commands,sleep20_timing,multi_tool_current,current_tool_priority,details_binding,complex_math,newchat_folder`.
 
 The env file and Telethon session files must stay local. `.gitignore` blocks
 `.env*`, `telegram.env`, and `*.session*` as a belt-and-suspenders guard.
@@ -80,6 +81,11 @@ visible, and the final answer contains:
 ```text
 COUNT=2034 SUM=115514223
 ```
+
+`newchat_folder` is opt-in and not part of the default case list. It sends
+`/newchat`, verifies a `tool-call...` folder appears under the configured Chats
+root and `/context` is bound to that cwd, then sends `/newthread` and verifies no
+Chat folder is created for the no-Chat-folder escape hatch.
 
 All cases fail on visible `Status: interrupted`, literal `"<nil>"`, stale known
 commands from earlier regressions, parallel-turn rejection text, or `[Tool]`

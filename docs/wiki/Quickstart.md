@@ -10,6 +10,7 @@ Create a bot with BotFather and keep the token private.
 $env:CTR_GO_TELEGRAM_BOT_TOKEN = "<telegram-bot-token>"
 $env:CTR_GO_ALLOWED_USER_IDS = "<telegram-user-id>"
 $env:CTR_GO_DEFAULT_CWD = "C:\Users\you\Projects\Codex"
+$env:CTR_GO_CODEX_CHATS_ROOT = "C:\Users\you\Documents\Codex"
 ```
 
 ## 3. Run
@@ -37,4 +38,7 @@ project must already exist in the cached Codex thread list.
 
 Codex UI Chats stored under `Documents/Codex` appear under the `Chats` section
 instead of as normal projects. Use `Open Chats` for the full paginated list, or
-`/newchat <prompt>` to start a new thread without choosing a project cwd.
+`/newchat <prompt>` to create a new Codex UI Chat under
+`Documents/Codex/<date>/<prompt-slug>`. Use `/newthread <prompt>` for a thread
+without choosing a project or creating a Chat folder; App Server may still
+attach the daemon default cwd.

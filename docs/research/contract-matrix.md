@@ -25,6 +25,7 @@ This file now serves two purposes:
 - `/effort`
 - `/new <project-key-or-number> <prompt>`
 - `/newchat <prompt>`
+- `/newthread <prompt>`
 - `/context`
 - `/whereami`
 - `/observe all|off`
@@ -59,9 +60,10 @@ This file now serves two purposes:
 - After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
 - `/projects` groups cached non-Chat projects by normalized `cwd`, sorts projects by latest cached thread activity, shows latest Codex UI Chat previews, opens full Chats pagination through `Open Chats`, and never accepts arbitrary filesystem paths from Telegram.
 - `/projects` buttons show meaningful labels (`N. Project name`, `Chat N. Thread name`); internal project keys are not rendered in the menu, and project rows show `last thread:`.
-- Cached threads under generic `Documents/Codex` paths are treated as single-thread `Chats`; selecting a Chat opens and binds that thread and does not offer project `New thread`.
+- Cached threads under generic `Documents/Codex` paths or the configured `CTR_GO_CODEX_CHATS_ROOT` are treated as single-thread `Chats`; selecting a Chat opens and binds that thread and does not offer project `New thread`.
 - `New thread` creates a one-shot state; the next plain-text message starts a new App Server thread in the selected project cwd and uses that text as the first prompt.
-- `/newchat <prompt>` starts a new App Server thread without a cwd parameter and uses the prompt as the first turn.
+- `/newchat <prompt>` creates a dated Chat folder under the configured Chats root, calls App Server `thread/start` with that cwd, and uses the prompt as the first turn.
+- `/newthread <prompt>` starts a new App Server thread without a Telegram-selected cwd parameter and uses the prompt as the first turn. It must not create a Chat folder; App Server may still attach the daemon default cwd.
 - `/plan <text>` and `/plan_mode <text>` use reply route, armed state, or current binding when the first token is not a known or UUID-like thread id.
 - Synthetic polling prompts without `request_id` are answered with `turn/steer`, then `turn/start` if the turn is already unavailable.
 - Replies to active turns steer the active turn. If steering is rejected while the thread still looks genuinely active, the bridge must not create a parallel `turn/start`; stale-active errors such as `no active turn to steer` are handled by ADR-012 and may fall back to a new `turn/start` after re-read.

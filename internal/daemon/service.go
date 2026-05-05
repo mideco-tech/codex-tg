@@ -80,6 +80,7 @@ type Service struct {
 	diagnosticN    int
 	diagnosticBy   map[string]int
 	diagnosticLast map[string]time.Time
+	now            func() time.Time
 	started        bool
 	startedAt      time.Time
 	ready          bool
@@ -117,6 +118,7 @@ func New(cfg config.Config) (*Service, error) {
 		logger:         discardDiagnosticLogger(),
 		diagnosticBy:   map[string]int{},
 		diagnosticLast: map[string]time.Time{},
+		now:            time.Now,
 		phase:          "created",
 	}
 	service.liveFactory = func() Session {
@@ -1259,7 +1261,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 	case "/start":
 		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/newchat <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/newchat <prompt>\n/newthread <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -1314,6 +1316,8 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 		return s.newThreadCommand(ctx, chatID, topicID, rest)
 	case "/newchat":
 		return s.newChatCommand(ctx, chatID, topicID, rest)
+	case "/newthread":
+		return s.newThreadWithoutCWDCommand(ctx, chatID, topicID, rest)
 	case "/show":
 		decision, err := s.resolveRoute(ctx, chatID, topicID, rest, replyToMessageID)
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -903,12 +904,17 @@ func TestProjectNewThreadTurnStartFailureSavesThread(t *testing.T) {
 	}
 }
 
-func TestNewChatCommandCreatesThreadWithoutCWDAndBinds(t *testing.T) {
+func TestNewChatCommandCreatesCodexUIChatCWDAndBinds(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
 	sender := &recordingSender{}
 	service.SetSender(sender)
+	chatRoot := t.TempDir()
+	fixedNow := time.Date(2026, 5, 5, 14, 32, 5, 0, time.Local)
+	service.cfg.CodexChatsRoot = chatRoot
+	service.now = func() time.Time { return fixedNow }
+	expectedCWD := filepath.Join(chatRoot, "2026-05-05", "tool-call")
 	ctx := context.Background()
 	stub := &stubSession{
 		threadStartResult: map[string]any{"thread": map[string]any{"id": "new-chat-thread", "title": "New chat"}},
@@ -917,11 +923,12 @@ func TestNewChatCommandCreatesThreadWithoutCWDAndBinds(t *testing.T) {
 				"thread": map[string]any{
 					"id":     "new-chat-thread",
 					"title":  "New chat",
+					"cwd":    expectedCWD,
 					"status": "active",
 					"turns": []any{map[string]any{
 						"id":     "started-turn",
 						"status": "inProgress",
-						"items":  []any{map[string]any{"id": "user-item", "type": "userMessage", "content": []any{map[string]any{"text": "first chat prompt"}}}},
+						"items":  []any{map[string]any{"id": "user-item", "type": "userMessage", "content": []any{map[string]any{"text": "Проверь tool call по погоде"}}}},
 					}},
 				},
 			},
@@ -930,28 +937,38 @@ func TestNewChatCommandCreatesThreadWithoutCWDAndBinds(t *testing.T) {
 	service.live = stub
 	service.liveConnected = true
 
-	response, err := service.handleCommand(ctx, 123456789, 0, "/newchat first chat prompt", 0)
+	response, err := service.handleCommand(ctx, 123456789, 0, "/newchat Проверь tool call по погоде", 0)
 	if err != nil {
 		t.Fatalf("handleCommand(/newchat) failed: %v", err)
 	}
 	if response == nil || response.ThreadID != "new-chat-thread" || response.TurnID != "started-turn" {
 		t.Fatalf("response = %#v, want new chat thread/turn", response)
 	}
-	if len(stub.threadStartCalls) != 1 || stub.threadStartCalls[0] != "" {
-		t.Fatalf("threadStartCalls = %#v, want no cwd", stub.threadStartCalls)
+	if len(stub.threadStartCalls) != 1 || stub.threadStartCalls[0] != expectedCWD {
+		t.Fatalf("threadStartCalls = %#v, want chat cwd %q", stub.threadStartCalls, expectedCWD)
 	}
 	if len(stub.turnStartCalls) != 1 {
 		t.Fatalf("turnStartCalls = %#v, want one turn start", stub.turnStartCalls)
 	}
-	if got := stub.turnStartCalls[0]; got.threadID != "new-chat-thread" || got.message != "first chat prompt" || got.cwd != "" {
-		t.Fatalf("turnStartCall = %#v, want new chat first prompt without cwd", got)
+	if got := stub.turnStartCalls[0]; got.threadID != "new-chat-thread" || got.message != "Проверь tool call по погоде" || got.cwd != expectedCWD {
+		t.Fatalf("turnStartCall = %#v, want new chat first prompt with cwd %q", got, expectedCWD)
+	}
+	if info, err := os.Stat(expectedCWD); err != nil || !info.IsDir() {
+		t.Fatalf("expected chat cwd %q to exist as directory, info=%#v err=%v", expectedCWD, info, err)
 	}
 	thread, err := service.store.GetThread(ctx, "new-chat-thread")
 	if err != nil {
 		t.Fatalf("GetThread failed: %v", err)
 	}
-	if thread == nil || thread.ProjectName != "Chats" {
-		t.Fatalf("thread = %#v, want stored Chats project fallback", thread)
+	if thread == nil || thread.ProjectName != "Chats" || thread.DirectoryName != "tool-call" || thread.CWD != expectedCWD {
+		t.Fatalf("thread = %#v, want stored Chats thread at generated cwd", thread)
+	}
+	catalog, err := service.projectCatalog(ctx)
+	if err != nil {
+		t.Fatalf("projectCatalog failed: %v", err)
+	}
+	if len(catalog.Chats) != 1 || catalog.Chats[0].ID != "new-chat-thread" {
+		t.Fatalf("catalog.Chats = %#v, want new chat thread", catalog.Chats)
 	}
 	binding, err := service.store.GetBinding(ctx, 123456789, 0)
 	if err != nil {
@@ -962,10 +979,93 @@ func TestNewChatCommandCreatesThreadWithoutCWDAndBinds(t *testing.T) {
 	}
 }
 
+func TestNewChatCWDUsesFallbackSlugAndCollisionSuffix(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	fixedNow := time.Date(2026, 5, 5, 14, 32, 5, 0, time.Local)
+	existing := filepath.Join(root, "2026-05-05", "chat-143205")
+	if err := os.MkdirAll(existing, 0o755); err != nil {
+		t.Fatalf("MkdirAll(existing) failed: %v", err)
+	}
+
+	cwd, directoryName, err := createCodexChatCWD(root, "Привет мир", fixedNow)
+	if err != nil {
+		t.Fatalf("createCodexChatCWD failed: %v", err)
+	}
+	want := filepath.Join(root, "2026-05-05", "chat-143205-2")
+	if cwd != want || directoryName != "chat-143205-2" {
+		t.Fatalf("cwd=%q directoryName=%q, want %q and chat-143205-2", cwd, directoryName, want)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("expected fallback cwd %q to exist as directory, info=%#v err=%v", want, info, err)
+	}
+}
+
+func TestNewThreadCommandCreatesThreadWithoutCWDAndBinds(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "new-thread-without-cwd", "title": "New thread"}},
+		threadReads: map[string]map[string]any{
+			"new-thread-without-cwd": {
+				"thread": map[string]any{
+					"id":     "new-thread-without-cwd",
+					"title":  "New thread",
+					"status": "active",
+					"turns": []any{map[string]any{
+						"id":     "started-turn",
+						"status": "inProgress",
+						"items":  []any{map[string]any{"id": "user-item", "type": "userMessage", "content": []any{map[string]any{"text": "scratch prompt"}}}},
+					}},
+				},
+			},
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/newthread scratch prompt", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/newthread) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != "new-thread-without-cwd" || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want no-cwd thread/turn", response)
+	}
+	if len(stub.threadStartCalls) != 1 || stub.threadStartCalls[0] != "" {
+		t.Fatalf("threadStartCalls = %#v, want no cwd", stub.threadStartCalls)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one turn start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.threadID != "new-thread-without-cwd" || got.message != "scratch prompt" || got.cwd != "" {
+		t.Fatalf("turnStartCall = %#v, want no-cwd first prompt", got)
+	}
+	thread, err := service.store.GetThread(ctx, "new-thread-without-cwd")
+	if err != nil {
+		t.Fatalf("GetThread failed: %v", err)
+	}
+	if thread == nil || thread.CWD != "" || thread.ProjectName == "Chats" {
+		t.Fatalf("thread = %#v, want no-cwd non-Chat thread", thread)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("GetBinding failed: %v", err)
+	}
+	if binding == nil || binding.ThreadID != "new-thread-without-cwd" {
+		t.Fatalf("binding = %#v, want newthread binding", binding)
+	}
+}
+
 func TestNewChatCommandRejectsMissingThreadID(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
+	service.cfg.CodexChatsRoot = t.TempDir()
 	ctx := context.Background()
 	stub := &stubSession{threadStartResult: map[string]any{"thread": map[string]any{"title": "New chat"}}}
 	service.live = stub
@@ -987,6 +1087,11 @@ func TestNewChatCommandTurnStartFailureSavesAndBindsThread(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
+	chatRoot := t.TempDir()
+	fixedNow := time.Date(2026, 5, 5, 14, 32, 5, 0, time.Local)
+	service.cfg.CodexChatsRoot = chatRoot
+	service.now = func() time.Time { return fixedNow }
+	expectedCWD := filepath.Join(chatRoot, "2026-05-05", "first-chat-prompt")
 	ctx := context.Background()
 	stub := &stubSession{
 		threadStartResult: map[string]any{"thread": map[string]any{"id": "new-chat-thread", "title": "New chat"}},
@@ -1006,8 +1111,8 @@ func TestNewChatCommandTurnStartFailureSavesAndBindsThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetThread failed: %v", err)
 	}
-	if thread == nil || thread.ProjectName != "Chats" {
-		t.Fatalf("thread = %#v, want saved Chats thread", thread)
+	if thread == nil || thread.ProjectName != "Chats" || thread.CWD != expectedCWD {
+		t.Fatalf("thread = %#v, want saved Chats thread with cwd %q", thread, expectedCWD)
 	}
 	binding, err := service.store.GetBinding(ctx, 123456789, 0)
 	if err != nil {
@@ -1015,6 +1120,41 @@ func TestNewChatCommandTurnStartFailureSavesAndBindsThread(t *testing.T) {
 	}
 	if binding == nil || binding.ThreadID != "new-chat-thread" {
 		t.Fatalf("binding = %#v, want new chat binding for recovery", binding)
+	}
+}
+
+func TestNewThreadCommandTurnStartFailureSavesAndBindsThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{
+		threadStartResult: map[string]any{"thread": map[string]any{"id": "no-cwd-thread", "title": "No cwd"}},
+		turnStartErr:      errors.New("turn start failed"),
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/newthread scratch prompt", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/newthread) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.Text, "Created thread") || !strings.Contains(response.Text, "could not start first turn") {
+		t.Fatalf("response = %#v, want recoverable turn start failure", response)
+	}
+	thread, err := service.store.GetThread(ctx, "no-cwd-thread")
+	if err != nil {
+		t.Fatalf("GetThread failed: %v", err)
+	}
+	if thread == nil || thread.CWD != "" || thread.ProjectName == "Chats" {
+		t.Fatalf("thread = %#v, want saved no-cwd non-Chat thread", thread)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("GetBinding failed: %v", err)
+	}
+	if binding == nil || binding.ThreadID != "no-cwd-thread" {
+		t.Fatalf("binding = %#v, want no-cwd thread binding for recovery", binding)
 	}
 }
 

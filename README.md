@@ -93,7 +93,7 @@ go run ./cmd/ctr-go daemon run
 Telegram commands:
 
 - `/start`, `/help`
-- `/threads`, `/projects`, `/new`, `/newchat`, `/show`, `/bind`, `/reply`, `/plan`
+- `/threads`, `/projects`, `/new`, `/newchat`, `/newthread`, `/show`, `/bind`, `/reply`, `/plan`
 - `/settings`, `/model`, `/effort`
 - `/context`, `/whereami`
 - `/observe all`, `/observe off`
@@ -104,8 +104,10 @@ thread activity. Codex UI Chats from `Documents/Codex` are grouped under
 `Chats`: the main projects view shows recent Chat previews, `Open Chats` opens
 the full paginated Chat list, and choosing a Chat opens and binds its thread.
 Use `New thread` in a normal project menu to create a new thread in that
-project cwd; use `/newchat <prompt>` to start a new thread without selecting a
-project cwd.
+project cwd. Use `/newchat <prompt>` to create a Codex UI Chat under
+`Documents/Codex/<date>/<prompt-slug>`. Use `/newthread <prompt>` when you need
+a thread without choosing a project or creating a Chat folder; App Server may
+still attach the daemon default cwd.
 
 ## Configuration
 
@@ -118,6 +120,7 @@ Primary environment variables:
 - `CTR_GO_ALLOWED_USER_IDS`
 - `CTR_GO_ALLOWED_CHAT_IDS`
 - `CTR_GO_DEFAULT_CWD`
+- `CTR_GO_CODEX_CHATS_ROOT` (`~/Documents/Codex` by default)
 - `CTR_GO_LOG_ENABLED` (`true` by default; set `false`/`off`/`0` to discard daemon stdout logs)
 - `CTR_GO_DIAGNOSTIC_LOGS` (`true` by default; set `false`/`off`/`0` to keep normal bot logs but suppress structured `daemon_event` diagnostics)
 - `CTR_GO_OBSERVER_POLL_SECONDS`

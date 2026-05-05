@@ -130,6 +130,7 @@ func runStatus(cfg config.Config) error {
 		fmt.Sprintf("Allowed users: %s", formatIDs(cfg.AllowedUserIDs)),
 		fmt.Sprintf("Allowed chats: %s", formatIDs(cfg.AllowedChatIDs)),
 		fmt.Sprintf("Default cwd: %s", cfg.DefaultCWD),
+		fmt.Sprintf("Codex Chats root: %s", cfg.CodexChatsRoot),
 		fmt.Sprintf("Delivery backlog: %d", backlog),
 		"",
 		"Persisted daemon state:",

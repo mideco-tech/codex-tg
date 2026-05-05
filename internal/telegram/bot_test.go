@@ -48,8 +48,10 @@ func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
 		}
 		seen[command.Command] = true
 	}
-	if !seen["newchat"] {
-		t.Fatal("defaultCommands must expose /newchat in the Telegram command menu")
+	for _, command := range []string{"newchat", "newthread"} {
+		if !seen[command] {
+			t.Fatalf("defaultCommands must expose /%s in the Telegram command menu", command)
+		}
 	}
 }
 

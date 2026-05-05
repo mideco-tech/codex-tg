@@ -48,6 +48,7 @@ type Config struct {
 	AllowedUserIDs              []int64
 	AllowedChatIDs              []int64
 	DefaultCWD                  string
+	CodexChatsRoot              string
 	PanelMode                   string
 	LogEnabled                  bool
 	DiagnosticLogs              bool
@@ -88,6 +89,7 @@ func FromEnv() Config {
 		AllowedUserIDs:              parseInt64List(envFirst("CTR_GO_ALLOWED_USER_IDS", "CTR_ALLOWED_USER_IDS")),
 		AllowedChatIDs:              parseInt64List(envFirst("CTR_GO_ALLOWED_CHAT_IDS", "CTR_ALLOWED_CHAT_IDS")),
 		DefaultCWD:                  envString("CTR_GO_DEFAULT_CWD", cwd),
+		CodexChatsRoot:              envPath("CTR_GO_CODEX_CHATS_ROOT", DefaultCodexChatsRoot()),
 		PanelMode:                   normalizePanelMode(envString("CTR_GO_PANEL_MODE", "per_run")),
 		LogEnabled:                  envBool("CTR_GO_LOG_ENABLED", true),
 		DiagnosticLogs:              envBool("CTR_GO_DIAGNOSTIC_LOGS", true),
@@ -113,6 +115,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		AllowedUserIDs              []int64 `json:"allowed_user_ids"`
 		AllowedChatIDs              []int64 `json:"allowed_chat_ids"`
 		DefaultCWD                  string  `json:"default_cwd"`
+		CodexChatsRoot              string  `json:"codex_chats_root"`
 		PanelMode                   string  `json:"panel_mode"`
 		LogEnabled                  bool    `json:"log_enabled"`
 		DiagnosticLogs              bool    `json:"diagnostic_logs"`
@@ -132,6 +135,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		AllowedUserIDs:              c.AllowedUserIDs,
 		AllowedChatIDs:              c.AllowedChatIDs,
 		DefaultCWD:                  c.DefaultCWD,
+		CodexChatsRoot:              c.CodexChatsRoot,
 		PanelMode:                   normalizePanelMode(c.PanelMode),
 		LogEnabled:                  c.LogEnabled,
 		DiagnosticLogs:              c.DiagnosticLogs,
@@ -145,12 +149,28 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	})
 }
 
+func DefaultCodexChatsRoot() string {
+	userHome, _ := os.UserHomeDir()
+	if strings.TrimSpace(userHome) == "" {
+		return filepath.Join("Documents", "Codex")
+	}
+	return filepath.Join(userHome, "Documents", "Codex")
+}
+
 func envString(key, fallback string) string {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}
 	return value
+}
+
+func envPath(key, fallback string) string {
+	value := envString(key, fallback)
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return filepath.Clean(value)
 }
 
 func envFirst(keys ...string) string {

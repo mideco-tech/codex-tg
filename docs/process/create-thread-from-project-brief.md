@@ -21,7 +21,7 @@ Telegram supports a project-first flow: `/projects` -> project menu -> `New thre
 
 `New thread` arms a one-shot state for the current chat/topic. The next plain-text message calls App Server `thread/start` for that project cwd and then `turn/start` with the message text.
 
-`/newchat <prompt>` creates a new App Server thread without a cwd parameter and starts the first turn from the prompt.
+`/newchat <prompt>` creates a dated Codex UI Chat cwd under the configured Chats root, calls App Server `thread/start` with that cwd, and starts the first turn from the prompt. `/newthread <prompt>` calls `thread/start` without a Telegram-selected cwd for cases that should not create a Chat folder; App Server may still attach its default cwd.
 
 ## Domain Model
 

@@ -43,6 +43,7 @@ DEFAULT_CASES = (
     "details_binding",
     "complex_math",
 )
+AVAILABLE_CASES = DEFAULT_CASES + ("newchat_folder",)
 
 
 def load_env_file(path: str) -> None:
@@ -152,9 +153,9 @@ def selected_cases() -> list[str]:
     if not raw:
         return list(DEFAULT_CASES)
     requested = [part.strip() for part in raw.split(",") if part.strip()]
-    unknown = sorted(set(requested) - set(DEFAULT_CASES))
+    unknown = sorted(set(requested) - set(AVAILABLE_CASES))
     if unknown:
-        raise SystemExit(f"Unknown CODEX_TG_E2E_CASES values: {unknown}; valid={list(DEFAULT_CASES)}")
+        raise SystemExit(f"Unknown CODEX_TG_E2E_CASES values: {unknown}; valid={list(AVAILABLE_CASES)}")
     return requested
 
 
@@ -260,6 +261,44 @@ async def wait_details_document_after(client, bot, after_id: int, context: str, 
             print(f"DOCUMENT case={context} message_id={message.id} bytes={len(data or b'')}", flush=True)
             return body
     raise SystemExit(f"DOCUMENT_TIMEOUT case={context}")
+
+
+async def wait_bot_text_after(client, bot, after_id: int, context: str, predicate, timeout: int = 80):
+    deadline = time.time() + timeout
+    seen = set()
+    while time.time() < deadline:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, after_id):
+            text = (message.raw_text or "").strip()
+            key = (message.id, text)
+            if key not in seen:
+                seen.add(key)
+                print(f"BOT case={context} message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, context)
+            if predicate(text):
+                return message
+    raise SystemExit(f"BOT_TEXT_TIMEOUT case={context}")
+
+
+def live_codex_chats_root() -> Path:
+    raw = os.environ.get("CODEX_TG_E2E_CODEX_CHATS_ROOT", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / "Documents" / "Codex"
+
+
+def recent_chat_dirs(root: Path, prefix: str, since_ts: float) -> list[Path]:
+    date_dir = root / datetime.now().strftime("%Y-%m-%d")
+    if not date_dir.exists():
+        return []
+    out = []
+    for path in date_dir.glob(prefix + "*"):
+        try:
+            if path.is_dir() and path.stat().st_mtime >= since_ts - 2:
+                out.append(path)
+        except OSError:
+            continue
+    return sorted(out, key=lambda item: item.stat().st_mtime, reverse=True)
 
 
 async def sequential_commands_case(client, bot, thread_id: str, stamp: str) -> None:
@@ -759,6 +798,56 @@ After the four range outputs, add the counts and sums yourself. Final answer mus
     print(f"RESULT case=complex_math ok tools={sorted(observed_tools)} outputs={sorted(observed_outputs)}", flush=True)
 
 
+async def newchat_folder_case(client, bot, thread_id: str, stamp: str) -> None:
+    del thread_id
+    root = live_codex_chats_root()
+    newchat_marker = f"OK_NEWCHAT_FOLDER_{stamp}"
+    newthread_marker = f"OK_NEWTHREAD_NOCWD_{stamp}"
+    before_newchat = time.time()
+    newchat_prompt = (
+        "/newchat Проверь tool call по погоде. "
+        "This is a folder-routing smoke test; do not call external tools. "
+        f"Final answer must contain exactly {newchat_marker}."
+    )
+    sent_newchat = await client.send_message(bot, newchat_prompt)
+    print(f"SENT case=newchat_folder phase=newchat message_id={sent_newchat.id}", flush=True)
+    final_newchat = await wait_final_message(client, bot, sent_newchat.id, newchat_marker, "newchat_folder")
+    dirs = recent_chat_dirs(root, "tool-call", before_newchat)
+    if not dirs:
+        raise SystemExit(f"NEWCHAT_FOLDER_MISSING root={root}")
+    chat_dir = dirs[0]
+    context_sent = await client.send_message(bot, "/context")
+    await wait_bot_text_after(
+        client,
+        bot,
+        context_sent.id,
+        "newchat_folder",
+        lambda text: "Mode: Bound thread" in text and str(chat_dir) in text,
+    )
+
+    before_newthread = time.time()
+    newthread_prompt = (
+        f"/newthread newthread nocwd {stamp}. "
+        f"Final answer must contain exactly {newthread_marker}."
+    )
+    sent_newthread = await client.send_message(bot, newthread_prompt)
+    print(f"SENT case=newchat_folder phase=newthread message_id={sent_newthread.id}", flush=True)
+    await wait_final_message(client, bot, sent_newthread.id, newthread_marker, "newchat_folder")
+    unexpected_dirs = recent_chat_dirs(root, "newthread-nocwd", before_newthread)
+    if unexpected_dirs:
+        raise SystemExit(f"NEWTHREAD_CREATED_CHAT_FOLDER dirs={[str(path) for path in unexpected_dirs]}")
+    context_sent = await client.send_message(bot, "/context")
+    await wait_bot_text_after(
+        client,
+        bot,
+        context_sent.id,
+        "newchat_folder",
+        lambda text: "Mode: Bound thread" in text and str(root) not in text,
+    )
+    fail_if_bad_text(final_newchat.raw_text or "", "newchat_folder")
+    print(f"RESULT case=newchat_folder ok chat_dir={chat_dir}", flush=True)
+
+
 async def main() -> None:
     require_env()
     thread_id = os.environ["CODEX_TG_E2E_THREAD_ID"].strip()
@@ -790,6 +879,8 @@ async def main() -> None:
                 await details_binding_case(client, bot, thread_id, stamp)
             elif case == "complex_math":
                 await complex_math_case(client, bot, thread_id, stamp)
+            elif case == "newchat_folder":
+                await newchat_folder_case(client, bot, thread_id, stamp)
         print("ALL_OK", flush=True)
     finally:
         await client.disconnect()
