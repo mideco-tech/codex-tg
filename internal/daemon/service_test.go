@@ -438,8 +438,8 @@ func TestIsCodexChatsCWDMatchesGenericMacAndWindowsPaths(t *testing.T) {
 	}{
 		{cwd: "/Users/alice/Documents/Codex", want: true},
 		{cwd: "/Users/alice/Documents/Codex/2026-04-29/new-chat", want: true},
-		{cwd: `C:\Users\bob\Documents\Codex`, want: true},
-		{cwd: `C:\Users\bob\Documents\Codex\2026-04-28\tool-call`, want: true},
+		{cwd: `C:\Users\you\Documents\Codex`, want: true},
+		{cwd: `C:\Users\you\Documents\Codex\2026-04-28\tool-call`, want: true},
 		{cwd: "/Users/alice/Library/CloudStorage/OneDrive-Personal/Programming/AI/Codex", want: false},
 		{cwd: "/Users/alice/Documents/Codexology", want: false},
 		{cwd: `D:\Users\bob\Documents\Codex`, want: true},
@@ -498,7 +498,7 @@ func TestProjectsCommandShowsChatsSectionAndSortsByRecency(t *testing.T) {
 		{
 			ID:            "windows-chat-thread",
 			Title:         "Windows Chat",
-			CWD:           `C:\Users\someone\Documents\Codex\2026-04-30\win-chat`,
+			CWD:           `C:\Users\you\Documents\Codex\2026-04-30\win-chat`,
 			ProjectName:   "win-chat",
 			DirectoryName: "win-chat",
 			UpdatedAt:     30,
@@ -526,7 +526,7 @@ func TestProjectsCommandShowsChatsSectionAndSortsByRecency(t *testing.T) {
 	requireTextOrder(t, response.Text, "new-project", "old-project")
 	requireTextOrder(t, response.Text, "Newer Chat", "Windows Chat")
 	requireTextOrder(t, response.Text, "Windows Chat", "Older Chat")
-	if strings.Contains(response.Text, "cwd: /Users/example/Documents/Codex") || strings.Contains(response.Text, `cwd: C:\Users\someone\Documents\Codex`) {
+	if strings.Contains(response.Text, "cwd: /Users/example/Documents/Codex") || strings.Contains(response.Text, `cwd: C:\Users\you\Documents\Codex`) {
 		t.Fatalf("/projects text renders chat cwd as project cwd:\n%s", response.Text)
 	}
 	if strings.Contains(response.Text, "key:") {
