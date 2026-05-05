@@ -23,13 +23,14 @@ const (
 )
 
 type projectWorkspace struct {
-	Key           string `json:"key,omitempty"`
-	ProjectName   string `json:"project_name"`
-	DirectoryName string `json:"directory_name,omitempty"`
-	CWD           string `json:"cwd"`
-	LatestThread  string `json:"latest_thread_id,omitempty"`
-	ThreadCount   int    `json:"thread_count,omitempty"`
-	UpdatedAt     int64  `json:"updated_at,omitempty"`
+	Key               string `json:"key,omitempty"`
+	ProjectName       string `json:"project_name"`
+	DirectoryName     string `json:"directory_name,omitempty"`
+	CWD               string `json:"cwd"`
+	LatestThread      string `json:"latest_thread_id,omitempty"`
+	LatestThreadLabel string `json:"latest_thread_label,omitempty"`
+	ThreadCount       int    `json:"thread_count,omitempty"`
+	UpdatedAt         int64  `json:"updated_at,omitempty"`
 }
 
 type pendingNewThreadState struct {
@@ -70,11 +71,12 @@ func (s *Service) projectCatalog(ctx context.Context) (projectCatalog, error) {
 				directoryName = firstNonEmpty(directoryName, derivedDirectory)
 			}
 			workspace = &projectWorkspace{
-				ProjectName:   firstNonEmpty(projectName, "Shared/General"),
-				DirectoryName: directoryName,
-				CWD:           thread.CWD,
-				LatestThread:  thread.ID,
-				UpdatedAt:     thread.UpdatedAt,
+				ProjectName:       firstNonEmpty(projectName, "Shared/General"),
+				DirectoryName:     directoryName,
+				CWD:               thread.CWD,
+				LatestThread:      thread.ID,
+				LatestThreadLabel: threadDisplayLabel(thread),
+				UpdatedAt:         thread.UpdatedAt,
 			}
 			grouped[cwdKey] = workspace
 		}
@@ -82,6 +84,7 @@ func (s *Service) projectCatalog(ctx context.Context) (projectCatalog, error) {
 		if thread.UpdatedAt > workspace.UpdatedAt {
 			workspace.UpdatedAt = thread.UpdatedAt
 			workspace.LatestThread = thread.ID
+			workspace.LatestThreadLabel = threadDisplayLabel(thread)
 		}
 	}
 	workspaces := make([]projectWorkspace, 0, len(grouped))
@@ -194,6 +197,18 @@ func projectWorkspaceKeyBase(workspace projectWorkspace) string {
 	return key
 }
 
+func threadDisplayLabel(thread model.Thread) string {
+	return firstNonEmpty(thread.Title, thread.ShortID())
+}
+
+func projectWorkspaceButtonLabel(index int, workspace projectWorkspace) string {
+	return shortButtonLabel(fmt.Sprintf("%d. %s", index, firstNonEmpty(workspace.ProjectName, workspace.DirectoryName, workspace.Key, "Project")))
+}
+
+func chatThreadButtonLabel(index int, thread model.Thread) string {
+	return shortButtonLabel(fmt.Sprintf("Chat %d. %s", index, threadDisplayLabel(thread)))
+}
+
 func (s *Service) projectsOverview(ctx context.Context) (*DirectResponse, error) {
 	return s.projectsOverviewPage(ctx, 0)
 }
@@ -235,20 +250,20 @@ func (s *Service) projectsOverviewPage(ctx context.Context, page int) (*DirectRe
 		displayIndex := projectStart + index + 1
 		lines = append(lines,
 			fmt.Sprintf("%d. %s (%d thread(s))", displayIndex, workspace.ProjectName, workspace.ThreadCount),
-			fmt.Sprintf("   key: %s", workspace.Key),
+			fmt.Sprintf("   last thread: %s", firstNonEmpty(workspace.LatestThreadLabel, workspace.LatestThread)),
 			fmt.Sprintf("   cwd: %s", settingValueLabel(workspace.CWD, "unknown")),
 		)
 		buttons = append(buttons, []model.ButtonSpec{
-			s.callbackButton(ctx, fmt.Sprintf("Project %d", displayIndex), "project_open", "", "", "", projectWorkspacePayload(workspace)),
+			s.callbackButton(ctx, projectWorkspaceButtonLabel(displayIndex, workspace), "project_open", "", "", "", projectWorkspacePayload(workspace)),
 		})
 	}
 	if chatEnd > 0 {
 		lines = append(lines, "", "Latest Chats")
 		for index, thread := range catalog.Chats[:chatEnd] {
 			displayIndex := index + 1
-			lines = append(lines, fmt.Sprintf("%d. %s | %s", displayIndex, firstNonEmpty(thread.Title, thread.ShortID()), thread.ShortID()))
+			lines = append(lines, fmt.Sprintf("%d. %s | %s", displayIndex, threadDisplayLabel(thread), thread.ShortID()))
 			buttons = append(buttons, []model.ButtonSpec{
-				s.callbackButton(ctx, fmt.Sprintf("Chat %d", displayIndex), "chat_open", thread.ID, "", "", nil),
+				s.callbackButton(ctx, chatThreadButtonLabel(displayIndex, thread), "chat_open", thread.ID, "", "", nil),
 			})
 		}
 	}
@@ -283,9 +298,9 @@ func (s *Service) chatsOverviewPage(ctx context.Context, page int) (*DirectRespo
 	}
 	for index, thread := range catalog.Chats[start:end] {
 		displayIndex := start + index + 1
-		lines = append(lines, fmt.Sprintf("%d. %s | %s", displayIndex, firstNonEmpty(thread.Title, thread.ShortID()), thread.ShortID()))
+		lines = append(lines, fmt.Sprintf("%d. %s | %s", displayIndex, threadDisplayLabel(thread), thread.ShortID()))
 		buttons = append(buttons, []model.ButtonSpec{
-			s.callbackButton(ctx, fmt.Sprintf("Chat %d", index+1), "chat_open", thread.ID, "", "", nil),
+			s.callbackButton(ctx, chatThreadButtonLabel(displayIndex, thread), "chat_open", thread.ID, "", "", nil),
 		})
 	}
 	return &DirectResponse{Text: strings.Join(lines, "\n"), Buttons: buttons}, nil
@@ -298,18 +313,20 @@ func projectWorkspacePayload(workspace projectWorkspace) map[string]any {
 		"directory_name": workspace.DirectoryName,
 		"cwd":            workspace.CWD,
 		"latest_thread":  workspace.LatestThread,
+		"latest_label":   workspace.LatestThreadLabel,
 		"thread_count":   workspace.ThreadCount,
 	}
 }
 
 func projectWorkspaceFromPayload(payload map[string]any) projectWorkspace {
 	return projectWorkspace{
-		Key:           payloadMapString(payload, "key"),
-		ProjectName:   payloadMapString(payload, "project_name"),
-		DirectoryName: payloadMapString(payload, "directory_name"),
-		CWD:           payloadMapString(payload, "cwd"),
-		LatestThread:  payloadMapString(payload, "latest_thread"),
-		ThreadCount:   payloadMapInt(payload, "thread_count"),
+		Key:               payloadMapString(payload, "key"),
+		ProjectName:       payloadMapString(payload, "project_name"),
+		DirectoryName:     payloadMapString(payload, "directory_name"),
+		CWD:               payloadMapString(payload, "cwd"),
+		LatestThread:      payloadMapString(payload, "latest_thread"),
+		LatestThreadLabel: payloadMapString(payload, "latest_label"),
+		ThreadCount:       payloadMapInt(payload, "thread_count"),
 	}
 }
 

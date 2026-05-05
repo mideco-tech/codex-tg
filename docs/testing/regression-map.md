@@ -67,6 +67,7 @@ Contract notes:
 - Project/workspace identity comes from cached thread `cwd`; this flow does not create or edit work directories.
 - Threads under generic `Documents/Codex` cwd roots are Codex UI `Chats`, not normal projects. A Chat selection opens and binds its single thread; Chat lists do not expose project `New thread`.
 - Main `/projects` uses project pagination with configurable preview limits and keeps latest Chat previews newest-first. Full Chat pagination lives behind `Open Chats`.
+- Project buttons use `N. Project name`; Chat buttons use `Chat N. Thread name`. The menu must not render internal `key:` rows and must show each project row's `last thread:`.
 - `/newchat <prompt>` creates a new App Server thread without a cwd parameter.
 - Telegram must not accept arbitrary local filesystem paths for thread creation.
 - The first prompt is required; create-only threads are out of scope for this slice.

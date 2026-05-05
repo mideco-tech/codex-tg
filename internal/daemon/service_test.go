@@ -418,8 +418,14 @@ func TestProjectsCommandShowsProjectButtonsGroupedByCWD(t *testing.T) {
 	if !strings.Contains(response.Text, "/Users/example/work/a/codex-tg") || !strings.Contains(response.Text, "/Users/example/work/b/codex-tg") {
 		t.Fatalf("/projects text missing grouped cwd entries:\n%s", response.Text)
 	}
-	if got := countButtonsContaining(response.Buttons, "Project "); got != 2 {
-		t.Fatalf("/projects buttons = %#v, want two project workspace buttons", response.Buttons)
+	if strings.Contains(response.Text, "key:") {
+		t.Fatalf("/projects text renders internal project key:\n%s", response.Text)
+	}
+	if !strings.Contains(response.Text, "last thread: A two") || !strings.Contains(response.Text, "last thread: B one") {
+		t.Fatalf("/projects text missing latest thread labels:\n%s", response.Text)
+	}
+	if got := countButtonsContaining(response.Buttons, "codex-tg"); got != 2 {
+		t.Fatalf("/projects buttons = %#v, want two named project workspace buttons", response.Buttons)
 	}
 }
 
@@ -523,11 +529,16 @@ func TestProjectsCommandShowsChatsSectionAndSortsByRecency(t *testing.T) {
 	if strings.Contains(response.Text, "cwd: /Users/example/Documents/Codex") || strings.Contains(response.Text, `cwd: C:\Users\someone\Documents\Codex`) {
 		t.Fatalf("/projects text renders chat cwd as project cwd:\n%s", response.Text)
 	}
-	if got := countButtonsContaining(response.Buttons, "Project "); got != 2 {
-		t.Fatalf("/projects buttons = %#v, want two project buttons", response.Buttons)
+	if strings.Contains(response.Text, "key:") {
+		t.Fatalf("/projects text renders internal project key:\n%s", response.Text)
 	}
-	if got := countButtonsContaining(response.Buttons, "Chat "); got != 3 {
-		t.Fatalf("/projects buttons = %#v, want three chat preview buttons", response.Buttons)
+	if !strings.Contains(response.Text, "last thread: New project") || !strings.Contains(response.Text, "last thread: Old project") {
+		t.Fatalf("/projects text missing latest project thread labels:\n%s", response.Text)
+	}
+	for _, label := range []string{"1. new-project", "2. old-project", "Chat 1. Newer Chat", "Chat 2. Windows Chat", "Chat 3. Older Chat"} {
+		if callbackTokenForButton(response.Buttons, label) == "" {
+			t.Fatalf("/projects buttons = %#v, want named button %q", response.Buttons, label)
+		}
 	}
 	if callbackTokenForButton(response.Buttons, "Open Chats") == "" {
 		t.Fatalf("/projects buttons = %#v, want Open Chats", response.Buttons)
@@ -580,6 +591,11 @@ func TestProjectsPaginationUsesPreviewLimitsAndKeepsLatestChats(t *testing.T) {
 	if !strings.Contains(page1.Text, "Latest Chats: showing 1 of 2") || !strings.Contains(page1.Text, "Chat 2") || strings.Contains(page1.Text, "Chat 1") {
 		t.Fatalf("page1 text =\n%s\nwant latest one chat preview", page1.Text)
 	}
+	for _, label := range []string{"1. project-5", "2. project-4", "Chat 1. Chat 2"} {
+		if callbackTokenForButton(page1.Buttons, label) == "" {
+			t.Fatalf("page1 buttons = %#v, want named button %q", page1.Buttons, label)
+		}
+	}
 	nextToken := callbackTokenForButton(page1.Buttons, ">")
 	if nextToken == "" {
 		t.Fatalf("page1 buttons = %#v, want next button", page1.Buttons)
@@ -593,6 +609,11 @@ func TestProjectsPaginationUsesPreviewLimitsAndKeepsLatestChats(t *testing.T) {
 	}
 	if !strings.Contains(page2.Text, "Chat 2") || strings.Contains(page2.Text, "Chat 1") {
 		t.Fatalf("page2 text =\n%s\nwant same latest chat preview", page2.Text)
+	}
+	for _, label := range []string{"3. project-3", "4. project-2", "Chat 1. Chat 2"} {
+		if callbackTokenForButton(page2.Buttons, label) == "" {
+			t.Fatalf("page2 buttons = %#v, want named button %q", page2.Buttons, label)
+		}
 	}
 }
 
@@ -635,13 +656,13 @@ func TestOpenChatsPaginatesAndChatSelectionBindsThread(t *testing.T) {
 	if strings.Contains(chats.Text, "New thread") || callbackTokenForButton(chats.Buttons, "New thread") != "" {
 		t.Fatalf("chats response = %#v, want no New thread action", chats)
 	}
-	chatToken := callbackTokenForButton(chats.Buttons, "Chat 1")
+	chatToken := callbackTokenForButton(chats.Buttons, "Chat 1. Chat 5")
 	if chatToken == "" {
 		t.Fatalf("chats buttons = %#v, want first chat button", chats.Buttons)
 	}
 	opened, err := service.HandleCallback(ctx, 123456789, 0, 42, 123456789, chatToken)
 	if err != nil {
-		t.Fatalf("HandleCallback(Chat 1) failed: %v", err)
+		t.Fatalf("HandleCallback(Chat 1. Chat 5) failed: %v", err)
 	}
 	if opened == nil || opened.ThreadID != "chat-5-thread" {
 		t.Fatalf("opened = %#v, want newest chat thread", opened)
@@ -697,7 +718,7 @@ func TestProjectOpenShowsNewThreadMenu(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleCommand(/projects) failed: %v", err)
 	}
-	token := callbackTokenForButton(projects.Buttons, "Project 1")
+	token := callbackTokenForButton(projects.Buttons, "1. project")
 	if token == "" {
 		t.Fatalf("/projects buttons = %#v, want project button", projects.Buttons)
 	}
@@ -3970,7 +3991,7 @@ func openOnlyProjectMenu(t *testing.T, service *Service, ctx context.Context) *D
 	if err != nil {
 		t.Fatalf("handleCommand(/projects) failed: %v", err)
 	}
-	token := callbackTokenForButton(projects.Buttons, "Project 1")
+	token := callbackTokenForButton(projects.Buttons, "1. project")
 	if token == "" {
 		t.Fatalf("/projects buttons = %#v, want project button", projects.Buttons)
 	}

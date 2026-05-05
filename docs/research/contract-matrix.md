@@ -58,6 +58,7 @@ This file now serves two purposes:
 - `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
 - After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
 - `/projects` groups cached non-Chat projects by normalized `cwd`, sorts projects by latest cached thread activity, shows latest Codex UI Chat previews, opens full Chats pagination through `Open Chats`, and never accepts arbitrary filesystem paths from Telegram.
+- `/projects` buttons show meaningful labels (`N. Project name`, `Chat N. Thread name`); internal project keys are not rendered in the menu, and project rows show `last thread:`.
 - Cached threads under generic `Documents/Codex` paths are treated as single-thread `Chats`; selecting a Chat opens and binds that thread and does not offer project `New thread`.
 - `New thread` creates a one-shot state; the next plain-text message starts a new App Server thread in the selected project cwd and uses that text as the first prompt.
 - `/newchat <prompt>` starts a new App Server thread without a cwd parameter and uses the prompt as the first turn.
