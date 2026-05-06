@@ -8,7 +8,7 @@
 - A waiting Plan Mode prompt is rendered as a separate `[Plan]` prompt-card, not as a Final Card state and not as a passive tool/output message.
 - Telegram-originated Plan Mode runs must be started with App Server `turn/start` `collaborationMode.mode = plan`; prompt wording alone is not treated as Plan Mode.
 - Telegram exposes Plan start commands through `/plan <text>`, `/plan_mode <text>`, `/plan <thread> <text>`, `/plan_mode <thread> <text>`, and `/reply --plan <thread> <text>`.
-- Telegram exposes Default Mode reset commands through `/default <text>`, `/default <thread> <text>`, and `/reply --default <thread> <text>`, which pass App Server `turn/start` `collaborationMode.mode = default`.
+- Default Mode reset UX is superseded by ADR-016: Plan Final Cards expose `Turn off Plan`, and `/stop` arms a one-shot reset for the next ordinary turn. Hidden `/default` and `/reply --default` compatibility paths may still pass `collaborationMode.mode = default`, but they are not public commands.
 - `/plan <text>` and `/plan_mode <text>` use normal routing precedence after the command: reply-to route, armed state, then bound thread.
 - `/plan <thread> <text>` and `/plan_mode <thread> <text>` are treated as explicit-thread commands only when the first token is a known thread id or UUID-like Codex thread id. Unknown plain words remain part of the prompt text for the implicit route.
 - `/reply --plan <thread> <text>` stays strict and requires an explicit thread id.

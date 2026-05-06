@@ -83,10 +83,17 @@ func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread mod
 			s.callbackButton(ctx, "Show", "show_thread", thread.ID, snapshot.LatestTurnID, "", nil),
 			s.callbackButton(ctx, "Bind here", "bind_here", thread.ID, snapshot.LatestTurnID, "", nil),
 		},
-		{
-			s.callbackButton(ctx, "Get thread id", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
-		},
 	}
+	if s.finalCardShouldShowTurnOffPlan(ctx, thread.ID, snapshot) {
+		buttons = append(buttons, []model.ButtonSpec{
+			s.callbackButton(ctx, "Turn off Plan", "turn_off_plan", thread.ID, snapshot.LatestTurnID, "", map[string]any{
+				"panel_id": panelID,
+			}),
+		})
+	}
+	buttons = append(buttons, []model.ButtonSpec{
+		s.callbackButton(ctx, "Get thread id", "get_thread_id", thread.ID, snapshot.LatestTurnID, "", nil),
+	})
 	header := strings.Join([]string{
 		s.visualHeader(ctx, "Final", thread, snapshot.LatestTurnID),
 		fmt.Sprintf("Status: %s", readableStatus(snapshot.LatestTurnStatus, thread.Status)),
@@ -193,6 +200,36 @@ func (s *Service) handleDetailsCallback(ctx context.Context, chatID, topicID, ca
 		return nil, err
 	}
 	return &DirectResponse{CallbackText: "Details updated."}, nil
+}
+
+func (s *Service) handleTurnOffPlanCallback(ctx context.Context, chatID, topicID, callbackMessageID int64, route *model.CallbackRoute, payload map[string]any) (*DirectResponse, error) {
+	panel, response, err := s.detailsPanelForCallback(ctx, chatID, topicID, callbackMessageID, route, payload, true)
+	if err != nil {
+		return nil, err
+	}
+	if response != nil {
+		return response, nil
+	}
+	thread, snapshot, err := s.loadThreadPanelSnapshot(ctx, panel.ThreadID)
+	if err != nil || thread == nil || snapshot == nil {
+		return &DirectResponse{Text: "Could not load thread details. Try /repair or /show <thread>."}, nil
+	}
+	snapshot, ok := snapshotForPanelTurn(*thread, snapshot, panel)
+	if !ok {
+		return staleDetailsResponse(), nil
+	}
+	if err := s.setThreadCollaborationDefaultOverride(ctx, panel.ThreadID); err != nil {
+		return nil, err
+	}
+	message, buttons, cardHash := s.renderFinalCard(ctx, panel.ID, *thread, snapshot)
+	targetMessageID := callbackMessageID
+	if targetMessageID == 0 {
+		targetMessageID = panel.SummaryMessageID
+	}
+	if err := s.editPanelCard(ctx, chatID, topicID, targetMessageID, message, buttons, panel, snapshot, cardHash, model.DetailsViewState{}); err != nil {
+		return nil, err
+	}
+	return &DirectResponse{CallbackText: "Plan Mode will be off for the next turn."}, nil
 }
 
 func (s *Service) editPanelCard(ctx context.Context, chatID, topicID, messageID int64, message model.RenderedMessage, buttons [][]model.ButtonSpec, panel *model.ThreadPanel, snapshot *appserver.ThreadReadSnapshot, cardHash string, state model.DetailsViewState) error {

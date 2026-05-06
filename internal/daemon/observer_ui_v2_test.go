@@ -2138,6 +2138,219 @@ func TestDetailsCallbackRejectsMismatchedMessageID(t *testing.T) {
 	}
 }
 
+func TestTurnOffPlanCallbackSetsDefaultOverrideAndEditsFinalCard(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "turn-off-plan-thread",
+		Title:       "Turn off plan",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	snapshot := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-plan-final",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Plan mode final.",
+		LatestFinalFP:    "turn-plan-final-fp",
+		DetailItems: []model.DetailItem{
+			{ID: "plan-1", Kind: model.DetailItemPlan, Text: "Plan text.", CommentaryIndex: 1},
+			{ID: "final-1", Kind: model.DetailItemFinal, Text: "Plan mode final.", CommentaryIndex: 1},
+		},
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, appserver.CompactSnapshot(nil, snapshot, time.Now().UTC())); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	panel, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
+		ChatID:            123456789,
+		TopicID:           0,
+		ProjectName:       thread.ProjectName,
+		ThreadID:          thread.ID,
+		SourceMode:        model.PanelSourceExplicit,
+		SummaryMessageID:  101,
+		CurrentTurnID:     snapshot.LatestTurnID,
+		Status:            "completed",
+		ArchiveEnabled:    true,
+		LastFinalNoticeFP: snapshot.LatestFinalFP,
+		LastFinalCardHash: "old-card-hash",
+		DetailsViewJSON:   model.MustJSON(model.DetailsViewState{}),
+		LastSummaryHash:   "old-card-hash",
+	})
+	if err != nil {
+		t.Fatalf("CreateThreadPanel failed: %v", err)
+	}
+	_, buttons, _ := service.renderFinalCard(ctx, panel.ID, thread, &snapshot)
+	token := buttonToken(buttons, "Turn off Plan")
+	if token == "" {
+		t.Fatalf("final buttons = %#v, want Turn off Plan", buttons)
+	}
+
+	response, err := service.HandleCallback(ctx, panel.ChatID, panel.TopicID, panel.SummaryMessageID, panel.ChatID, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(turn_off_plan) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.CallbackText, "Plan Mode") {
+		t.Fatalf("response = %#v, want callback text", response)
+	}
+	if got := service.threadCollaborationOverride(ctx, thread.ID); got != collaborationModeDefault {
+		t.Fatalf("threadCollaborationOverride = %q, want default", got)
+	}
+	if len(sender.edits) != 1 {
+		t.Fatalf("edits = %#v, want one Final Card edit", sender.edits)
+	}
+	edit := sender.edits[0]
+	if edit.messageID != panel.SummaryMessageID {
+		t.Fatalf("edit message id = %d, want %d", edit.messageID, panel.SummaryMessageID)
+	}
+	if buttonToken(edit.buttons, "Turn off Plan") != "" {
+		t.Fatalf("edited buttons = %#v, want Turn off Plan removed", edit.buttons)
+	}
+}
+
+func TestTurnOffPlanCallbackRejectsMismatchedMessageID(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "turn-off-plan-stale-thread",
+		Title:       "Turn off plan stale",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	snapshot := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-plan-final",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Plan mode final.",
+		LatestFinalFP:    "turn-plan-final-fp",
+		DetailItems: []model.DetailItem{
+			{ID: "plan-1", Kind: model.DetailItemPlan, Text: "Plan text.", CommentaryIndex: 1},
+			{ID: "final-1", Kind: model.DetailItemFinal, Text: "Plan mode final.", CommentaryIndex: 1},
+		},
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, appserver.CompactSnapshot(nil, snapshot, time.Now().UTC())); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	panel, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
+		ChatID:            123456789,
+		TopicID:           0,
+		ProjectName:       thread.ProjectName,
+		ThreadID:          thread.ID,
+		SourceMode:        model.PanelSourceExplicit,
+		SummaryMessageID:  101,
+		CurrentTurnID:     snapshot.LatestTurnID,
+		Status:            "completed",
+		ArchiveEnabled:    true,
+		LastFinalNoticeFP: snapshot.LatestFinalFP,
+		LastFinalCardHash: "old-card-hash",
+		DetailsViewJSON:   model.MustJSON(model.DetailsViewState{}),
+		LastSummaryHash:   "old-card-hash",
+	})
+	if err != nil {
+		t.Fatalf("CreateThreadPanel failed: %v", err)
+	}
+	_, buttons, _ := service.renderFinalCard(ctx, panel.ID, thread, &snapshot)
+	token := buttonToken(buttons, "Turn off Plan")
+	if token == "" {
+		t.Fatalf("final buttons = %#v, want Turn off Plan", buttons)
+	}
+
+	response, err := service.HandleCallback(ctx, panel.ChatID, panel.TopicID, panel.SummaryMessageID+99, panel.ChatID, token)
+	if err != nil {
+		t.Fatalf("HandleCallback(turn_off_plan stale) failed: %v", err)
+	}
+	if len(sender.edits) != 0 {
+		t.Fatalf("edits = %#v, want no edit for stale callback", sender.edits)
+	}
+	if got := service.threadCollaborationOverride(ctx, thread.ID); got != "" {
+		t.Fatalf("threadCollaborationOverride = %q, want unchanged", got)
+	}
+	if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+		t.Fatalf("response = %#v, want stale response", response)
+	}
+}
+
+func TestTurnOffPlanCallbackRejectsMismatchedPanelRoute(t *testing.T) {
+	t.Parallel()
+
+	service, sender, thread, panel, token := setupTurnOffPlanCallback(t, "turn-off-plan-route")
+	ctx := context.Background()
+	cases := []struct {
+		name      string
+		chatID    int64
+		topicID   int64
+		messageID int64
+		token     string
+	}{
+		{
+			name:      "wrong topic",
+			chatID:    panel.ChatID,
+			topicID:   panel.TopicID + 99,
+			messageID: panel.SummaryMessageID,
+			token:     token,
+		},
+		{
+			name:      "wrong thread",
+			chatID:    panel.ChatID,
+			topicID:   panel.TopicID,
+			messageID: panel.SummaryMessageID,
+			token: service.callbackButton(ctx, "Turn off Plan", "turn_off_plan", thread.ID+"-other", panel.CurrentTurnID, "", map[string]any{
+				"panel_id": panel.ID,
+			}).CallbackData,
+		},
+		{
+			name:      "wrong turn",
+			chatID:    panel.ChatID,
+			topicID:   panel.TopicID,
+			messageID: panel.SummaryMessageID,
+			token: service.callbackButton(ctx, "Turn off Plan", "turn_off_plan", thread.ID, panel.CurrentTurnID+"-other", "", map[string]any{
+				"panel_id": panel.ID,
+			}).CallbackData,
+		},
+		{
+			name:      "wrong panel",
+			chatID:    panel.ChatID,
+			topicID:   panel.TopicID,
+			messageID: panel.SummaryMessageID,
+			token: service.callbackButton(ctx, "Turn off Plan", "turn_off_plan", thread.ID, panel.CurrentTurnID, "", map[string]any{
+				"panel_id": panel.ID + 999,
+			}).CallbackData,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			response, err := service.HandleCallback(ctx, tc.chatID, tc.topicID, tc.messageID, panel.ChatID, tc.token)
+			if err != nil {
+				t.Fatalf("HandleCallback(turn_off_plan stale) failed: %v", err)
+			}
+			if response == nil || !strings.Contains(response.Text, "Details panel is stale") {
+				t.Fatalf("response = %#v, want stale response", response)
+			}
+			if got := service.threadCollaborationOverride(ctx, thread.ID); got != "" {
+				t.Fatalf("threadCollaborationOverride = %q, want unchanged", got)
+			}
+			if len(sender.edits) != 0 {
+				t.Fatalf("edits = %#v, want no edit for stale callback", sender.edits)
+			}
+		})
+	}
+}
+
 func TestDetailsToolsFileRejectsMismatchedPanelRoute(t *testing.T) {
 	t.Parallel()
 
@@ -2500,6 +2713,63 @@ func TestRunNoticeNotificationFlagCanSilenceNewRun(t *testing.T) {
 			t.Fatalf("message[%d] options = %#v, want silent when notify_new_run is disabled", index, message.options)
 		}
 	}
+}
+
+func setupTurnOffPlanCallback(t *testing.T, suffix string) (*Service, *recordingSender, model.Thread, *model.ThreadPanel, string) {
+	t.Helper()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          suffix + "-thread",
+		Title:       "Turn off plan",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	snapshot := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     suffix + "-turn",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Plan mode final.",
+		LatestFinalFP:    suffix + "-fp",
+		DetailItems: []model.DetailItem{
+			{ID: suffix + "-plan", Kind: model.DetailItemPlan, Text: "Plan text.", CommentaryIndex: 1},
+			{ID: suffix + "-final", Kind: model.DetailItemFinal, Text: "Plan mode final.", CommentaryIndex: 1},
+		},
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, appserver.CompactSnapshot(nil, snapshot, time.Now().UTC())); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	panel, err := service.store.CreateThreadPanel(ctx, model.ThreadPanel{
+		ChatID:            123456789,
+		TopicID:           0,
+		ProjectName:       thread.ProjectName,
+		ThreadID:          thread.ID,
+		SourceMode:        model.PanelSourceExplicit,
+		SummaryMessageID:  101,
+		CurrentTurnID:     snapshot.LatestTurnID,
+		Status:            "completed",
+		ArchiveEnabled:    true,
+		LastFinalNoticeFP: snapshot.LatestFinalFP,
+		LastFinalCardHash: "old-card-hash",
+		DetailsViewJSON:   model.MustJSON(model.DetailsViewState{}),
+		LastSummaryHash:   "old-card-hash",
+	})
+	if err != nil {
+		t.Fatalf("CreateThreadPanel failed: %v", err)
+	}
+	_, buttons, _ := service.renderFinalCard(ctx, panel.ID, thread, &snapshot)
+	token := buttonToken(buttons, "Turn off Plan")
+	if token == "" {
+		t.Fatalf("final buttons = %#v, want Turn off Plan", buttons)
+	}
+	return service, sender, thread, panel, token
 }
 
 func buttonToken(rows [][]model.ButtonSpec, text string) string {

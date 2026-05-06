@@ -329,6 +329,8 @@ func (s *Service) HandleCallback(ctx context.Context, chatID, topicID, messageID
 		return s.handleDetailsCallback(ctx, chatID, topicID, messageID, route, payload)
 	case "details_tools_file":
 		return s.sendDetailsToolsFile(ctx, chatID, topicID, messageID, route, payload)
+	case "turn_off_plan":
+		return s.handleTurnOffPlanCallback(ctx, chatID, topicID, messageID, route, payload)
 	case "settings_overview":
 		return s.editOrSendSettingsResponse(ctx, chatID, topicID, messageID, "Settings", s.codexSettingsOverview)
 	case "settings_model_menu":
@@ -1281,7 +1283,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 	case "/start":
 		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/newchat <prompt>\n/newthread <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan|--default] <thread> <text>\n/default <text>\n/default <thread_id> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/newchat <prompt>\n/newthread <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -1366,7 +1368,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 			return nil, err
 		}
 		if !ok || decision.ThreadID == "" {
-			return &DirectResponse{Text: "Usage: /reply [--plan|--default] <thread> <text>"}, nil
+			return &DirectResponse{Text: "Usage: /reply [--plan] <thread> <text>"}, nil
 		}
 		s.logTelegramInbound("command_reply", chatID, topicID, replyToMessageID, decision, text, collaborationMode)
 		return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, collaborationMode)
@@ -1865,8 +1867,15 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 		})
 		return &DirectResponse{Text: activeThreadReplyText(thread, steerErr), ThreadID: threadID, TurnID: thread.ActiveTurnID}, nil
 	}
+	startedNewTurn := false
+	effectiveCollaborationMode := strings.TrimSpace(collaborationMode)
 	if result == nil {
-		options := s.turnStartOptions(ctx, collaborationMode, thread)
+		usedDefaultOverride := false
+		if effectiveCollaborationMode == "" && s.threadCollaborationOverride(ctx, threadID) == collaborationModeDefault {
+			effectiveCollaborationMode = collaborationModeDefault
+			usedDefaultOverride = true
+		}
+		options := s.turnStartOptions(ctx, effectiveCollaborationMode, thread)
 		started = time.Now()
 		result, err = live.TurnStart(requestCtx, threadID, text, thread.CWD, options)
 		s.logAppServerCall("TurnStart", started, err, live, lifecycleFields{
@@ -1881,11 +1890,23 @@ func (s *Service) sendInputToThreadTurn(ctx context.Context, chatID, topicID int
 		if err != nil {
 			return nil, err
 		}
+		if usedDefaultOverride || effectiveCollaborationMode != "" {
+			_ = s.clearThreadCollaborationOverride(ctx, threadID)
+		}
 		_ = s.store.ClearSteerState(ctx, chatID, topicID)
+		startedNewTurn = true
 	}
 	turn := appserverThreadTurnID(result)
 	if strings.TrimSpace(turn) == "" && strings.TrimSpace(routeTurnID) != "" && err == nil {
 		turn = routeTurnID
+	}
+	if startedNewTurn {
+		switch effectiveCollaborationMode {
+		case collaborationModePlan:
+			_ = s.setThreadCollaborationMarker(ctx, threadID, "", collaborationModePlan)
+		case collaborationModeDefault:
+			_ = s.clearThreadCollaborationMarker(ctx, threadID)
+		}
 	}
 	if strings.TrimSpace(turn) != "" {
 		_ = s.markTelegramOriginTurnFromTelegram(ctx, threadID, turn, chatID, topicID)
@@ -2110,12 +2131,19 @@ func (s *Service) stopThread(ctx context.Context, chatID, topicID int64, explici
 	if decision.ThreadID == "" {
 		return &DirectResponse{Text: "No thread target for /stop. Use /stop <thread> or reply to a thread message."}, nil
 	}
-	return s.interruptTurn(ctx, chatID, topicID, decision.ThreadID, "")
+	response, err := s.interruptTurn(ctx, chatID, topicID, decision.ThreadID, "")
+	if response != nil && strings.TrimSpace(response.Text) == "" && strings.TrimSpace(response.CallbackText) != "" {
+		response.Text = response.CallbackText
+	}
+	return response, err
 }
 
 func (s *Service) interruptTurn(ctx context.Context, chatID, topicID int64, threadID, turnID string) (*DirectResponse, error) {
 	if strings.TrimSpace(threadID) == "" {
 		return &DirectResponse{CallbackText: "No thread target for stop."}, nil
+	}
+	if err := s.setThreadCollaborationDefaultOverride(ctx, threadID); err != nil {
+		return nil, err
 	}
 	thread, _ := s.store.GetThread(ctx, threadID)
 	s.mu.RLock()
@@ -2138,8 +2166,19 @@ func (s *Service) interruptTurn(ctx context.Context, chatID, topicID int64, thre
 	if refreshed, err := s.refreshThreadForOperation(ctx, live, threadID, "interrupt_turn_before_stop"); err == nil && refreshed != nil {
 		thread = refreshed
 	}
-	if thread != nil && strings.TrimSpace(thread.ActiveTurnID) != "" {
-		turnID = thread.ActiveTurnID
+	snapshot, _ := s.store.GetSnapshot(ctx, threadID)
+	latestTurnTerminal := snapshot != nil && isTerminalStatus(snapshot.LastSeenTurnStatus)
+	if thread != nil && isTerminalStatus(thread.Status) {
+		latestTurnTerminal = true
+	}
+	if thread != nil {
+		if latestTurnTerminal {
+			turnID = ""
+		} else if threadLooksActiveForInput(thread) && strings.TrimSpace(thread.ActiveTurnID) != "" {
+			turnID = thread.ActiveTurnID
+		} else {
+			turnID = ""
+		}
 	}
 	if strings.TrimSpace(turnID) == "" {
 		explicitTarget := model.ObserverTarget{ChatKey: model.ChatKey(chatID, topicID), ChatID: chatID, TopicID: topicID, Enabled: true}

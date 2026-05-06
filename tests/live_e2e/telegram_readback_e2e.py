@@ -44,7 +44,8 @@ DEFAULT_CASES = (
     "details_binding",
     "complex_math",
 )
-AVAILABLE_CASES = DEFAULT_CASES + ("newchat_folder", "notification_contract")
+AVAILABLE_CASES = DEFAULT_CASES + ("newchat_folder", "notification_contract", "plan_mode_reset")
+NO_BASE_THREAD_CASES = {"newchat_folder", "plan_mode_reset"}
 
 
 def load_env_file(path: str) -> None:
@@ -59,21 +60,24 @@ def load_env_file(path: str) -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
-def require_env() -> None:
+def require_env() -> list[str]:
     load_env_file(os.environ.get("CODEX_TG_LIVE_E2E_ENV", ""))
     if os.environ.get("CODEX_TG_LIVE_E2E") != "1":
         raise SystemExit("set CODEX_TG_LIVE_E2E=1 to run live Telegram E2E")
+    cases = selected_cases()
     required = [
-        "CODEX_TG_E2E_THREAD_ID",
         "TG_SESSION",
         "TG_API_ID",
         "TG_API_HASH",
     ]
+    if any(case not in NO_BASE_THREAD_CASES for case in cases):
+        required.insert(0, "CODEX_TG_E2E_THREAD_ID")
     missing = [key for key in required if not os.environ.get(key, "").strip()]
     if not (os.environ.get("TG_BOT_USERNAME", "").strip() or os.environ.get("TG_BOT_PEER_ID", "").strip()):
         missing.append("TG_BOT_USERNAME or TG_BOT_PEER_ID")
     if missing:
         raise SystemExit("missing required env: " + ", ".join(missing))
+    return cases
 
 
 def parse_proxy(raw: str):
@@ -174,6 +178,13 @@ def has_button(message, text: str) -> bool:
             if getattr(button, "text", "") == text:
                 return True
     return False
+
+
+def parse_thread_id(text: str) -> str:
+    match = re.search(r"(?m)^Thread ID:\s*(\S+)\s*$", text or "")
+    if not match:
+        return ""
+    return match.group(1).strip()
 
 
 def fail_if_bad_text(text: str, context: str) -> None:
@@ -279,6 +290,90 @@ async def wait_bot_text_after(client, bot, after_id: int, context: str, predicat
             if predicate(text):
                 return message
     raise SystemExit(f"BOT_TEXT_TIMEOUT case={context}")
+
+
+async def wait_bot_message_after(client, bot, after_id: int, context: str, predicate, timeout: int = 120):
+    deadline = time.time() + timeout
+    seen = set()
+    while time.time() < deadline:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, after_id):
+            text = (message.raw_text or "").strip()
+            key = (message.id, text)
+            if key not in seen:
+                seen.add(key)
+                print(f"BOT case={context} message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, context)
+            if predicate(message, text):
+                return message
+    raise SystemExit(f"BOT_MESSAGE_TIMEOUT case={context}")
+
+
+async def current_context_thread_id(client, bot, context: str) -> str:
+    sent = await client.send_message(bot, "/context")
+    message = await wait_bot_text_after(
+        client,
+        bot,
+        sent.id,
+        context,
+        lambda text: "Mode: Bound thread" in text and "Thread ID:" in text,
+    )
+    thread_id = parse_thread_id(message.raw_text or "")
+    if not thread_id:
+        raise SystemExit(f"CONTEXT_THREAD_ID_MISSING context={context} preview={preview(message.raw_text or '')}")
+    return thread_id
+
+
+async def wait_sleep_tool_and_final(client, bot, after_id: int, marker: str, context: str):
+    deadline = time.time() + 180
+    seen = set()
+    tool_seen = False
+    final = None
+    while time.time() < deadline:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, after_id):
+            text = (message.raw_text or "").strip()
+            key = (message.id, text)
+            if key not in seen:
+                seen.add(key)
+                print(f"BOT case={context} message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, context)
+            if "[Tool]" in text and "sleep 5" in text and ("Current tool:" in text or "Last completed tool:" in text):
+                tool_seen = True
+            if is_final_with_marker(text, marker) and has_button(message, "Details"):
+                final = message
+        if final is not None and tool_seen:
+            break
+    if not tool_seen:
+        raise SystemExit(f"PLAN_RESET_SLEEP_TOOL_NOT_SEEN context={context}")
+    if final is None:
+        raise SystemExit(f"FINAL_TIMEOUT case={context} marker={marker}")
+    final_text = final.raw_text or ""
+    if "Plan Mode" in final_text:
+        raise SystemExit(f"PLAN_RESET_FINAL_STILL_PLAN_MODE context={context} preview={preview(final_text)}")
+    return final
+
+
+async def wait_completed_plan_commentary(client, bot, after_id: int, context: str):
+    return await wait_bot_message_after(
+        client,
+        bot,
+        after_id,
+        context,
+        lambda message, text: "[commentary]" in text and "Status: completed" in text and "[plan]" in text,
+        timeout=240,
+    )
+
+
+async def wait_plan_final_with_turn_off(client, bot, after_id: int, context: str):
+    return await wait_bot_message_after(
+        client,
+        bot,
+        after_id,
+        context,
+        lambda message, text: "[Final]" in text and has_button(message, "Turn off Plan") and has_button(message, "Details"),
+        timeout=240,
+    )
 
 
 async def wait_message_deleted(client, bot, message_id: int, context: str, timeout: int = 40) -> None:
@@ -1028,11 +1123,88 @@ async def notification_contract_case(client, bot, thread_id: str, stamp: str) ->
     print("RESULT case=notification_contract ok", flush=True)
 
 
+async def plan_mode_reset_case(client, bot, thread_id: str, stamp: str) -> None:
+    del thread_id
+    since = utc_now()
+    bootstrap_marker = f"PLAN_RESET_BOOTSTRAP_{stamp}"
+    click_marker = f"PLAN_RESET_CLICK_SLEEP_{stamp}"
+    stop_sleep_marker = f"PLAN_RESET_STOP_SLEEP_{stamp}"
+
+    bootstrap_prompt = (
+        f"/newthread disposable plan reset {stamp}. "
+        "Do not use tools. "
+        f"Final answer exactly: {bootstrap_marker}"
+    )
+    sent_bootstrap = await client.send_message(bot, bootstrap_prompt)
+    print(f"SENT case=plan_mode_reset phase=bootstrap message_id={sent_bootstrap.id}", flush=True)
+    await wait_final_message(client, bot, sent_bootstrap.id, bootstrap_marker, "plan_mode_reset")
+    dedicated_thread_id = await current_context_thread_id(client, bot, "plan_mode_reset")
+
+    plan_prompt = (
+        f"/plan {dedicated_thread_id} "
+        "Составь короткий план выполнения команды sleep 5. Не выполняй команду."
+    )
+    sent_plan = await client.send_message(bot, plan_prompt)
+    print(f"SENT case=plan_mode_reset phase=turn_off_plan_plan message_id={sent_plan.id}", flush=True)
+    await wait_completed_plan_commentary(client, bot, sent_plan.id, "plan_mode_reset")
+
+    stuck_prompt = "Выполни sleep 5. Это проверка выхода из Plan Mode."
+    sent_stuck = await client.send_message(bot, f"/reply {dedicated_thread_id} {stuck_prompt}")
+    print(f"SENT case=plan_mode_reset phase=turn_off_plan_stuck message_id={sent_stuck.id}", flush=True)
+    plan_final = await wait_plan_final_with_turn_off(client, bot, sent_stuck.id, "plan_mode_reset")
+    await plan_final.click(text="Turn off Plan")
+    await wait_message_by_id(
+        client,
+        bot,
+        plan_final.id,
+        "plan_mode_reset",
+        lambda message, text: "[Final]" in text and not has_button(message, "Turn off Plan"),
+    )
+
+    click_sleep_prompt = (
+        "Run exactly one shell command tool call: sleep 5. "
+        "Do not use any other shell command. Do not answer before that command finishes. "
+        f"Final answer exactly: {click_marker}"
+    )
+    sent_click_sleep = await client.send_message(bot, f"/reply {dedicated_thread_id} {click_sleep_prompt}")
+    print(f"SENT case=plan_mode_reset phase=turn_off_plan_sleep message_id={sent_click_sleep.id}", flush=True)
+    await wait_sleep_tool_and_final(client, bot, sent_click_sleep.id, click_marker, "plan_mode_reset")
+
+    stop_plan_prompt = (
+        f"/plan {dedicated_thread_id} "
+        "Составь короткий план выполнения команды sleep 5. Не выполняй команду."
+    )
+    sent_stop_plan = await client.send_message(bot, stop_plan_prompt)
+    print(f"SENT case=plan_mode_reset phase=stop_plan message_id={sent_stop_plan.id}", flush=True)
+    await wait_completed_plan_commentary(client, bot, sent_stop_plan.id, "plan_mode_reset")
+
+    sent_stop = await client.send_message(bot, f"/stop {dedicated_thread_id}")
+    print(f"SENT case=plan_mode_reset phase=stop message_id={sent_stop.id}", flush=True)
+    await wait_bot_text_after(
+        client,
+        bot,
+        sent_stop.id,
+        "plan_mode_reset",
+        lambda text: "Thread is already idle" in text or "Interrupt requested" in text,
+    )
+
+    stop_sleep_prompt = (
+        "Run exactly one shell command tool call: sleep 5. "
+        "Do not use any other shell command. Do not answer before that command finishes. "
+        f"Final answer exactly: {stop_sleep_marker}"
+    )
+    sent_stop_sleep = await client.send_message(bot, f"/reply {dedicated_thread_id} {stop_sleep_prompt}")
+    print(f"SENT case=plan_mode_reset phase=stop_sleep message_id={sent_stop_sleep.id}", flush=True)
+    await wait_sleep_tool_and_final(client, bot, sent_stop_sleep.id, stop_sleep_marker, "plan_mode_reset")
+
+    fail_if_bad_logs(since, dedicated_thread_id, "plan_mode_reset")
+    print("RESULT case=plan_mode_reset ok", flush=True)
+
+
 async def main() -> None:
-    require_env()
-    thread_id = os.environ["CODEX_TG_E2E_THREAD_ID"].strip()
+    cases = require_env()
+    thread_id = os.environ.get("CODEX_TG_E2E_THREAD_ID", "").strip()
     stamp = str(int(time.time()))
-    cases = selected_cases()
     client = TelegramClient(
         os.environ["TG_SESSION"],
         int(os.environ["TG_API_ID"]),
@@ -1065,6 +1237,8 @@ async def main() -> None:
                 await newchat_folder_case(client, bot, thread_id, stamp)
             elif case == "notification_contract":
                 await notification_contract_case(client, bot, thread_id, stamp)
+            elif case == "plan_mode_reset":
+                await plan_mode_reset_case(client, bot, thread_id, stamp)
         print("ALL_OK", flush=True)
     finally:
         await client.disconnect()

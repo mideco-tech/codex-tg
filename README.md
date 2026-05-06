@@ -39,7 +39,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 - Stable visual identity per thread: emoji marker plus project/thread/run chips.
 - Explicit `New run -> [User] -> [commentary] -> [Tool] -> [Output] -> [Final]` chronology with status on the live commentary/final card.
 - Low-noise Telegram notifications: only `New run` (configurable), `[Plan]`, and `[Final]` are audible; live progress and exports are sent silently.
-- Plan Mode starts from Telegram via `/plan` or `/reply --plan`, and Default Mode can be forced with `/default` or `/reply --default` if a thread needs to leave Plan Mode; `[Plan]` prompt-cards keep reply-first routing and structured buttons when Codex provides choices.
+- Plan Mode starts from Telegram via `/plan` or `/reply --plan`; if a thread remains in Plan Mode, the Plan Final Card offers `Turn off Plan` and `/stop` also arms the next normal turn to leave Plan Mode. `[Plan]` prompt-cards keep reply-first routing and structured buttons when Codex provides choices.
 - Final Card with Details pagination and on-demand Tools file export.
 - On-demand full log archive from Codex session JSONL.
 - SQLite-backed durable state for bindings, routes, callbacks, observer target, panels, and delivery metadata.
@@ -96,7 +96,7 @@ go run ./cmd/ctr-go daemon run
 Telegram commands:
 
 - `/start`, `/help`
-- `/threads`, `/projects`, `/new`, `/newchat`, `/newthread`, `/show`, `/bind`, `/reply`, `/default`, `/plan`
+- `/threads`, `/projects`, `/new`, `/newchat`, `/newthread`, `/show`, `/bind`, `/reply`, `/plan`
 - `/settings`, `/model`, `/effort`
 - `/context`, `/whereami`
 - `/observe all`, `/observe off`

@@ -11,7 +11,7 @@ come from local environment variables.
 ## Required Environment
 
 - `CODEX_TG_LIVE_E2E=1`
-- `CODEX_TG_E2E_THREAD_ID`
+- `CODEX_TG_E2E_THREAD_ID` for cases that run against an existing private test thread. It is not required when the selected cases are only `newchat_folder` and/or `plan_mode_reset`, because those cases create disposable threads.
 - `TG_SESSION`
 - `TG_API_ID`
 - `TG_API_HASH`
@@ -26,7 +26,7 @@ Optional:
 - `CODEX_TG_E2E_READBACK_LIMIT`
 - `CODEX_TG_E2E_CODEX_CHATS_ROOT`: local Chats root for `newchat_folder`; defaults to `~/Documents/Codex`.
 - `CODEX_TG_E2E_CASES`: comma-separated subset of
-  `sequential_commands,sleep20_timing,tool_only_sleep_details,multi_tool_current,current_tool_priority,details_binding,complex_math,newchat_folder,notification_contract`.
+  `sequential_commands,sleep20_timing,tool_only_sleep_details,multi_tool_current,current_tool_priority,details_binding,complex_math,newchat_folder,notification_contract,plan_mode_reset`.
 
 The env file and Telethon session files must stay local. `.gitignore` blocks
 `.env*`, `telegram.env`, and `*.session*` as a belt-and-suspenders guard.
@@ -98,6 +98,12 @@ verifies that Final is sent as a new card instead of reusing live
 to the new Final card, and a Plan prompt is routeable. When App Server exposes
 structured Plan options, the case answers through the `[Plan]` buttons; otherwise
 it records a fallback and answers by replying to the Plan card.
+
+`plan_mode_reset` is opt-in and not part of the default case list. It creates a
+disposable thread with `/newthread`, starts Plan Mode, verifies `Turn off Plan`
+on the Plan Final Card, clicks it, and then checks that a normal `sleep 5`
+prompt executes. It repeats the reset path with `/stop <thread>` while the
+thread is idle.
 
 All cases fail on visible `Status: interrupted`, literal `"<nil>"`, stale known
 commands from earlier regressions, parallel-turn rejection text, or `[Tool]`

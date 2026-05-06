@@ -50,10 +50,13 @@ func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
 		}
 		seen[command.Command] = true
 	}
-	for _, command := range []string{"newchat", "newthread", "default"} {
+	for _, command := range []string{"newchat", "newthread"} {
 		if !seen[command] {
 			t.Fatalf("defaultCommands must expose /%s in the Telegram command menu", command)
 		}
+	}
+	if seen["default"] {
+		t.Fatal("defaultCommands must not expose hidden /default fallback in the Telegram command menu")
 	}
 }
 

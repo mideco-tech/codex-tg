@@ -29,7 +29,7 @@ Most bot messages are sent silently to avoid notification spam. Normal Telegram 
 
 Telegram can start a Codex Plan Mode turn with `/plan <thread> <text>`, `/plan_mode <thread> <text>`, or `/reply --plan <thread> <text>`. These commands use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not treated as Plan Mode.
 
-If a thread remains in Plan Mode, `/default <thread> <text>`, `/default <text>` through the current route, or `/reply --default <thread> <text>` starts the next turn with `collaborationMode.mode = default`.
+If a thread remains in Plan Mode after a completed turn, the Plan Final Card shows `Turn off Plan`. Pressing it sets a one-shot local reset for that thread; the next ordinary `turn/start` is sent with `collaborationMode.mode = default` and then the reset is cleared. `/stop <thread>` sets the same one-shot reset even when the thread is already idle.
 
 When Codex asks for input, the bridge renders a separate routeable `[Plan]` prompt-card. Replying to that card answers the same run. Structured buttons appear only when Codex provides choices.
 

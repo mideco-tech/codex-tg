@@ -6,7 +6,8 @@ When behavior changes, update the relevant ADR first, then update or add the tes
 
 ## Plan Mode Routing
 
-ADR: `docs/adr/ADR-006-plan-prompt-mode.md`
+ADR: `docs/adr/ADR-006-plan-prompt-mode.md`; reset addendum:
+`docs/adr/ADR-016-plan-mode-reset-contract.md`
 
 Primary tests:
 
@@ -19,6 +20,15 @@ Primary tests:
 - `internal/daemon/service_test.go::TestReplyPlanFlagStartsPlanCollaborationMode`
 - `internal/daemon/service_test.go::TestReplyDefaultFlagStartsDefaultCollaborationMode`
 - `internal/daemon/service_test.go::TestDefaultModeCommandStartsDefaultCollaborationMode`
+- `internal/daemon/service_test.go::TestPlanFinalCardShowsTurnOffPlanButton`
+- `internal/daemon/service_test.go::TestNormalFinalCardDoesNotShowTurnOffPlanButton`
+- `internal/daemon/service_test.go::TestReplyCommandConsumesDefaultOverrideOnce`
+- `internal/daemon/service_test.go::TestDefaultOverrideSurvivesTurnStartFailure`
+- `internal/daemon/service_test.go::TestPlanCommandClearsStaleDefaultOverride`
+- `internal/daemon/service_test.go::TestStopSetsDefaultOverrideForActiveThread`
+- `internal/daemon/service_test.go::TestStopSetsDefaultOverrideForIdleThread`
+- `internal/daemon/observer_ui_v2_test.go::TestTurnOffPlanCallbackSetsDefaultOverrideAndEditsFinalCard`
+- `internal/daemon/observer_ui_v2_test.go::TestTurnOffPlanCallbackRejectsMismatchedMessageID`
 - `internal/daemon/service_test.go::TestPlanModeCommandCanRouteByReply`
 - `internal/daemon/service_test.go::TestPlainReplyToSyntheticPlanPromptUsesTurnSteer`
 - `internal/daemon/service_test.go::TestPlainReplyToSyntheticPlanPromptFallsBackToTurnStart`
@@ -26,12 +36,19 @@ Primary tests:
 - `internal/daemon/observer_ui_v2_test.go::TestSyncThreadPanelCreatesRouteablePlanPromptAndDedupes`
 - `internal/daemon/observer_ui_v2_test.go::TestSyncThreadPanelCreatesServerRequestPlanPromptRoute`
 
+Live E2E:
+
+- `tests/live_e2e/telegram_readback_e2e.py` case `plan_mode_reset`
+
 Contract notes:
 
 - `/plan <text>` uses reply, armed state, or bound thread routing.
 - `/plan <thread> <text>` is explicit only for known or UUID-like thread ids.
 - `/reply --plan <thread> <text>` remains strict.
-- `/default <text>` and `/reply --default <thread> <text>` explicitly start Default Mode through App Server `collaborationMode.mode = default`.
+- `Turn off Plan` on a Plan Final Card and `/stop <thread>` set a one-shot Default override for the next ordinary turn; they do not start a reset turn.
+- The one-shot override is cleared after a successful ordinary `turn/start` and remains after a failed `turn/start`.
+- Hidden `/default` and `/reply --default` fallback paths remain tested but are not advertised in public help or Telegram command menu.
+- `Turn off Plan` is panel-bound like Details; stale panel/message/thread/turn callbacks fail closed without changing state.
 - Plan choice buttons must stay scoped to the same turn as the `[Plan]` card.
 - Stale pending `user_input` from an older turn must not add `answer_choice` buttons to a newer `[commentary]` panel.
 

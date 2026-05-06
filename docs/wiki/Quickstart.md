@@ -36,8 +36,9 @@ Start or continue a Codex thread from GUI/CLI. The bot should render the run in 
 Only `New run`, `[Plan]`, and `[Final]` use normal Telegram notifications. Live progress cards, menus, and exports are sent silently.
 
 Use `/plan` or `/reply --plan` for Plan Mode. If a thread remains in Plan Mode,
-start the next turn with `/default <thread> <prompt>` or `/reply --default
-<thread> <prompt>` to force App Server Default Mode.
+press `Turn off Plan` on the Plan Final Card, or use `/stop <thread>`, then send
+the next normal prompt. The bridge applies App Server Default Mode to that next
+ordinary turn.
 
 To start a new thread from Telegram, open `/projects`, choose a project, press
 `New thread`, then send the first prompt as the next message. The selected

@@ -3758,6 +3758,132 @@ func TestDefaultModeCommandStartsDefaultCollaborationMode(t *testing.T) {
 	}
 }
 
+func TestHelpHidesDefaultModeFallback(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	response, err := service.handleCommand(context.Background(), 123456789, 0, "/help", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/help) failed: %v", err)
+	}
+	if response == nil {
+		t.Fatal("handleCommand(/help) returned nil response")
+	}
+	if strings.Contains(response.Text, "/default") || strings.Contains(response.Text, "--default") {
+		t.Fatalf("/help text exposes hidden default fallback:\n%s", response.Text)
+	}
+	if !strings.Contains(response.Text, "/plan") || !strings.Contains(response.Text, "/reply [--plan]") {
+		t.Fatalf("/help text = %q, want public plan/reply commands", response.Text)
+	}
+}
+
+func TestStopSetsDefaultOverrideForActiveThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:           "stop-active-default-thread",
+		Title:        "Stop active default",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		Status:       "active",
+		ActiveTurnID: "turn-active",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/stop "+thread.ID, 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/stop) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID || response.TurnID != thread.ActiveTurnID {
+		t.Fatalf("response = %#v, want active stop response", response)
+	}
+	if strings.TrimSpace(response.Text) == "" {
+		t.Fatalf("response = %#v, want visible /stop command text", response)
+	}
+	if got := service.threadCollaborationOverride(ctx, thread.ID); got != collaborationModeDefault {
+		t.Fatalf("threadCollaborationOverride = %q, want default after /stop", got)
+	}
+}
+
+func TestStopSetsDefaultOverrideForIdleThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "stop-idle-default-thread",
+		Title:       "Stop idle default",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/stop "+thread.ID, 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/stop idle) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.CallbackText, "already idle") {
+		t.Fatalf("response = %#v, want idle stop response", response)
+	}
+	if !strings.Contains(response.Text, "already idle") {
+		t.Fatalf("response = %#v, want visible idle /stop command text", response)
+	}
+	if got := service.threadCollaborationOverride(ctx, thread.ID); got != collaborationModeDefault {
+		t.Fatalf("threadCollaborationOverride = %q, want default after idle /stop", got)
+	}
+}
+
+func TestStopTreatsCompletedThreadWithStaleActiveTurnAsIdle(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:           "stop-completed-stale-active-thread",
+		Title:        "Stop completed stale active",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		Status:       "completed",
+		ActiveTurnID: "stale-completed-turn",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/stop "+thread.ID, 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/stop stale completed) failed: %v", err)
+	}
+	if response == nil || !strings.Contains(response.CallbackText, "already idle") {
+		t.Fatalf("response = %#v, want idle stop response", response)
+	}
+	if !strings.Contains(response.Text, "already idle") {
+		t.Fatalf("response = %#v, want visible idle /stop command text", response)
+	}
+	if len(stub.turnInterruptCalls) != 0 {
+		t.Fatalf("turnInterruptCalls = %#v, want no interrupt for completed thread", stub.turnInterruptCalls)
+	}
+	if got := service.threadCollaborationOverride(ctx, thread.ID); got != collaborationModeDefault {
+		t.Fatalf("threadCollaborationOverride = %q, want default after stale completed /stop", got)
+	}
+}
+
 func TestPlanModeCommandCanRouteByReply(t *testing.T) {
 	t.Parallel()
 
@@ -3969,6 +4095,94 @@ func TestFinalCardShowsRunDuration(t *testing.T) {
 	}
 }
 
+func TestPlanFinalCardShowsTurnOffPlanButton(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "final-plan-thread",
+		Title:       "Final plan",
+		ProjectName: "Codex",
+		Status:      "idle",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "final-plan-turn",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Plan mode final.",
+		LatestFinalFP:    "final-plan-fp",
+		DetailItems: []model.DetailItem{
+			{ID: "plan-1", Kind: model.DetailItemPlan, Text: "Plan text.", CommentaryIndex: 1},
+			{ID: "final-1", Kind: model.DetailItemFinal, Text: "Plan mode final.", CommentaryIndex: 1},
+		},
+	}
+
+	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
+	if token := callbackTokenForButton(buttons, "Turn off Plan"); token == "" {
+		t.Fatalf("Turn off Plan button not found in final card buttons %#v", buttons)
+	}
+}
+
+func TestPlanFinalCardShowsTurnOffPlanButtonFromLocalMarker(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "final-plan-marker-thread",
+		Title:       "Final plan marker",
+		ProjectName: "Codex",
+		Status:      "idle",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "final-plan-marker-turn",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Plan mode final.",
+		LatestFinalFP:    "final-plan-marker-fp",
+		DetailItems: []model.DetailItem{
+			{ID: "final-1", Kind: model.DetailItemFinal, Text: "Plan mode final."},
+		},
+	}
+	if err := service.setThreadCollaborationMarker(ctx, thread.ID, snapshot.LatestTurnID, collaborationModePlan); err != nil {
+		t.Fatalf("setThreadCollaborationMarker failed: %v", err)
+	}
+
+	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
+	if token := callbackTokenForButton(buttons, "Turn off Plan"); token == "" {
+		t.Fatalf("Turn off Plan button not found in marker-based final card buttons %#v", buttons)
+	}
+}
+
+func TestNormalFinalCardDoesNotShowTurnOffPlanButton(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "final-normal-thread",
+		Title:       "Final normal",
+		ProjectName: "Codex",
+		Status:      "idle",
+	}
+	snapshot := &appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "final-normal-turn",
+		LatestTurnStatus: "completed",
+		LatestFinalText:  "Done.",
+		LatestFinalFP:    "final-normal-fp",
+		DetailItems: []model.DetailItem{
+			{ID: "final-1", Kind: model.DetailItemFinal, Text: "Done."},
+		},
+	}
+
+	_, buttons, _ := service.renderFinalCard(ctx, 42, thread, snapshot)
+	if token := callbackTokenForButton(buttons, "Turn off Plan"); token != "" {
+		t.Fatalf("Turn off Plan button token = %q, want absent in non-plan final buttons %#v", token, buttons)
+	}
+}
+
 func TestReplyCommandKeepsDefaultCollaborationMode(t *testing.T) {
 	t.Parallel()
 
@@ -4006,6 +4220,135 @@ func TestReplyCommandKeepsDefaultCollaborationMode(t *testing.T) {
 	}
 	if got := stub.turnStartCalls[0]; got.collaborationMode != "" {
 		t.Fatalf("collaborationMode = %q, want empty default turn", got.collaborationMode)
+	}
+}
+
+func TestReplyCommandConsumesDefaultOverrideOnce(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "plain-reply-default-override-thread",
+		Title:       "Plain reply default override",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.setThreadCollaborationDefaultOverride(ctx, thread.ID); err != nil {
+		t.Fatalf("setThreadCollaborationDefaultOverride failed: %v", err)
+	}
+	if err := service.setThreadCollaborationMarker(ctx, thread.ID, "old-plan-turn", collaborationModePlan); err != nil {
+		t.Fatalf("setThreadCollaborationMarker failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/reply "+thread.ID+" do the work", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/reply) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID {
+		t.Fatalf("response = %#v, want reply thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.collaborationMode != collaborationModeDefault {
+		t.Fatalf("collaborationMode = %q, want default override", got.collaborationMode)
+	}
+	if got := service.threadCollaborationOverride(ctx, thread.ID); got != "" {
+		t.Fatalf("threadCollaborationOverride = %q, want cleared after successful start", got)
+	}
+	if got := service.threadCollaborationMarker(ctx, thread.ID, "started-turn"); got != "" {
+		t.Fatalf("threadCollaborationMarker = %q, want cleared after default override start", got)
+	}
+}
+
+func TestDefaultOverrideSurvivesTurnStartFailure(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "default-override-failure-thread",
+		Title:       "Default override failure",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.setThreadCollaborationDefaultOverride(ctx, thread.ID); err != nil {
+		t.Fatalf("setThreadCollaborationDefaultOverride failed: %v", err)
+	}
+	stub := &stubSession{turnStartErr: errors.New("turn start failed")}
+	service.live = stub
+	service.liveConnected = true
+
+	_, err := service.handleCommand(ctx, 123456789, 0, "/reply "+thread.ID+" do the work", 0)
+	if err == nil {
+		t.Fatal("handleCommand(/reply) succeeded, want turn start error")
+	}
+	if got := service.threadCollaborationOverride(ctx, thread.ID); got != collaborationModeDefault {
+		t.Fatalf("threadCollaborationOverride = %q, want default retained after failed start", got)
+	}
+}
+
+func TestPlanCommandClearsStaleDefaultOverride(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "plan-clears-default-override-thread",
+		Title:       "Plan clears default override",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.setThreadCollaborationDefaultOverride(ctx, thread.ID); err != nil {
+		t.Fatalf("setThreadCollaborationDefaultOverride failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/plan "+thread.ID+" propose options", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/plan) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID {
+		t.Fatalf("response = %#v, want plan thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.collaborationMode != collaborationModePlan {
+		t.Fatalf("collaborationMode = %q, want plan", got.collaborationMode)
+	}
+	if got := service.threadCollaborationOverride(ctx, thread.ID); got != "" {
+		t.Fatalf("threadCollaborationOverride = %q, want cleared after explicit plan start", got)
+	}
+	if got := service.threadCollaborationMarker(ctx, thread.ID, "started-turn"); got != collaborationModePlan {
+		t.Fatalf("threadCollaborationMarker = %q, want plan after explicit plan start", got)
 	}
 }
 
@@ -4446,6 +4789,7 @@ type stubSession struct {
 	threadResumeCalls   []threadResumeCall
 	turnSteerCalls      []turnCall
 	turnStartCalls      []turnCall
+	turnInterruptCalls  []turnCall
 	respondRequestCalls []respondRequestCall
 	stderrTail          []string
 }
@@ -4531,6 +4875,7 @@ func (s *stubSession) TurnSteer(ctx context.Context, threadID, turnID, message s
 	return map[string]any{"turn": map[string]any{"id": turnID}}, nil
 }
 func (s *stubSession) TurnInterrupt(ctx context.Context, threadID, turnID string) error {
+	s.turnInterruptCalls = append(s.turnInterruptCalls, turnCall{threadID: threadID, turnID: turnID})
 	return nil
 }
 func (s *stubSession) ModelList(ctx context.Context, includeHidden bool) ([]appserver.ModelOption, error) {

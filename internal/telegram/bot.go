@@ -311,7 +311,6 @@ func defaultCommands() []BotCommand {
 		{Command: "show", Description: "Show a thread card"},
 		{Command: "bind", Description: "Bind this chat to a thread"},
 		{Command: "reply", Description: "Send input to a thread"},
-		{Command: "default", Description: "Run in Default Mode"},
 		{Command: "plan", Description: "Start Plan Mode in a thread"},
 		{Command: "settings", Description: "Show Codex model settings"},
 		{Command: "model", Description: "Choose the Codex model"},

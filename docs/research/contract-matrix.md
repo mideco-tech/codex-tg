@@ -15,9 +15,7 @@ This file now serves two purposes:
 - `/projects`
 - `/show <thread>`
 - `/bind <thread>`
-- `/reply [--plan|--default] <thread> <text>`
-- `/default <thread> <text>`
-- `/default <text>`
+- `/reply [--plan] <thread> <text>`
 - `/plan <thread> <text>`
 - `/plan <text>`
 - `/plan_mode <thread> <text>`
@@ -59,7 +57,7 @@ This file now serves two purposes:
 - Plan Mode / waiting-input states create a separate routeable `[Plan]` prompt-card.
 - `[Plan]` buttons are structured-only: they come from Codex `choices/options/suggestions/responses`, never from bridge heuristics.
 - Telegram-originated Plan Mode starts use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
-- Telegram-originated Default Mode starts through `/default` and `/reply --default` use App Server `turn/start` with `collaborationMode.mode = default`, which is the operator escape hatch when a thread remains in Plan Mode.
+- If a thread remains in Plan Mode, `Turn off Plan` on the Plan Final Card and `/stop <thread>` set a one-shot local reset; the next ordinary Telegram-originated `turn/start` for that thread uses `collaborationMode.mode = default` and then clears the reset.
 - `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
 - After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
 - `/projects` groups cached non-Chat projects by normalized `cwd`, sorts projects by latest cached thread activity, shows latest Codex UI Chat previews, opens full Chats pagination through `Open Chats`, and never accepts arbitrary filesystem paths from Telegram.
@@ -121,6 +119,7 @@ Target v2 callback surface:
 - `settings_model_set`
 - `settings_reasoning_set`
 - `get_thread_id`
+- `turn_off_plan`
 
 ## Routing precedence
 
@@ -139,7 +138,8 @@ Additional route rules:
 - reply-to `[Plan]` routes before binding and carries `thread_id`, `turn_id`, and `request_id` when available
 - real `request_id` Plan answers use App Server server-request response; synthetic Plan answers use `turn/steer`
 - `/reply --plan`, `/plan`, and `/plan_mode` carry an explicit Plan Mode start intent when they create a new turn
-- `/reply --default` and `/default` carry an explicit Default Mode start intent when they create a new turn
+- Hidden `/reply --default` and `/default` fallback paths may still carry an explicit Default Mode start intent, but they are not advertised in the public command menu.
+- `Turn off Plan` and `/stop` carry a one-shot Default Mode reset intent for the next ordinary turn, not for the current callback/stop action itself.
 
 ## Observer targets
 
