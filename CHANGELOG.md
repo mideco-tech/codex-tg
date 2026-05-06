@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.2.7 - 2026-05-06
+
+- Replaced the operator-specific Russian-language agent instruction in `AGENTS.md` with language-neutral guidance for future contributors.
+- Kept the runtime unchanged; this is a documentation hotfix on top of `v0.2.6`.
+
 ## v0.2.6 - 2026-05-06
 
 - Added a Plan Mode reset contract: Plan-like Final Cards expose `Turn off Plan`, and `/stop <thread>` arms the same one-shot reset.

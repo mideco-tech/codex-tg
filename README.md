@@ -4,7 +4,7 @@ Codex Telegram bot and remote UI for local OpenAI Codex App Server, built in Go.
 
 `codex-tg` turns a Telegram bot into a mobile control surface for local Codex threads: it watches Codex GUI/CLI activity, keeps thread identity visible, routes replies back to the right thread, and exposes high-signal controls such as Plan Mode prompts, Stop, Steer, Details, Tools file, and Get full log.
 
-Current release: `v0.2.6`.
+Current release: `v0.2.7`.
 
 ![codex-tg Telegram Plan Mode demo](docs/assets/telegram-plan-mode-demo.png)
 
@@ -48,7 +48,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 ## Platform Status
 
 - Windows: actively tested with the local Codex App Server, Telegram Bot API, observer flows, and live E2E demo.
-- macOS: `v0.2.6` is verified stable on macOS 26.3.1 arm64 with Go 1.26.2, LaunchAgent daemon startup, local build, Details binding validation, Telegram command-menu readback, real Chat folder creation, low-noise notification validation, Plan Mode reset validation, and live Telegram readback E2E.
+- macOS: `v0.2.7` is verified stable on macOS 26.3.1 arm64 with Go 1.26.2, LaunchAgent daemon startup, local build, Details binding validation, Telegram command-menu readback, real Chat folder creation, low-noise notification validation, Plan Mode reset validation, and live Telegram readback E2E. `v0.2.7` is a documentation hotfix on top of the same runtime.
 - Linux: CI runs tests/builds on Ubuntu; full local daemon/runtime validation is still pending.
 
 ## Quickstart

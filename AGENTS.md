@@ -17,7 +17,7 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 - Prefer small steps: inspect -> plan -> test -> implement -> refactor -> validate.
 - Do not generate large rewrites, broad refactors, or speculative frameworks unless the task explicitly requires them.
 - Build what is needed now. Avoid adding libraries, build tools, abstractions, or cross-platform machinery without an immediate reason.
-- For this operator, write working plans, handoffs, and status updates in Russian unless asked otherwise. Public README, wiki, demo, release notes, and GitHub-facing docs may stay English-first.
+- Match the current user's language for working plans, handoffs, and status updates when clear. Public README, wiki, demo, release notes, and GitHub-facing docs may stay English-first.
 
 ## Agent Workflow Kernel
 
