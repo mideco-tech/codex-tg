@@ -494,6 +494,49 @@ func TestSnapshotFromThreadReadBuildsOrderedDetailsAndLinksToolsToCommentary(t *
 	}
 }
 
+func TestSnapshotFromThreadReadKeepsToolOnlyTurnDetailsWithoutCommentary(t *testing.T) {
+	t.Parallel()
+
+	snapshot := SnapshotFromThreadRead(map[string]any{
+		"id":     "thread-tool-only",
+		"name":   "Tool only",
+		"cwd":    "/Users/example/project",
+		"status": "completed",
+		"turns": []any{
+			map[string]any{
+				"id":     "turn-tool-only",
+				"status": "completed",
+				"items": []any{
+					map[string]any{"id": "user-1", "type": "userMessage", "content": []any{
+						map[string]any{"type": "text", "text": "Run sleep 10.\n"},
+					}},
+					map[string]any{"id": "cmd-sleep", "type": "commandExecution", "command": "sleep 10", "status": "completed"},
+					map[string]any{"id": "agent-final", "type": "agentMessage", "phase": "final_answer", "text": "Done."},
+				},
+			},
+		},
+	})
+
+	if len(snapshot.DetailItems) != 3 {
+		t.Fatalf("len(DetailItems) = %d, want 3: %#v", len(snapshot.DetailItems), snapshot.DetailItems)
+	}
+	if got, want := snapshot.DetailItems[1].Kind, model.DetailItemTool; got != want {
+		t.Fatalf("DetailItems[1].Kind = %q, want %q", got, want)
+	}
+	if got, want := snapshot.DetailItems[1].Label, "sleep 10"; got != want {
+		t.Fatalf("tool label = %q, want %q", got, want)
+	}
+	if got := snapshot.DetailItems[1].CommentaryIndex; got != 0 {
+		t.Fatalf("tool CommentaryIndex = %d, want orphan index 0", got)
+	}
+	if got, want := snapshot.LatestToolLabel, "sleep 10"; got != want {
+		t.Fatalf("LatestToolLabel = %q, want %q", got, want)
+	}
+	if got, want := snapshot.LatestToolStatus, "completed"; got != want {
+		t.Fatalf("LatestToolStatus = %q, want %q", got, want)
+	}
+}
+
 func TestSnapshotFromThreadReadLabelsDynamicToolWithoutEmptyArguments(t *testing.T) {
 	t.Parallel()
 

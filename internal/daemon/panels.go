@@ -292,16 +292,16 @@ func (s *Service) createCurrentPanel(ctx context.Context, sender Sender, target 
 	s.logTelegramRenderedMessagesContainsNil(thread.ID, snapshot.LatestTurnID, "summary", 0, []model.RenderedMessage{summaryMessage})
 	s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "tool", 0, toolText)
 	s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "output", 0, outputText)
-	summaryIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{summaryMessage}, summaryButtons)
+	summaryIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{summaryMessage}, summaryButtons, silentSendOptions())
 	if err != nil {
 		return nil, err
 	}
 	summaryID := lastMessageID(summaryIDs)
-	toolID, err := sender.SendMessage(ctx, target.ChatID, target.TopicID, toolText, nil)
+	toolID, err := sender.SendMessage(ctx, target.ChatID, target.TopicID, toolText, nil, silentSendOptions())
 	if err != nil {
 		return nil, err
 	}
-	outputID, err := sender.SendMessage(ctx, target.ChatID, target.TopicID, outputText, nil)
+	outputID, err := sender.SendMessage(ctx, target.ChatID, target.TopicID, outputText, nil, silentSendOptions())
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +404,7 @@ func (s *Service) sendRunNotice(ctx context.Context, sender Sender, target model
 	}
 	text, fp := s.renderRunNotice(ctx, thread, snapshot, sourceMode)
 	s.logTelegramRenderContainsNil(thread.ID, snapshot.LatestTurnID, "new_run", 0, text)
-	messageID, err := sender.SendMessage(ctx, target.ChatID, target.TopicID, text, nil)
+	messageID, err := sender.SendMessage(ctx, target.ChatID, target.TopicID, text, nil, s.runNoticeSendOptions())
 	if err != nil {
 		return 0, "", err
 	}
@@ -463,7 +463,7 @@ func (s *Service) sendPlanPromptNotice(ctx context.Context, sender Sender, targe
 	}
 	message, buttons, _ := s.renderPlanPromptCard(ctx, thread, prompt)
 	s.logTelegramRenderedMessagesContainsNil(thread.ID, prompt.TurnID, "plan", 0, []model.RenderedMessage{message})
-	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, buttons)
+	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, buttons, notifySendOptions())
 	if err != nil {
 		return 0, "", err
 	}
@@ -531,7 +531,7 @@ func (s *Service) sendUserRequestNotice(ctx context.Context, sender Sender, targ
 	}
 	messages := s.renderUserRequestNoticeCard(ctx, thread, snapshot)
 	s.logTelegramRenderedMessagesContainsNil(thread.ID, snapshot.LatestTurnID, "user", 0, messages)
-	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, messages, nil)
+	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, messages, nil, silentSendOptions())
 	if err != nil {
 		return 0, "", err
 	}
@@ -554,7 +554,7 @@ func (s *Service) sendUserRequestNotice(ctx context.Context, sender Sender, targ
 func (s *Service) sendUserPlaceholderNotice(ctx context.Context, sender Sender, target model.ObserverTarget, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (int64, string, error) {
 	message := s.renderUserPlaceholderCard(ctx, thread, snapshot)
 	s.logTelegramRenderedMessagesContainsNil(thread.ID, snapshot.LatestTurnID, "user", 0, []model.RenderedMessage{message})
-	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, nil)
+	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, nil, silentSendOptions())
 	if err != nil {
 		return 0, "", err
 	}

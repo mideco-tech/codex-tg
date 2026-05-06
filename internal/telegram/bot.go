@@ -103,15 +103,15 @@ func sanitizeTelegramLogError(err error) string {
 	return telegramBotTokenURLPattern.ReplaceAllString(err.Error(), "bot<redacted>")
 }
 
-func (b *Bot) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec) (int64, error) {
+func (b *Bot) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec, options model.SendOptions) (int64, error) {
 	chunks := splitText(strings.TrimSpace(text), telegramMessageLimit)
 	if len(chunks) == 0 {
 		chunks = []string{" "}
 	}
-	return b.sendTextChunks(ctx, chatID, topicID, chunks, buttons)
+	return b.sendTextChunks(ctx, chatID, topicID, chunks, buttons, options)
 }
 
-func (b *Bot) SendRenderedMessages(ctx context.Context, chatID, topicID int64, messages []model.RenderedMessage, buttons [][]model.ButtonSpec) ([]int64, error) {
+func (b *Bot) SendRenderedMessages(ctx context.Context, chatID, topicID int64, messages []model.RenderedMessage, buttons [][]model.ButtonSpec, options model.SendOptions) ([]int64, error) {
 	if len(messages) == 0 {
 		messages = []model.RenderedMessage{{Text: " "}}
 	}
@@ -126,12 +126,12 @@ func (b *Bot) SendRenderedMessages(ctx context.Context, chatID, topicID int64, m
 			markup = toInlineKeyboard(buttons)
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		message, err := b.client.SendRenderedMessage(sendCtx, chatID, topicID, rendered, markup)
+		message, err := b.client.SendRenderedMessage(sendCtx, chatID, topicID, rendered, markup, options)
 		cancel()
 		if err != nil {
 			rendered.Entities = nil
 			sendCtx, cancel = context.WithTimeout(ctx, 20*time.Second)
-			message, err = b.client.SendRenderedMessage(sendCtx, chatID, topicID, rendered, markup)
+			message, err = b.client.SendRenderedMessage(sendCtx, chatID, topicID, rendered, markup, options)
 			cancel()
 			if err != nil {
 				return nil, err
@@ -176,21 +176,21 @@ func (b *Bot) EditRenderedMessage(ctx context.Context, chatID, topicID, messageI
 	return nil
 }
 
-func (b *Bot) SendDocument(ctx context.Context, chatID, topicID int64, fileName, filePath, caption string) (int64, error) {
+func (b *Bot) SendDocument(ctx context.Context, chatID, topicID int64, fileName, filePath, caption string, options model.SendOptions) (int64, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return 0, err
 	}
-	return b.SendDocumentData(ctx, chatID, topicID, fileName, data, caption)
+	return b.SendDocumentData(ctx, chatID, topicID, fileName, data, caption, options)
 }
 
-func (b *Bot) SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string) (int64, error) {
+func (b *Bot) SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string, options model.SendOptions) (int64, error) {
 	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	message, err := b.client.SendDocument(sendCtx, chatID, topicID, DocumentFile{
 		Name:        fileName,
 		ContentType: "application/octet-stream",
 		Data:        data,
-	}, strings.TrimSpace(caption), nil)
+	}, strings.TrimSpace(caption), nil, options)
 	cancel()
 	if err != nil {
 		return 0, err
@@ -271,7 +271,7 @@ func (b *Bot) deliverDirectResponse(ctx context.Context, chatID, topicID int64, 
 	if response == nil || strings.TrimSpace(response.Text) == "" {
 		return nil
 	}
-	messageID, err := b.SendMessage(ctx, chatID, topicID, response.Text, response.Buttons)
+	messageID, err := b.SendMessage(ctx, chatID, topicID, response.Text, response.Buttons, model.SendOptions{Silent: true})
 	if err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func (b *Bot) sendFailureMessage(ctx context.Context, chatID, topicID int64, cau
 	if cause != nil {
 		b.logger.Printf("telegram handler error: %v", cause)
 	}
-	_, err := b.SendMessage(ctx, chatID, topicID, text, nil)
+	_, err := b.SendMessage(ctx, chatID, topicID, text, nil, model.SendOptions{Silent: true})
 	if err != nil {
 		if cause != nil {
 			return errors.Join(cause, err)
@@ -311,6 +311,7 @@ func defaultCommands() []BotCommand {
 		{Command: "show", Description: "Show a thread card"},
 		{Command: "bind", Description: "Bind this chat to a thread"},
 		{Command: "reply", Description: "Send input to a thread"},
+		{Command: "default", Description: "Run in Default Mode"},
 		{Command: "plan", Description: "Start Plan Mode in a thread"},
 		{Command: "settings", Description: "Show Codex model settings"},
 		{Command: "model", Description: "Choose the Codex model"},
@@ -351,7 +352,7 @@ func toInlineKeyboard(rows [][]model.ButtonSpec) *InlineKeyboardMarkup {
 	return &InlineKeyboardMarkup{InlineKeyboard: keyboard}
 }
 
-func (b *Bot) sendTextChunks(ctx context.Context, chatID, topicID int64, chunks []string, buttons [][]model.ButtonSpec) (int64, error) {
+func (b *Bot) sendTextChunks(ctx context.Context, chatID, topicID int64, chunks []string, buttons [][]model.ButtonSpec, options model.SendOptions) (int64, error) {
 	var messageID int64
 	for index, chunk := range chunks {
 		var markup *InlineKeyboardMarkup
@@ -359,7 +360,7 @@ func (b *Bot) sendTextChunks(ctx context.Context, chatID, topicID int64, chunks 
 			markup = toInlineKeyboard(buttons)
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		message, err := b.client.SendMessage(sendCtx, chatID, topicID, chunk, markup)
+		message, err := b.client.SendMessage(sendCtx, chatID, topicID, chunk, markup, options)
 		cancel()
 		if err != nil {
 			return 0, err

@@ -27,18 +27,37 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 	}
 
 	message, buttons, cardHash := s.renderFinalCard(ctx, panel.ID, thread, snapshot)
-	if err := sender.EditRenderedMessage(ctx, target.ChatID, target.TopicID, panel.SummaryMessageID, message, buttons); err != nil {
+	messageIDs, err := sender.SendRenderedMessages(ctx, target.ChatID, target.TopicID, []model.RenderedMessage{message}, buttons, notifySendOptions())
+	if err != nil {
 		return err
+	}
+	finalMessageID := lastMessageID(messageIDs)
+	if finalMessageID == 0 {
+		return fmt.Errorf("telegram final card send returned no message id")
 	}
 	_ = s.store.PutMessageRoute(ctx, model.MessageRoute{
 		ChatID:    target.ChatID,
 		TopicID:   target.TopicID,
-		MessageID: panel.SummaryMessageID,
+		MessageID: finalMessageID,
 		ThreadID:  thread.ID,
 		TurnID:    snapshot.LatestTurnID,
 		EventID:   snapshot.LatestFinalFP,
 		CreatedAt: model.NowString(),
 	})
+	oldSummaryMessageID := panel.SummaryMessageID
+	panel.SummaryMessageID = finalMessageID
+	panel.CurrentTurnID = snapshot.LatestTurnID
+	panel.Status = snapshot.LatestTurnStatus
+	panel.LastSummaryHash = cardHash
+	panel.LastFinalCardHash = cardHash
+	panel.LastFinalNoticeFP = snapshot.LatestFinalFP
+	panel.DetailsViewJSON = model.MustJSON(model.DetailsViewState{})
+	if err := s.store.UpdateThreadPanelFinalCard(ctx, panel.ID, panel.SummaryMessageID, panel.CurrentTurnID, panel.Status, panel.LastSummaryHash, panel.LastToolHash, panel.LastOutputHash, panel.LastFinalNoticeFP, panel.DetailsViewJSON, panel.LastFinalCardHash); err != nil {
+		return err
+	}
+	if oldSummaryMessageID != 0 && oldSummaryMessageID != finalMessageID {
+		_ = sender.DeleteMessage(ctx, target.ChatID, target.TopicID, oldSummaryMessageID)
+	}
 	if panel.RunNoticeMessageID != 0 {
 		_ = sender.DeleteMessage(ctx, target.ChatID, target.TopicID, panel.RunNoticeMessageID)
 	}
@@ -48,15 +67,7 @@ func (s *Service) maybeRenderFinalCard(ctx context.Context, sender Sender, targe
 	if panel.OutputMessageID != 0 {
 		_ = sender.DeleteMessage(ctx, target.ChatID, target.TopicID, panel.OutputMessageID)
 	}
-	panel.CurrentTurnID = snapshot.LatestTurnID
-	panel.Status = snapshot.LatestTurnStatus
-	panel.LastSummaryHash = cardHash
-	panel.LastFinalCardHash = cardHash
-	panel.LastFinalNoticeFP = snapshot.LatestFinalFP
-	if err := s.store.UpdateThreadPanelState(ctx, panel.ID, panel.CurrentTurnID, panel.Status, panel.LastSummaryHash, panel.LastToolHash, panel.LastOutputHash, panel.LastFinalNoticeFP); err != nil {
-		return err
-	}
-	return s.store.UpdateThreadPanelDetails(ctx, panel.ID, model.MustJSON(model.DetailsViewState{}), cardHash)
+	return nil
 }
 
 func (s *Service) renderFinalCard(ctx context.Context, panelID int64, thread model.Thread, snapshot *appserver.ThreadReadSnapshot) (model.RenderedMessage, [][]model.ButtonSpec, string) {
@@ -135,27 +146,27 @@ func (s *Service) handleDetailsCallback(ctx context.Context, chatID, topicID, ca
 		return staleDetailsResponse(), nil
 	}
 	state := detailsStateFromPayload(payload)
-	commentaryCount := len(detailCommentaries(snapshot))
+	sectionCount := len(detailSections(snapshot))
 	if route != nil {
 		switch route.Action {
 		case "details_open":
 			state = model.DetailsViewState{Page: 0}
 		case "details_prev":
 			if state.ToolMode {
-				state.CommentaryIndex = clampInt(state.CommentaryIndex-1, 1, maxInt(1, commentaryCount))
+				state.CommentaryIndex = clampInt(state.CommentaryIndex-1, 1, maxInt(1, sectionCount))
 			} else {
-				state.Page = clampInt(state.Page-1, 0, maxInt(0, detailsPageCount(commentaryCount)-1))
+				state.Page = clampInt(state.Page-1, 0, maxInt(0, detailsPageCount(sectionCount)-1))
 			}
 		case "details_next":
 			if state.ToolMode {
-				state.CommentaryIndex = clampInt(state.CommentaryIndex+1, 1, maxInt(1, commentaryCount))
+				state.CommentaryIndex = clampInt(state.CommentaryIndex+1, 1, maxInt(1, sectionCount))
 			} else {
-				state.Page = clampInt(state.Page+1, 0, maxInt(0, detailsPageCount(commentaryCount)-1))
+				state.Page = clampInt(state.Page+1, 0, maxInt(0, detailsPageCount(sectionCount)-1))
 			}
 		case "details_tool_toggle":
 			state.ToolMode = !state.ToolMode
 			if state.ToolMode && state.CommentaryIndex == 0 {
-				state.CommentaryIndex = firstCommentaryWithToolsOnPage(snapshot, state.Page, commentaryCount)
+				state.CommentaryIndex = firstCommentaryWithToolsOnPage(snapshot, state.Page, sectionCount)
 			}
 		case "details_back":
 			message, buttons, cardHash := s.renderFinalCard(ctx, panel.ID, *thread, snapshot)
@@ -169,9 +180,9 @@ func (s *Service) handleDetailsCallback(ctx context.Context, chatID, topicID, ca
 			return &DirectResponse{CallbackText: "Final card."}, nil
 		}
 	}
-	state.Page = clampInt(state.Page, 0, maxInt(0, detailsPageCount(commentaryCount)-1))
+	state.Page = clampInt(state.Page, 0, maxInt(0, detailsPageCount(sectionCount)-1))
 	if state.ToolMode {
-		state.CommentaryIndex = clampInt(state.CommentaryIndex, 1, maxInt(1, commentaryCount))
+		state.CommentaryIndex = clampInt(state.CommentaryIndex, 1, maxInt(1, sectionCount))
 	}
 	message, buttons, cardHash := s.renderDetailsCard(ctx, panel.ID, *thread, snapshot, state)
 	targetMessageID := callbackMessageID
@@ -202,8 +213,8 @@ func (s *Service) editPanelCard(ctx context.Context, chatID, topicID, messageID 
 }
 
 func (s *Service) renderDetailsCard(ctx context.Context, panelID int64, thread model.Thread, snapshot *appserver.ThreadReadSnapshot, state model.DetailsViewState) (model.RenderedMessage, [][]model.ButtonSpec, string) {
-	commentaries := detailCommentaries(snapshot)
-	totalPages := detailsPageCount(len(commentaries))
+	sections := detailSections(snapshot)
+	totalPages := detailsPageCount(len(sections))
 	if totalPages == 0 {
 		totalPages = 1
 	}
@@ -214,33 +225,45 @@ func (s *Service) renderDetailsCard(ctx context.Context, panelID int64, thread m
 	}, "\n"))}
 
 	if state.ToolMode {
-		index := clampInt(state.CommentaryIndex, 1, maxInt(1, len(commentaries)))
-		if len(commentaries) == 0 {
-			segments = append(segments, tgformat.Plain("\n\nNo commentary entries for this turn."))
+		index := clampInt(state.CommentaryIndex, 1, maxInt(1, len(sections)))
+		if len(sections) == 0 {
+			segments = append(segments, tgformat.Plain("\n\nNo detail entries for this turn."))
 		} else {
-			commentary := commentaries[index-1]
-			segments = append(segments, tgformat.Plain(fmt.Sprintf("\n\n[commentary %d]\n", index)), tgformat.Markdown(strings.TrimSpace(commentary.Text)))
-			segments = appendToolDetailSegments(segments, detailsItemsForCommentary(snapshot, index), detailsToolMaxBytes)
+			section := sections[index-1]
+			segments = appendDetailSectionHeaderSegments(segments, section)
+			segments = appendToolDetailSegments(segments, detailsItemsForSection(snapshot, section), detailsToolMaxBytes)
 		}
 	} else {
-		if len(commentaries) == 0 {
-			segments = append(segments, tgformat.Plain("\n\nNo commentary entries for this turn."))
+		if len(sections) == 0 {
+			segments = append(segments, tgformat.Plain("\n\nNo detail entries for this turn."))
 		} else {
 			start := state.Page * detailsPageSize
-			end := minInt(start+detailsPageSize, len(commentaries))
+			end := minInt(start+detailsPageSize, len(sections))
 			for index := start; index < end; index++ {
-				text := strings.TrimSpace(cleanTelegramNilLiteral(commentaries[index].Text))
-				if text == "" {
-					continue
-				}
-				segments = append(segments, tgformat.Plain(fmt.Sprintf("\n\n[commentary %d]\n", index+1)), tgformat.Markdown(text))
+				segments = appendDetailSectionSummarySegments(segments, sections[index], detailsItemsForSection(snapshot, sections[index]))
 			}
 			segments = append(segments, tgformat.Plain(fmt.Sprintf("\n\nPage %d/%d", state.Page+1, totalPages)))
 		}
 	}
 	message := firstRenderedMessage(tgformat.RenderSegments(segments, tgformat.TelegramMessageLimit))
-	buttons := s.detailsButtons(ctx, panelID, thread.ID, snapshot.LatestTurnID, state, len(commentaries))
+	buttons := s.detailsButtons(ctx, panelID, thread.ID, snapshot.LatestTurnID, state, len(sections))
 	return message, buttons, hashStrings(tgformat.HashRendered(message), flattenButtonSpecs(buttons))
+}
+
+func appendDetailSectionHeaderSegments(segments []tgformat.Segment, section detailSection) []tgformat.Segment {
+	segments = append(segments, tgformat.Plain("\n\n"+section.Title))
+	if text := strings.TrimSpace(cleanTelegramNilLiteral(section.Text)); text != "" {
+		segments = append(segments, tgformat.Plain("\n"), tgformat.Markdown(text))
+	}
+	return segments
+}
+
+func appendDetailSectionSummarySegments(segments []tgformat.Segment, section detailSection, items []model.DetailItem) []tgformat.Segment {
+	segments = appendDetailSectionHeaderSegments(segments, section)
+	if section.ToolOnly {
+		segments = appendToolDetailSegments(segments, items, detailsToolMaxBytes)
+	}
+	return segments
 }
 
 func appendToolDetailSegments(segments []tgformat.Segment, items []model.DetailItem, quota int) []tgformat.Segment {
@@ -330,7 +353,7 @@ func (s *Service) sendDetailsToolsFile(ctx context.Context, chatID, topicID, cal
 	}
 	fileName := fmt.Sprintf("%s-%s-details-%d.txt", sanitizeFileName(thread.ProjectName), sanitizeFileName(thread.ShortID()), index)
 	caption := s.visualHeader(ctx, "Details tools", *thread, snapshot.LatestTurnID)
-	if _, err := sender.SendDocumentData(ctx, chatID, topicID, fileName, []byte(body), caption); err != nil {
+	if _, err := sender.SendDocumentData(ctx, chatID, topicID, fileName, []byte(body), caption, silentSendOptions()); err != nil {
 		return &DirectResponse{Text: fmt.Sprintf("Could not send details tools file: %v", err)}, nil
 	}
 	_ = route
@@ -370,17 +393,27 @@ func staleDetailsResponse() *DirectResponse {
 	return &DirectResponse{Text: staleDetailsText}
 }
 
-func buildDetailsToolsText(thread model.Thread, snapshot *appserver.ThreadReadSnapshot, commentaryIndex int) string {
-	commentaries := detailCommentaries(snapshot)
-	if commentaryIndex < 1 || commentaryIndex > len(commentaries) {
+type detailSection struct {
+	Title           string
+	Text            string
+	CommentaryIndex int
+	ToolOnly        bool
+}
+
+func buildDetailsToolsText(thread model.Thread, snapshot *appserver.ThreadReadSnapshot, sectionIndex int) string {
+	sections := detailSections(snapshot)
+	if sectionIndex < 1 || sectionIndex > len(sections) {
 		return ""
 	}
+	section := sections[sectionIndex-1]
 	lines := []string{
 		visualFileHeader(thread, snapshot.LatestTurnID, "Details tools"),
-		fmt.Sprintf("[commentary %d]", commentaryIndex),
-		strings.TrimSpace(commentaries[commentaryIndex-1].Text),
+		section.Title,
 	}
-	items := detailsItemsForCommentary(snapshot, commentaryIndex)
+	if text := strings.TrimSpace(cleanTelegramNilLiteral(section.Text)); text != "" {
+		lines = append(lines, text)
+	}
+	items := detailsItemsForSection(snapshot, section)
 	for _, item := range items {
 		switch item.Kind {
 		case model.DetailItemTool:
@@ -397,6 +430,28 @@ func buildDetailsToolsText(thread model.Thread, snapshot *appserver.ThreadReadSn
 		}
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func detailSections(snapshot *appserver.ThreadReadSnapshot) []detailSection {
+	if snapshot == nil {
+		return nil
+	}
+	out := []detailSection{}
+	if len(detailsItemsForCommentaryIndex(snapshot, 0)) > 0 {
+		out = append(out, detailSection{Title: "Tool activity", ToolOnly: true})
+	}
+	for index, commentary := range detailCommentaries(snapshot) {
+		commentaryIndex := commentary.CommentaryIndex
+		if commentaryIndex <= 0 {
+			commentaryIndex = index + 1
+		}
+		out = append(out, detailSection{
+			Title:           fmt.Sprintf("[commentary %d]", index+1),
+			Text:            commentary.Text,
+			CommentaryIndex: commentaryIndex,
+		})
+	}
+	return out
 }
 
 func detailCommentaries(snapshot *appserver.ThreadReadSnapshot) []model.DetailItem {
@@ -503,8 +558,26 @@ func stringValueFromMap(input map[string]any, key string) string {
 	return value
 }
 
-func detailsItemsForCommentary(snapshot *appserver.ThreadReadSnapshot, commentaryIndex int) []model.DetailItem {
-	if snapshot == nil || commentaryIndex <= 0 {
+func detailsItemsForSection(snapshot *appserver.ThreadReadSnapshot, section detailSection) []model.DetailItem {
+	if snapshot == nil {
+		return nil
+	}
+	if section.ToolOnly {
+		return detailsItemsForCommentaryIndex(snapshot, 0)
+	}
+	return detailsItemsForCommentaryIndex(snapshot, section.CommentaryIndex)
+}
+
+func detailsItemsForCommentary(snapshot *appserver.ThreadReadSnapshot, sectionIndex int) []model.DetailItem {
+	sections := detailSections(snapshot)
+	if sectionIndex < 1 || sectionIndex > len(sections) {
+		return nil
+	}
+	return detailsItemsForSection(snapshot, sections[sectionIndex-1])
+}
+
+func detailsItemsForCommentaryIndex(snapshot *appserver.ThreadReadSnapshot, commentaryIndex int) []model.DetailItem {
+	if snapshot == nil || commentaryIndex < 0 {
 		return nil
 	}
 	out := []model.DetailItem{}

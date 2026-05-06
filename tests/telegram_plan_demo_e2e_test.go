@@ -61,7 +61,7 @@ func TestTelegramPlanModeScreenshotDemo(t *testing.T) {
 			if index != len(messages)-1 {
 				buttons = nil
 			}
-			result, err := client.SendRenderedMessage(ctx, chatID, 0, message, buttons)
+			result, err := client.SendRenderedMessage(ctx, chatID, 0, message, buttons, model.SendOptions{})
 			if err != nil {
 				t.Fatalf("SendRenderedMessage failed: %v", err)
 			}
@@ -70,7 +70,7 @@ func TestTelegramPlanModeScreenshotDemo(t *testing.T) {
 		}
 	}
 	sendText := func(text string) {
-		result, err := client.SendMessage(ctx, chatID, 0, text, nil)
+		result, err := client.SendMessage(ctx, chatID, 0, text, nil, model.SendOptions{})
 		if err != nil {
 			t.Fatalf("SendMessage failed: %v", err)
 		}

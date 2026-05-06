@@ -4,7 +4,7 @@ Codex Telegram bot and remote UI for local OpenAI Codex App Server, built in Go.
 
 `codex-tg` turns a Telegram bot into a mobile control surface for local Codex threads: it watches Codex GUI/CLI activity, keeps thread identity visible, routes replies back to the right thread, and exposes high-signal controls such as Plan Mode prompts, Stop, Steer, Details, Tools file, and Get full log.
 
-Current release: `v0.2.4`.
+Current release: `v0.2.5`.
 
 ![codex-tg Telegram Plan Mode demo](docs/assets/telegram-plan-mode-demo.png)
 
@@ -38,7 +38,8 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 - Telegram-origin live current tool rendering from App Server `item/*` events, while foreign GUI/CLI panels stay completed-tool only.
 - Stable visual identity per thread: emoji marker plus project/thread/run chips.
 - Explicit `New run -> [User] -> [commentary] -> [Tool] -> [Output] -> [Final]` chronology with status on the live commentary/final card.
-- Plan Mode starts from Telegram via `/plan` or `/reply --plan`, then renders `[Plan]` prompt-cards with reply-first routing and structured buttons when Codex provides choices.
+- Low-noise Telegram notifications: only `New run` (configurable), `[Plan]`, and `[Final]` are audible; live progress and exports are sent silently.
+- Plan Mode starts from Telegram via `/plan` or `/reply --plan`, and Default Mode can be forced with `/default` or `/reply --default` if a thread needs to leave Plan Mode; `[Plan]` prompt-cards keep reply-first routing and structured buttons when Codex provides choices.
 - Final Card with Details pagination and on-demand Tools file export.
 - On-demand full log archive from Codex session JSONL.
 - SQLite-backed durable state for bindings, routes, callbacks, observer target, panels, and delivery metadata.
@@ -47,7 +48,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 ## Platform Status
 
 - Windows: actively tested with the local Codex App Server, Telegram Bot API, observer flows, and live E2E demo.
-- macOS: `v0.2.4` is verified stable on macOS 26.3.1 arm64 with Go 1.26.2, LaunchAgent daemon startup, local build, Details binding validation, Telegram command-menu readback, real Chat folder creation, and live Telegram readback E2E.
+- macOS: `v0.2.5` is verified stable on macOS 26.3.1 arm64 with Go 1.26.2, LaunchAgent daemon startup, local build, Details binding validation, Telegram command-menu readback, real Chat folder creation, low-noise notification validation, and live Telegram readback E2E.
 - Linux: CI runs tests/builds on Ubuntu; full local daemon/runtime validation is still pending.
 
 ## Quickstart
@@ -79,7 +80,9 @@ In Telegram:
 /context
 ```
 
-Start or continue a Codex thread from Codex GUI/CLI. `codex-tg` should create a `New run` card, a `[User]` card, live progress cards, and then collapse the completed run into a final answer card with Details.
+Start or continue a Codex thread from Codex GUI/CLI. `codex-tg` should create a `New run` card, a `[User]` card, live progress cards, and then send a final answer card with Details while cleaning up transient live cards.
+
+Set `CTR_GO_NOTIFY_NEW_RUN=off` to keep `New run` visible but silent. `[Plan]` prompts and `[Final]` cards still use normal Telegram notifications.
 
 ## Runtime Commands
 
@@ -93,7 +96,7 @@ go run ./cmd/ctr-go daemon run
 Telegram commands:
 
 - `/start`, `/help`
-- `/threads`, `/projects`, `/new`, `/newchat`, `/newthread`, `/show`, `/bind`, `/reply`, `/plan`
+- `/threads`, `/projects`, `/new`, `/newchat`, `/newthread`, `/show`, `/bind`, `/reply`, `/default`, `/plan`
 - `/settings`, `/model`, `/effort`
 - `/context`, `/whereami`
 - `/observe all`, `/observe off`
@@ -121,6 +124,7 @@ Primary environment variables:
 - `CTR_GO_ALLOWED_CHAT_IDS`
 - `CTR_GO_DEFAULT_CWD`
 - `CTR_GO_CODEX_CHATS_ROOT` (`~/Documents/Codex` by default)
+- `CTR_GO_NOTIFY_NEW_RUN` (`true` by default; set `false`/`off`/`0` to send `New run` silently)
 - `CTR_GO_LOG_ENABLED` (`true` by default; set `false`/`off`/`0` to discard daemon stdout logs)
 - `CTR_GO_DIAGNOSTIC_LOGS` (`true` by default; set `false`/`off`/`0` to keep normal bot logs but suppress structured `daemon_event` diagnostics)
 - `CTR_GO_OBSERVER_POLL_SECONDS`

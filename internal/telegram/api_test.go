@@ -83,7 +83,7 @@ func TestClientSendMessageUsesHTMLParseModeForMixedCodeBlock(t *testing.T) {
 	client := NewClient("token")
 	client.baseURL = server.URL
 	message, err := client.SendMessage(context.Background(), 42, 0, `[Tool]
-<pre><code class="language-powershell">Status: completed</code></pre>`, nil)
+<pre><code class="language-powershell">Status: completed</code></pre>`, nil, model.SendOptions{})
 	if err != nil {
 		t.Fatalf("SendMessage failed: %v", err)
 	}
@@ -92,6 +92,38 @@ func TestClientSendMessageUsesHTMLParseModeForMixedCodeBlock(t *testing.T) {
 	}
 	if got, want := captured["parse_mode"], "HTML"; got != want {
 		t.Fatalf("parse_mode = %#v, want %q", got, want)
+	}
+	if _, ok := captured["disable_notification"]; ok {
+		t.Fatalf("disable_notification = %#v, want omitted for audible message", captured["disable_notification"])
+	}
+}
+
+func TestClientSendMessageSilentSetsDisableNotification(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sendMessage" {
+			t.Fatalf("path = %q, want /sendMessage", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll failed: %v", err)
+		}
+		if err := json.Unmarshal(body, &captured); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":79,"chat":{"id":42,"type":"private"},"text":"silent"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	if _, err := client.SendMessage(context.Background(), 42, 0, "silent", nil, model.SendOptions{Silent: true}); err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+	if got, ok := captured["disable_notification"].(bool); !ok || !got {
+		t.Fatalf("disable_notification = %#v, want true", captured["disable_notification"])
 	}
 }
 
@@ -156,7 +188,7 @@ func TestClientSendRenderedMessageUsesEntitiesWithoutParseMode(t *testing.T) {
 			Length:   9,
 			Language: "bash",
 		}},
-	}, nil)
+	}, nil, model.SendOptions{})
 	if err != nil {
 		t.Fatalf("SendRenderedMessage failed: %v", err)
 	}
@@ -304,6 +336,9 @@ func TestClientSendDocumentUsesMultipartForm(t *testing.T) {
 		if !strings.Contains(fields["reply_markup"], `"callback_data":"cb-1"`) {
 			t.Fatalf("reply_markup = %q, want callback data", fields["reply_markup"])
 		}
+		if _, ok := fields["disable_notification"]; ok {
+			t.Fatalf("disable_notification = %q, want omitted for audible document", fields["disable_notification"])
+		}
 		if got, want := documentName, "observer.txt"; got != want {
 			t.Fatalf("filename = %q, want %q", got, want)
 		}
@@ -325,11 +360,57 @@ func TestClientSendDocumentUsesMultipartForm(t *testing.T) {
 		Data:        []byte("payload"),
 	}, "observer dump", &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{{{Text: "Open", CallbackData: "cb-1"}}},
-	})
+	}, model.SendOptions{})
 	if err != nil {
 		t.Fatalf("SendDocument failed: %v", err)
 	}
 	if message == nil || message.MessageID != 501 {
 		t.Fatalf("message = %#v, want message_id=501", message)
+	}
+}
+
+func TestClientSendDocumentSilentSetsDisableNotification(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sendDocument" {
+			t.Fatalf("path = %q, want /sendDocument", r.URL.Path)
+		}
+		_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("ParseMediaType failed: %v", err)
+		}
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		fields := map[string]string{}
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("NextPart failed: %v", err)
+			}
+			data, err := io.ReadAll(part)
+			if err != nil {
+				t.Fatalf("ReadAll(part) failed: %v", err)
+			}
+			if part.FormName() != "document" {
+				fields[part.FormName()] = string(data)
+			}
+		}
+		if got, want := fields["disable_notification"], "true"; got != want {
+			t.Fatalf("disable_notification = %q, want %q", got, want)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":502,"chat":{"id":42,"type":"private"}}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	if _, err := client.SendDocument(context.Background(), 42, 0, DocumentFile{
+		Name: "silent.txt",
+		Data: []byte("payload"),
+	}, "", nil, model.SendOptions{Silent: true}); err != nil {
+		t.Fatalf("SendDocument failed: %v", err)
 	}
 }

@@ -2041,21 +2041,24 @@ func TestPollTrackedSyncsFirstSeenRecentTerminalCatchup(t *testing.T) {
 
 	service.pollTracked(ctx)
 
-	if len(sender.messages) != 3 {
-		t.Fatalf("message count = %d, want 3 live trio messages for first-seen terminal catchup; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 4 {
+		t.Fatalf("message count = %d, want 3 live trio messages plus Final for first-seen terminal catchup; messages=%#v", len(sender.messages), sender.messages)
 	}
 	foundFinal := false
-	for _, message := range sender.edits {
+	for _, message := range sender.messages {
 		if hasHeaderKind(message.text, "Final") && strings.Contains(message.text, "[Codex]") && strings.Contains(message.text, "[Catchup terminal]") && strings.Contains(message.text, "CATCHUP_OK") {
+			if message.options.Silent {
+				t.Fatalf("final message = %#v, want audible Final", message)
+			}
 			foundFinal = true
 			break
 		}
 	}
 	if !foundFinal {
-		t.Fatalf("final card edit not found: %#v", sender.edits)
+		t.Fatalf("final card message not found: %#v", sender.messages)
 	}
-	if len(sender.deletes) != 2 {
-		t.Fatalf("deletes = %#v, want tool/output cleanup after final", sender.deletes)
+	if len(sender.deletes) != 3 {
+		t.Fatalf("deletes = %#v, want commentary/tool/output cleanup after final", sender.deletes)
 	}
 }
 
@@ -2126,6 +2129,85 @@ func TestPollTrackedDefersTelegramOriginEmptyInterruptedAndKeepsActiveState(t *t
 	requireLogContains(t, got, `"event":"telegram_origin_terminal_deferred"`)
 	if strings.Contains(got, `"event":"telegram_origin_turn_terminal"`) {
 		t.Fatalf("terminal log should be deferred, got:\n%s", got)
+	}
+}
+
+func TestPollTrackedDeferredInterruptedDoesNotOverwriteFreshLiveToolSnapshot(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	turnID := "turn-empty-interrupted-live-tool"
+	thread := model.Thread{
+		ID:           "thread-empty-interrupted-live-tool",
+		Title:        "Empty interrupted live tool",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	stalePrevious := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "inProgress",
+		DetailItems: []model.DetailItem{
+			{ID: "user-1", Kind: model.DetailItemUser, Text: "run sleep"},
+		},
+	}, time.Now().UTC())
+	freshLiveCurrent := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          turnID,
+		LatestTurnStatus:      "inProgress",
+		LatestToolID:          "cmd-sleep",
+		LatestToolKind:        "commandExecution",
+		LatestToolLabel:       "sleep 10",
+		LatestToolStatus:      "running",
+		LatestToolFP:          "cmd-sleep-running",
+		LatestToolLiveCurrent: true,
+		DetailItems: []model.DetailItem{
+			{ID: "user-1", Kind: model.DetailItemUser, Text: "run sleep"},
+			{ID: "cmd-sleep", Kind: model.DetailItemTool, Label: "sleep 10", Status: "running", FP: "cmd-sleep-running"},
+		},
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, freshLiveCurrent); err != nil {
+		t.Fatalf("UpsertSnapshot(freshLiveCurrent) failed: %v", err)
+	}
+	emptyInterrupted := appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     turnID,
+		LatestTurnStatus: "interrupted",
+		DetailItems: []model.DetailItem{
+			{ID: "user-1", Kind: model.DetailItemUser, Text: "run sleep"},
+		},
+	}
+
+	if !service.applyTelegramOriginTerminalGate(ctx, "poll_tracked", &emptyInterrupted, &stalePrevious) {
+		t.Fatal("applyTelegramOriginTerminalGate = false, want deferred interrupted")
+	}
+
+	stored, err := service.store.GetSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("GetSnapshot failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("snapshot = nil")
+	}
+	_, current, err := service.loadThreadPanelSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("loadThreadPanelSnapshot failed: %v", err)
+	}
+	if !current.LatestToolLiveCurrent || current.LatestToolLabel != "sleep 10" {
+		t.Fatalf("stored live tool = %q live=%v, want preserved sleep 10 current tool", current.LatestToolLabel, current.LatestToolLiveCurrent)
+	}
+	if stored.NextPollAfter == "" {
+		t.Fatal("NextPollAfter is empty, want hot polling metadata on preserved live snapshot")
 	}
 }
 
@@ -2405,6 +2487,73 @@ func TestRefreshThreadForOperationDefersEmptyInterrupted(t *testing.T) {
 	}
 	if stored.NextPollAfter == "" {
 		t.Fatal("NextPollAfter is empty, want hot polling while deferred")
+	}
+}
+
+func TestRefreshThreadForOperationTerminalCompletedToolReplacesLiveCurrent(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	turnID := "turn-refresh-terminal-tool"
+	thread := model.Thread{
+		ID:           "thread-refresh-terminal-tool",
+		Title:        "Refresh terminal tool",
+		ProjectName:  "Codex",
+		CWD:          "/Users/example/project",
+		UpdatedAt:    time.Now().UTC().Unix(),
+		Status:       "active",
+		ActiveTurnID: turnID,
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	previous := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:                thread,
+		LatestTurnID:          turnID,
+		LatestTurnStatus:      "inProgress",
+		LatestToolID:          "cmd-running",
+		LatestToolKind:        "commandExecution",
+		LatestToolLabel:       "sleep 10",
+		LatestToolStatus:      "running",
+		LatestToolFP:          "cmd-running-fp",
+		LatestToolLiveCurrent: true,
+		DetailItems: []model.DetailItem{
+			{ID: "user-item", Kind: model.DetailItemUser, Text: "hello"},
+			{ID: "cmd-running", Kind: model.DetailItemTool, Label: "sleep 10", Status: "running", FP: "cmd-running-fp"},
+		},
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, previous); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	if err := service.markTelegramOriginTurn(ctx, thread.ID, turnID); err != nil {
+		t.Fatalf("markTelegramOriginTurn failed: %v", err)
+	}
+	stub := &stubSession{
+		threadReads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayloadWithFinal(thread, turnID, "completed", "OK_FINAL"),
+		},
+	}
+
+	if _, err := service.refreshThreadForOperation(ctx, stub, thread.ID, "thread_read"); err != nil {
+		t.Fatalf("refreshThreadForOperation failed: %v", err)
+	}
+
+	_, current, err := service.loadThreadPanelSnapshot(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("loadThreadPanelSnapshot failed: %v", err)
+	}
+	if current.LatestToolLiveCurrent {
+		t.Fatal("LatestToolLiveCurrent = true, want completed thread/read tool to replace live current")
+	}
+	if got := current.LatestToolLabel; !strings.Contains(got, "slow-command-done") {
+		t.Fatalf("LatestToolLabel = %q, want completed thread/read tool", got)
+	}
+	if got := current.LatestToolStatus; got != "completed" {
+		t.Fatalf("LatestToolStatus = %q, want completed", got)
+	}
+	if got := current.LatestTurnStatus; got != "completed" {
+		t.Fatalf("LatestTurnStatus = %q, want completed", got)
 	}
 }
 
@@ -3529,6 +3678,83 @@ func TestReplyPlanFlagStartsPlanCollaborationMode(t *testing.T) {
 	}
 	if got := stub.turnStartCalls[0]; got.collaborationMode != collaborationModePlan || got.message != "sketch the plan" {
 		t.Fatalf("turn start call = %#v, want plan input", got)
+	}
+}
+
+func TestReplyDefaultFlagStartsDefaultCollaborationMode(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	if err := service.store.SetState(ctx, codexReasoningStateKey, "medium"); err != nil {
+		t.Fatalf("SetState(reasoning) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "reply-default-thread",
+		Title:       "Reply default",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/reply --default "+thread.ID+" do the work", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/reply --default) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID {
+		t.Fatalf("response = %#v, want reply default thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.collaborationMode != collaborationModeDefault || got.message != "do the work" {
+		t.Fatalf("turn start call = %#v, want default input", got)
+	}
+}
+
+func TestDefaultModeCommandStartsDefaultCollaborationMode(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-test"); err != nil {
+		t.Fatalf("SetState(model) failed: %v", err)
+	}
+	thread := model.Thread{
+		ID:          "default-command-thread",
+		Title:       "Default command",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.handleCommand(ctx, 123456789, 0, "/default "+thread.ID+" do the work", 0)
+	if err != nil {
+		t.Fatalf("handleCommand(/default) failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID {
+		t.Fatalf("response = %#v, want default command thread", response)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
+	}
+	if got := stub.turnStartCalls[0]; got.threadID != thread.ID || got.collaborationMode != collaborationModeDefault || got.message != "do the work" {
+		t.Fatalf("turn start call = %#v, want default-mode command", got)
 	}
 }
 

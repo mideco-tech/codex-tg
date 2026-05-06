@@ -52,6 +52,7 @@ type Config struct {
 	PanelMode                   string
 	LogEnabled                  bool
 	DiagnosticLogs              bool
+	NotifyNewRun                bool
 	ObserverPollInterval        time.Duration
 	RequestTimeout              time.Duration
 	IndexRefreshInterval        time.Duration
@@ -93,6 +94,7 @@ func FromEnv() Config {
 		PanelMode:                   normalizePanelMode(envString("CTR_GO_PANEL_MODE", "per_run")),
 		LogEnabled:                  envBool("CTR_GO_LOG_ENABLED", true),
 		DiagnosticLogs:              envBool("CTR_GO_DIAGNOSTIC_LOGS", true),
+		NotifyNewRun:                envBool("CTR_GO_NOTIFY_NEW_RUN", true),
 		ObserverPollInterval:        envDurationSeconds("CTR_GO_OBSERVER_POLL_SECONDS", 5*time.Second),
 		RequestTimeout:              envDurationSeconds("CTR_GO_REQUEST_TIMEOUT_SECONDS", 30*time.Second),
 		IndexRefreshInterval:        envDurationSeconds("CTR_GO_INDEX_REFRESH_SECONDS", 45*time.Second),
@@ -119,6 +121,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		PanelMode                   string  `json:"panel_mode"`
 		LogEnabled                  bool    `json:"log_enabled"`
 		DiagnosticLogs              bool    `json:"diagnostic_logs"`
+		NotifyNewRun                bool    `json:"notify_new_run"`
 		ObserverPollSeconds         float64 `json:"observer_poll_seconds"`
 		RequestTimeoutSeconds       float64 `json:"request_timeout_seconds"`
 		ProjectsProjectPreviewLimit int     `json:"projects_project_preview_limit"`
@@ -139,6 +142,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		PanelMode:                   normalizePanelMode(c.PanelMode),
 		LogEnabled:                  c.LogEnabled,
 		DiagnosticLogs:              c.DiagnosticLogs,
+		NotifyNewRun:                c.NotifyNewRun,
 		ObserverPollSeconds:         c.ObserverPollInterval.Seconds(),
 		RequestTimeoutSeconds:       c.RequestTimeout.Seconds(),
 		ProjectsProjectPreviewLimit: positiveOrDefault(c.ProjectsProjectPreviewLimit, 7),

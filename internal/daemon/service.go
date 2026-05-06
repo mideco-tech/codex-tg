@@ -38,12 +38,12 @@ type Session interface {
 }
 
 type Sender interface {
-	SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec) (int64, error)
-	SendRenderedMessages(ctx context.Context, chatID, topicID int64, messages []model.RenderedMessage, buttons [][]model.ButtonSpec) ([]int64, error)
+	SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec, options model.SendOptions) (int64, error)
+	SendRenderedMessages(ctx context.Context, chatID, topicID int64, messages []model.RenderedMessage, buttons [][]model.ButtonSpec, options model.SendOptions) ([]int64, error)
 	EditMessage(ctx context.Context, chatID, topicID, messageID int64, text string, buttons [][]model.ButtonSpec) error
 	EditRenderedMessage(ctx context.Context, chatID, topicID, messageID int64, rendered model.RenderedMessage, buttons [][]model.ButtonSpec) error
 	DeleteMessage(ctx context.Context, chatID, topicID, messageID int64) error
-	SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string) (int64, error)
+	SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string, options model.SendOptions) (int64, error)
 }
 
 type DirectResponse struct {
@@ -54,6 +54,21 @@ type DirectResponse struct {
 	TurnID       string
 	ItemID       string
 	EventID      string
+}
+
+func silentSendOptions() model.SendOptions {
+	return model.SendOptions{Silent: true}
+}
+
+func notifySendOptions() model.SendOptions {
+	return model.SendOptions{}
+}
+
+func (s *Service) runNoticeSendOptions() model.SendOptions {
+	if s != nil && s.cfg.NotifyNewRun {
+		return notifySendOptions()
+	}
+	return silentSendOptions()
 }
 
 type Service struct {
@@ -92,6 +107,7 @@ type Service struct {
 
 const (
 	observerRecentThreadLimit = 50
+	collaborationModeDefault  = "default"
 	collaborationModePlan     = "plan"
 	codexModelStateKey        = "codex.model"
 	codexReasoningStateKey    = "codex.reasoning_effort"
@@ -1184,12 +1200,16 @@ func (s *Service) pollTracked(ctx context.Context) {
 		current := appserver.SnapshotFromThreadRead(payload)
 		current.Thread.Raw, _ = json.Marshal(payload)
 		current.Thread = mergeThreadMetadata(current.Thread, thread)
-		if s.applyTelegramOriginTerminalGate(ctx, "poll_tracked", &current, snapshot) {
+		latestSnapshot := snapshot
+		if stored, err := s.store.GetSnapshot(ctx, thread.ID); err == nil && stored != nil {
+			latestSnapshot = stored
+		}
+		if s.applyTelegramOriginTerminalGate(ctx, "poll_tracked", &current, latestSnapshot) {
 			continue
 		}
-		s.preserveTelegramOriginLiveCurrentTool(ctx, &current, snapshot)
+		s.preserveTelegramOriginLiveCurrentTool(ctx, &current, latestSnapshot)
 		_ = s.store.UpsertThread(ctx, current.Thread)
-		nextSnapshot := appserver.CompactSnapshot(snapshot, current, time.Now().UTC())
+		nextSnapshot := appserver.CompactSnapshot(latestSnapshot, current, time.Now().UTC())
 		if current.LatestTurnStatus == "inProgress" || current.WaitingOnApproval || current.WaitingOnReply {
 			nextSnapshot.NextPollAfter = model.TimeString(time.Now().UTC().Add(s.cfg.ObserverPollInterval).Format(time.RFC3339Nano))
 		} else {
@@ -1198,7 +1218,7 @@ func (s *Service) pollTracked(ctx context.Context) {
 		_ = s.store.UpsertSnapshot(ctx, current.Thread.ID, nextSnapshot)
 		s.logObserverSyncResult("poll_tracked", current)
 		s.maybeLogTelegramOriginTerminal(ctx, current)
-		if catchup || s.threadNeedsLiveSync(ctx, current.Thread.ID) || snapshotHasPassiveChange(snapshot, &current) {
+		if catchup || s.threadNeedsLiveSync(ctx, current.Thread.ID) || snapshotHasPassiveChange(latestSnapshot, &current) {
 			s.syncThreadPanel(ctx, current.Thread.ID)
 		}
 	}
@@ -1223,7 +1243,7 @@ func (s *Service) processDeliveryBatch(ctx context.Context) {
 			continue
 		}
 		s.logTelegramRenderContainsNil(payload.ThreadID, payload.TurnID, "delivery", 0, payload.Text)
-		messageID, err := sender.SendMessage(ctx, item.ChatID, item.TopicID, payload.Text, payload.Buttons)
+		messageID, err := sender.SendMessage(ctx, item.ChatID, item.TopicID, payload.Text, payload.Buttons, silentSendOptions())
 		if err != nil {
 			attempt := item.RetryCount + 1
 			_ = s.store.RecordDeliveryAttempt(ctx, item.ID, attempt, "send_error", err.Error())
@@ -1261,7 +1281,7 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 	case "/start":
 		return &DirectResponse{Text: "ctr-go is online.\nUse /status, /threads, /projects, /context, or /observe all."}, nil
 	case "/help":
-		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/newchat <prompt>\n/newthread <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan] <thread> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
+		return &DirectResponse{Text: "Commands:\n/start\n/help\n/threads [limit|search]\n/projects\n/new <project> <prompt>\n/newchat <prompt>\n/newthread <prompt>\n/show <thread>\n/bind <thread>\n/reply [--plan|--default] <thread> <text>\n/default <text>\n/default <thread_id> <text>\n/plan <text>\n/plan <thread_id> <text>\n/settings\n/model\n/effort\n/context\n/observe all|off\n/panelmode [per_run|stable]\n/status\n/repair\n/stop [thread]\n/approve <request_id>\n/deny <request_id>"}, nil
 	case "/status":
 		text, err := s.StatusSnapshot(ctx, chatID, topicID)
 		if err != nil {
@@ -1346,10 +1366,20 @@ func (s *Service) handleCommand(ctx context.Context, chatID, topicID int64, raw 
 			return nil, err
 		}
 		if !ok || decision.ThreadID == "" {
-			return &DirectResponse{Text: "Usage: /reply [--plan] <thread> <text>"}, nil
+			return &DirectResponse{Text: "Usage: /reply [--plan|--default] <thread> <text>"}, nil
 		}
 		s.logTelegramInbound("command_reply", chatID, topicID, replyToMessageID, decision, text, collaborationMode)
 		return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, collaborationMode)
+	case "/default", "/default_mode":
+		decision, text, _, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, collaborationModeDefault, false, true)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || decision.ThreadID == "" {
+			return &DirectResponse{Text: "Usage: /default <text>, /default <thread_id> <text>, or reply with /default <text>."}, nil
+		}
+		s.logTelegramInbound("command_default", chatID, topicID, replyToMessageID, decision, text, collaborationModeDefault)
+		return s.sendInputToThreadTurn(ctx, chatID, topicID, decision.ThreadID, decision.TurnID, text, collaborationModeDefault)
 	case "/plan", "/plan_mode":
 		decision, text, _, ok, err := s.resolveInputCommand(ctx, chatID, topicID, rest, replyToMessageID, collaborationModePlan, false, true)
 		if err != nil {
@@ -1703,6 +1733,8 @@ func consumeCollaborationModeFlag(rest string) (string, string, bool) {
 	switch strings.ToLower(strings.TrimSpace(head)) {
 	case "--plan", "-p":
 		return strings.TrimSpace(tail), collaborationModePlan, true
+	case "--default", "--code", "-d":
+		return strings.TrimSpace(tail), collaborationModeDefault, true
 	default:
 		return rest, "", false
 	}

@@ -218,6 +218,16 @@ func (s *Store) UpdateThreadPanelState(ctx context.Context, panelID int64, curre
 	return err
 }
 
+func (s *Store) UpdateThreadPanelFinalCard(ctx context.Context, panelID, summaryMessageID int64, currentTurnID, status, lastSummaryHash, lastToolHash, lastOutputHash, lastFinalNoticeFP, detailsViewJSON, lastFinalCardHash string) error {
+	_, err := s.db.ExecContext(ctx, `
+	UPDATE thread_panels
+	SET summary_message_id = ?, current_turn_id = ?, status = ?, last_summary_hash = ?, last_tool_hash = ?, last_output_hash = ?, last_final_notice_fp = ?, details_view_json = ?, last_final_card_hash = ?, updated_at = ?
+	WHERE id = ?`,
+		summaryMessageID, nullable(currentTurnID), nullable(status), nullable(lastSummaryHash), nullable(lastToolHash), nullable(lastOutputHash), nullable(lastFinalNoticeFP), nullable(detailsViewJSON), nullable(lastFinalCardHash), string(model.NowString()), panelID,
+	)
+	return err
+}
+
 func (s *Store) UpdateThreadPanelUserNotice(ctx context.Context, panelID, userMessageID int64, lastUserNoticeFP string) error {
 	_, err := s.db.ExecContext(ctx, `
 	UPDATE thread_panels

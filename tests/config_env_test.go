@@ -19,6 +19,7 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	t.Setenv("CTR_GO_DEFAULT_CWD", `C:\workspace`)
 	t.Setenv("CTR_GO_LOG_ENABLED", "off")
 	t.Setenv("CTR_GO_DIAGNOSTIC_LOGS", "no")
+	t.Setenv("CTR_GO_NOTIFY_NEW_RUN", "off")
 	t.Setenv("CTR_GO_OBSERVER_POLL_SECONDS", "7")
 	t.Setenv("CTR_GO_REQUEST_TIMEOUT_SECONDS", "31")
 	t.Setenv("CTR_GO_INDEX_REFRESH_SECONDS", "46")
@@ -54,6 +55,9 @@ func TestFromEnvPrefersGoScopedEnvVars(t *testing.T) {
 	}
 	if cfg.DiagnosticLogs {
 		t.Fatal("DiagnosticLogs = true, want false")
+	}
+	if cfg.NotifyNewRun {
+		t.Fatal("NotifyNewRun = true, want false")
 	}
 	if got, want := cfg.ObserverPollInterval, 7*time.Second; got != want {
 		t.Fatalf("ObserverPollInterval = %v, want %v", got, want)
@@ -105,6 +109,7 @@ func TestFromEnvProjectChatLimitsClampInvalidValues(t *testing.T) {
 func TestFromEnvDefaultsLoggingOn(t *testing.T) {
 	t.Setenv("CTR_GO_LOG_ENABLED", "")
 	t.Setenv("CTR_GO_DIAGNOSTIC_LOGS", "")
+	t.Setenv("CTR_GO_NOTIFY_NEW_RUN", "")
 
 	cfg := config.FromEnv()
 
@@ -114,11 +119,15 @@ func TestFromEnvDefaultsLoggingOn(t *testing.T) {
 	if !cfg.DiagnosticLogs {
 		t.Fatal("DiagnosticLogs = false, want true")
 	}
+	if !cfg.NotifyNewRun {
+		t.Fatal("NotifyNewRun = false, want true")
+	}
 }
 
 func TestFromEnvInvalidLoggingFlagsFallBackToEnabled(t *testing.T) {
 	t.Setenv("CTR_GO_LOG_ENABLED", "wat")
 	t.Setenv("CTR_GO_DIAGNOSTIC_LOGS", "maybe")
+	t.Setenv("CTR_GO_NOTIFY_NEW_RUN", "perhaps")
 
 	cfg := config.FromEnv()
 
@@ -127,6 +136,9 @@ func TestFromEnvInvalidLoggingFlagsFallBackToEnabled(t *testing.T) {
 	}
 	if !cfg.DiagnosticLogs {
 		t.Fatal("DiagnosticLogs = false, want true fallback")
+	}
+	if !cfg.NotifyNewRun {
+		t.Fatal("NotifyNewRun = false, want true fallback")
 	}
 }
 

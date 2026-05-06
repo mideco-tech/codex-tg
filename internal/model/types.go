@@ -45,6 +45,10 @@ const (
 
 type TimeString string
 
+type SendOptions struct {
+	Silent bool
+}
+
 func NowString() TimeString {
 	return TimeString(time.Now().UTC().Format(time.RFC3339Nano))
 }

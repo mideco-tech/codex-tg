@@ -17,6 +17,8 @@ Primary tests:
 - `internal/daemon/service_test.go::TestPlanCommandUUIDLikeHeadStaysExplicit`
 - `internal/daemon/service_test.go::TestPlanCommandKnownThreadHeadStaysExplicit`
 - `internal/daemon/service_test.go::TestReplyPlanFlagStartsPlanCollaborationMode`
+- `internal/daemon/service_test.go::TestReplyDefaultFlagStartsDefaultCollaborationMode`
+- `internal/daemon/service_test.go::TestDefaultModeCommandStartsDefaultCollaborationMode`
 - `internal/daemon/service_test.go::TestPlanModeCommandCanRouteByReply`
 - `internal/daemon/service_test.go::TestPlainReplyToSyntheticPlanPromptUsesTurnSteer`
 - `internal/daemon/service_test.go::TestPlainReplyToSyntheticPlanPromptFallsBackToTurnStart`
@@ -29,6 +31,7 @@ Contract notes:
 - `/plan <text>` uses reply, armed state, or bound thread routing.
 - `/plan <thread> <text>` is explicit only for known or UUID-like thread ids.
 - `/reply --plan <thread> <text>` remains strict.
+- `/default <text>` and `/reply --default <thread> <text>` explicitly start Default Mode through App Server `collaborationMode.mode = default`.
 - Plan choice buttons must stay scoped to the same turn as the `[Plan]` card.
 - Stale pending `user_input` from an older turn must not add `answer_choice` buttons to a newer `[commentary]` panel.
 
@@ -102,6 +105,7 @@ ADR: `docs/adr/ADR-004-final-card-details-ux.md`
 Primary tests:
 
 - `internal/daemon/observer_ui_v2_test.go::TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile`
+- `internal/daemon/observer_ui_v2_test.go::TestFinalCardDetailsShowsToolOnlyTurnWithoutCommentary`
 - `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbacksUsePanelTurnInsteadOfLatestThreadTurn`
 - `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbacksStayBoundToOriginalPanelAfterNewerRunCompletes`
 - `internal/daemon/observer_ui_v2_test.go::TestDetailsCallbackWithoutPanelIDDoesNotFallbackToCurrentPanel`
@@ -113,6 +117,38 @@ Contract notes:
 - `Details`, pagination, `Tool on`, `Tools file`, and `Back` are bound to the completed panel/card that produced the callback.
 - A Details callback without a valid `panel_id`, with a mismatched thread/turn, or from another Telegram message is stale and must not edit/export current run data.
 - Pressing `Back` on an older completed run must restore that older Final Card in the same message, not duplicate or replace it with the latest run.
+- Finalization sends a new Final Card and moves the panel summary message id to it; Details/Back must edit that new card, not the deleted live commentary card.
+- Tool-only turns with no commentary and empty output still expose completed command/status in Details, Tool mode, and Tools file under `Tool activity`.
+
+## Telegram Notification Contract
+
+ADR: `docs/adr/ADR-015-telegram-notification-contract.md`
+
+Primary tests:
+
+- `internal/telegram/api_test.go::TestClientSendMessageSilentSetsDisableNotification`
+- `internal/telegram/api_test.go::TestClientSendDocumentSilentSetsDisableNotification`
+- `internal/telegram/bot_test.go::TestBotDeliverDirectResponseSendsSilentMessage`
+- `internal/config/config_test.go::TestMarshalJSONIncludesNotifyNewRun`
+- `tests/config_env_test.go::TestFromEnvDefaultsLoggingOn`
+- `tests/config_env_test.go::TestFromEnvPrefersGoScopedEnvVars`
+- `internal/daemon/observer_ui_v2_test.go::TestSyncThreadPanelCreatesRouteablePlanPromptAndDedupes`
+- `internal/daemon/observer_ui_v2_test.go::TestRunNoticeNotificationFlagCanSilenceNewRun`
+- `internal/daemon/observer_ui_v2_test.go::TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser`
+- `internal/daemon/observer_ui_v2_test.go::TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile`
+
+Live E2E:
+
+- Run a Telegram-origin command with `CTR_GO_NOTIFY_NEW_RUN=on`; verify `New run`, live silent cards, new `[Final]`, and Details/Back.
+- Repeat with `CTR_GO_NOTIFY_NEW_RUN=off`; verify `New run` remains visible and `[Final]` still arrives.
+- Run a Plan Mode structured-choice prompt and verify `[Plan]` is the only question card with answer buttons.
+
+Contract notes:
+
+- All new bot messages are silent except `New run`, `[Plan]`, and `[Final]`.
+- `New run` notification is configurable and enabled by default.
+- Explicit exports and direct command/menu responses are silent.
+- Old live commentary routes may remain in SQLite after deletion, but active Details routing uses the new Final card message id.
 
 ## Turn Lifecycle And Stale Active Recovery
 
@@ -256,9 +292,12 @@ Primary tests:
 - `internal/appserver/normalize_test.go::TestCompactSnapshotUpdatesToolLastUpdateWhenFingerprintChanges`
 - `internal/appserver/normalize_test.go::TestCompactSnapshotDoesNotPreserveActiveLiveToolWhenThreadReadOmitsTool`
 - `internal/appserver/normalize_test.go::TestCompactSnapshotDoesNotPreserveLiveToolAcrossTurns`
+- `internal/appserver/normalize_test.go::TestSnapshotFromThreadReadKeepsToolOnlyTurnDetailsWithoutCommentary`
 - `internal/daemon/service_test.go::TestLiveToolNotificationStoresRunningCommandWithoutRenderingItAsCurrent`
 - `internal/daemon/service_test.go::TestPollSnapshotWithoutToolDoesNotPreserveSameTurnRunningToolAsCurrent`
+- `internal/daemon/service_test.go::TestPollTrackedDeferredInterruptedDoesNotOverwriteFreshLiveToolSnapshot`
 - `internal/daemon/service_test.go::TestPollSnapshotWithOlderCompletedToolPreservesTelegramOriginLiveCurrentTool`
+- `internal/daemon/service_test.go::TestRefreshThreadForOperationTerminalCompletedToolReplacesLiveCurrent`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelShowsLastCompletedToolInsteadOfRunningTool`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelShowsTelegramOriginCurrentTool`
 - `internal/daemon/observer_ui_v2_test.go::TestRenderToolPanelKeepsForeignRunningToolHidden`
@@ -274,6 +313,7 @@ Contract notes:
 - Long-running active runs render elapsed runtime in `[commentary]`; completed Final Cards render total `Run duration`.
 - `[Tool]` renders the current tool only for eligible Telegram-origin active turns; otherwise it renders the last completed tool, or `No completed tool yet.` when no completed tool is available.
 - While a Telegram-origin live current tool is active, older completed tool evidence from same-turn `thread/read` may update `[Output]`, but must not make `[Tool]` revert from the current command to the older completed command.
+- Empty/interrupted polling snapshots must not overwrite a fresher stored live current tool for the same Telegram-origin turn.
 - `[Output]` renders the last completed tool output when available.
 - Session JSONL is not a live Telegram UI source.
 - Missing App Server tool state renders as neutral absence, not as a guessed command.

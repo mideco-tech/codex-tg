@@ -26,7 +26,7 @@ Optional:
 - `CODEX_TG_E2E_READBACK_LIMIT`
 - `CODEX_TG_E2E_CODEX_CHATS_ROOT`: local Chats root for `newchat_folder`; defaults to `~/Documents/Codex`.
 - `CODEX_TG_E2E_CASES`: comma-separated subset of
-  `sequential_commands,sleep20_timing,multi_tool_current,current_tool_priority,details_binding,complex_math,newchat_folder`.
+  `sequential_commands,sleep20_timing,tool_only_sleep_details,multi_tool_current,current_tool_priority,details_binding,complex_math,newchat_folder,notification_contract`.
 
 The env file and Telethon session files must stay local. `.gitignore` blocks
 `.env*`, `telegram.env`, and `*.session*` as a belt-and-suspenders guard.
@@ -59,6 +59,11 @@ run duration in `[Final]`.
 validates that `[commentary]` keeps showing active run elapsed time while
 Telegram-origin `[Tool]` shows the live `Current tool` before completion.
 
+`tool_only_sleep_details` asks the agent to run exactly one `sleep 10` command
+with no output. It validates live `Current tool` visibility before Final and
+then checks that Details, Tool mode, and `Tools file` expose the completed
+command under `Tool activity`.
+
 `multi_tool_current` asks the agent to run three separate slow shell commands
 and validates that Telegram-origin `[Tool]` moves through live `Current tool`
 states before completed tool/output cards settle.
@@ -86,6 +91,13 @@ COUNT=2034 SUM=115514223
 `/newchat`, verifies a `tool-call...` folder appears under the configured Chats
 root and `/context` is bound to that cwd, then sends `/newthread` and verifies no
 Chat folder is created for the no-Chat-folder escape hatch.
+
+`notification_contract` is opt-in and not part of the default case list. It
+verifies that Final is sent as a new card instead of reusing live
+`[commentary]`, the old commentary card is deleted, Details/Back remain bound
+to the new Final card, and a Plan prompt is routeable. When App Server exposes
+structured Plan options, the case answers through the `[Plan]` buttons; otherwise
+it records a fallback and answers by replying to the Plan card.
 
 All cases fail on visible `Status: interrupted`, literal `"<nil>"`, stale known
 commands from earlier regressions, parallel-turn rejection text, or `[Tool]`

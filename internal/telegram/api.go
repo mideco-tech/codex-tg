@@ -101,13 +101,14 @@ type MessageEntity struct {
 }
 
 type sendMessageRequest struct {
-	ChatID          int64                 `json:"chat_id"`
-	Text            string                `json:"text"`
-	MessageThreadID int64                 `json:"message_thread_id,omitempty"`
-	ReplyMarkup     *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
-	DisablePreview  bool                  `json:"disable_web_page_preview,omitempty"`
-	ParseMode       string                `json:"parse_mode,omitempty"`
-	Entities        []MessageEntity       `json:"entities,omitempty"`
+	ChatID              int64                 `json:"chat_id"`
+	Text                string                `json:"text"`
+	MessageThreadID     int64                 `json:"message_thread_id,omitempty"`
+	ReplyMarkup         *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	DisablePreview      bool                  `json:"disable_web_page_preview,omitempty"`
+	DisableNotification bool                  `json:"disable_notification,omitempty"`
+	ParseMode           string                `json:"parse_mode,omitempty"`
+	Entities            []MessageEntity       `json:"entities,omitempty"`
 }
 
 type editMessageTextRequest struct {
@@ -172,13 +173,14 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutSeconds in
 	return updates, nil
 }
 
-func (c *Client) SendMessage(ctx context.Context, chatID, topicID int64, text string, markup *InlineKeyboardMarkup) (*Message, error) {
+func (c *Client) SendMessage(ctx context.Context, chatID, topicID int64, text string, markup *InlineKeyboardMarkup, options model.SendOptions) (*Message, error) {
 	request := sendMessageRequest{
-		ChatID:          chatID,
-		Text:            text,
-		MessageThreadID: topicID,
-		ReplyMarkup:     markup,
-		DisablePreview:  true,
+		ChatID:              chatID,
+		Text:                text,
+		MessageThreadID:     topicID,
+		ReplyMarkup:         markup,
+		DisablePreview:      true,
+		DisableNotification: options.Silent,
 	}
 	if topicID == 0 {
 		request.MessageThreadID = 0
@@ -191,14 +193,15 @@ func (c *Client) SendMessage(ctx context.Context, chatID, topicID int64, text st
 	return &message, nil
 }
 
-func (c *Client) SendRenderedMessage(ctx context.Context, chatID, topicID int64, rendered model.RenderedMessage, markup *InlineKeyboardMarkup) (*Message, error) {
+func (c *Client) SendRenderedMessage(ctx context.Context, chatID, topicID int64, rendered model.RenderedMessage, markup *InlineKeyboardMarkup, options model.SendOptions) (*Message, error) {
 	request := sendMessageRequest{
-		ChatID:          chatID,
-		Text:            rendered.Text,
-		MessageThreadID: topicID,
-		ReplyMarkup:     markup,
-		DisablePreview:  true,
-		Entities:        toAPIEntities(rendered.Entities),
+		ChatID:              chatID,
+		Text:                rendered.Text,
+		MessageThreadID:     topicID,
+		ReplyMarkup:         markup,
+		DisablePreview:      true,
+		DisableNotification: options.Silent,
+		Entities:            toAPIEntities(rendered.Entities),
 	}
 	if topicID == 0 {
 		request.MessageThreadID = 0
@@ -249,7 +252,7 @@ func (c *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) err
 	}, nil)
 }
 
-func (c *Client) SendDocument(ctx context.Context, chatID, topicID int64, document DocumentFile, caption string, markup *InlineKeyboardMarkup) (*Message, error) {
+func (c *Client) SendDocument(ctx context.Context, chatID, topicID int64, document DocumentFile, caption string, markup *InlineKeyboardMarkup, options model.SendOptions) (*Message, error) {
 	if strings.TrimSpace(document.Name) == "" {
 		document.Name = "document.txt"
 	}
@@ -258,6 +261,9 @@ func (c *Client) SendDocument(ctx context.Context, chatID, topicID int64, docume
 	}
 	if topicID != 0 {
 		fields["message_thread_id"] = strconvFormatInt(topicID)
+	}
+	if options.Silent {
+		fields["disable_notification"] = "true"
 	}
 	if strings.TrimSpace(caption) != "" {
 		fields["caption"] = caption

@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Supersedes: ADR-009
+- Amended by: ADR-015 for notification policy and Final Card delivery mechanics.
 
 ## Context
 
@@ -16,7 +17,7 @@ The Telegram observer is also a security surface: if a local GUI/CLI or another 
 - `New run` is an orientation card with source metadata only. It does not own run status.
 - `[User]` is delivered once as request context. It does not show run status and is not updated for status-only changes.
 - The live `[commentary]` card owns run status while the run is active.
-- At terminal finalization, `New run`, `[Tool]`, and `[Output]` are deleted best-effort. `[User]` remains as historical request context, and `[commentary]` is edited into `[Final]`.
+- At terminal finalization, the bridge sends a new `[Final]` card, then deletes `New run`, `[commentary]`, `[Tool]`, and `[Output]` best-effort. `[User]` remains as historical request context.
 - `[Final]` shows final-answer text and status only; completed commentary/tool/output history is available through Details.
 - DB message routes and callback tokens remain the routing source of truth.
 

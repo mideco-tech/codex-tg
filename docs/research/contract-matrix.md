@@ -15,7 +15,9 @@ This file now serves two purposes:
 - `/projects`
 - `/show <thread>`
 - `/bind <thread>`
-- `/reply [--plan] <thread> <text>`
+- `/reply [--plan|--default] <thread> <text>`
+- `/default <thread> <text>`
+- `/default <text>`
 - `/plan <thread> <text>`
 - `/plan <text>`
 - `/plan_mode <thread> <text>`
@@ -53,9 +55,11 @@ This file now serves two purposes:
 - The summary panel owns `Stop` and `Steer`.
 - Tool/output stream messages do not carry buttons.
 - Final answers are delivered separately and expose `Получить полный лог`.
+- Telegram sends normal notifications only for `New run` (configurable through `CTR_GO_NOTIFY_NEW_RUN`), `[Plan]` prompt-cards, and `[Final]`; other bot messages are silent.
 - Plan Mode / waiting-input states create a separate routeable `[Plan]` prompt-card.
 - `[Plan]` buttons are structured-only: they come from Codex `choices/options/suggestions/responses`, never from bridge heuristics.
 - Telegram-originated Plan Mode starts use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not Plan Mode.
+- Telegram-originated Default Mode starts through `/default` and `/reply --default` use App Server `turn/start` with `collaborationMode.mode = default`, which is the operator escape hatch when a thread remains in Plan Mode.
 - `/model` and `/effort` are button menus backed by SQLite daemon state for Telegram-started collaboration-mode model settings.
 - After a model or reasoning-effort selection, the edited settings message removes inline choice buttons.
 - `/projects` groups cached non-Chat projects by normalized `cwd`, sorts projects by latest cached thread activity, shows latest Codex UI Chat previews, opens full Chats pagination through `Open Chats`, and never accepts arbitrary filesystem paths from Telegram.
@@ -135,6 +139,7 @@ Additional route rules:
 - reply-to `[Plan]` routes before binding and carries `thread_id`, `turn_id`, and `request_id` when available
 - real `request_id` Plan answers use App Server server-request response; synthetic Plan answers use `turn/steer`
 - `/reply --plan`, `/plan`, and `/plan_mode` carry an explicit Plan Mode start intent when they create a new turn
+- `/reply --default` and `/default` carry an explicit Default Mode start intent when they create a new turn
 
 ## Observer targets
 
@@ -163,6 +168,7 @@ Observer/UI v2 presentation contract:
   - appears before `[User]` and summary/tool/output for new runs
   - carries source markers, source mode, and route metadata, but not run status
   - is deleted best-effort after finalization
+  - uses normal Telegram notification only when `CTR_GO_NOTIFY_NEW_RUN` is enabled
 - user notice:
   - appears after `New run` for GUI/CLI runs and before summary/tool/output
   - remains after finalization as the historical request marker
@@ -171,6 +177,7 @@ Observer/UI v2 presentation contract:
   - carries project/thread source markers
   - owns live run status while active
   - carries action buttons such as `Stop` and `Steer`
+  - is sent silently and deleted best-effort after finalization
 - tool/output message:
   - carries source markers
   - carries no buttons
@@ -178,7 +185,10 @@ Observer/UI v2 presentation contract:
 - final-answer message:
   - carries source markers
   - carries on-demand `Получить полный лог`
+  - is sent as a new message with a normal Telegram notification
+  - becomes the panel summary message id for Details/Back callbacks
   - contains final answer/status without replaying completed commentary/tool/output transcript
+  - exposes completed tool-only turns through Details as `Tool activity`
 
 Minimal event payload expected by the Telegram layer:
 

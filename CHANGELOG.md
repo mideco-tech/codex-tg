@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.2.5 - 2026-05-06
+
+- Added the Telegram notification contract: `New run` is configurable, `[Plan]` and `[Final]` notify, while live progress, direct responses, menus, callbacks, exports, and errors are sent silently.
+- Changed Final rendering to send a new `[Final]` message and best-effort delete transient live cards, preserving Details routing on the new Final Card.
+- Fixed tool-only runs so live current tools are not erased by stale polling snapshots and completed tool-only commands remain visible in Details and Tools file.
+- Added explicit Default Mode escape hatches through `/default` and `/reply --default` for threads that remain in App Server Plan Mode.
+- Added ADR-015, contract/regression documentation, release validation notes, Telegram transport tests for `disable_notification`, and live E2E coverage for notification and tool-only Details behavior.
+
 ## v0.2.4 - 2026-05-05
 
 - Changed `/newchat <prompt>` to create a real Codex UI Chat folder under `CTR_GO_CODEX_CHATS_ROOT` before starting the new thread.

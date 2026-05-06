@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mideco-tech/codex-tg/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/daemon"
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
 
@@ -48,7 +50,7 @@ func TestDefaultCommandsExposeNewChatMenuCommand(t *testing.T) {
 		}
 		seen[command.Command] = true
 	}
-	for _, command := range []string{"newchat", "newthread"} {
+	for _, command := range []string{"newchat", "newthread", "default"} {
 		if !seen[command] {
 			t.Fatalf("defaultCommands must expose /%s in the Telegram command menu", command)
 		}
@@ -69,7 +71,7 @@ func TestBotSendMessageChunksAndReturnsLastMessageID(t *testing.T) {
 	client.baseURL = server.URL
 	bot := &Bot{client: client}
 
-	messageID, err := bot.SendMessage(context.Background(), 42, 0, strings.Repeat("line\n", telegramMessageLimit/4), nil)
+	messageID, err := bot.SendMessage(context.Background(), 42, 0, strings.Repeat("line\n", telegramMessageLimit/4), nil, model.SendOptions{})
 	if err != nil {
 		t.Fatalf("SendMessage failed: %v", err)
 	}
@@ -110,7 +112,7 @@ func TestBotSendRenderedMessagesFallsBackToPlainEntities(t *testing.T) {
 	ids, err := bot.SendRenderedMessages(context.Background(), 42, 0, []model.RenderedMessage{{
 		Text:     "formatted",
 		Entities: []model.MessageEntity{{Type: "code", Offset: 0, Length: 9}},
-	}}, nil)
+	}}, nil, model.SendOptions{})
 	if err != nil {
 		t.Fatalf("SendRenderedMessages failed: %v", err)
 	}
@@ -146,11 +148,50 @@ func TestBotSendDocumentReturnsTelegramMessageID(t *testing.T) {
 		t.Fatalf("WriteFile(trace.log) failed: %v", err)
 	}
 
-	messageID, err := bot.SendDocument(context.Background(), 42, 0, "trace.log", path, "trace")
+	messageID, err := bot.SendDocument(context.Background(), 42, 0, "trace.log", path, "trace", model.SendOptions{})
 	if err != nil {
 		t.Fatalf("SendDocument failed: %v", err)
 	}
 	if got, want := messageID, int64(555); got != want {
 		t.Fatalf("messageID = %d, want %d", got, want)
+	}
+}
+
+func TestBotDeliverDirectResponseSendsSilentMessage(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll failed: %v", err)
+		}
+		if err := json.Unmarshal(body, &captured); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":777,"chat":{"id":42,"type":"private"},"text":"menu"}}`))
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	service, err := daemon.New(config.Config{Paths: config.Paths{
+		Home:    root,
+		DataDir: filepath.Join(root, "data"),
+		LogDir:  filepath.Join(root, "logs"),
+		DBPath:  filepath.Join(root, "data", "state.sqlite"),
+	}})
+	if err != nil {
+		t.Fatalf("daemon.New failed: %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	client := NewClient("token")
+	client.baseURL = server.URL
+	bot := &Bot{client: client, service: service}
+	if err := bot.deliverDirectResponse(context.Background(), 42, 0, &daemon.DirectResponse{Text: "menu"}); err != nil {
+		t.Fatalf("deliverDirectResponse failed: %v", err)
+	}
+	if got, ok := captured["disable_notification"].(bool); !ok || !got {
+		t.Fatalf("disable_notification = %#v, want true", captured["disable_notification"])
 	}
 }

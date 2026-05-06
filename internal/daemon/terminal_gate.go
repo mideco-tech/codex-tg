@@ -324,8 +324,12 @@ func (s *Service) applyTelegramOriginTerminalGate(ctx context.Context, operation
 	}
 	switch decision.Action {
 	case terminalGateDefer:
-		if previous != nil {
-			next := *previous
+		latest := previous
+		if stored, err := s.store.GetSnapshot(ctx, decision.ThreadID); err == nil && stored != nil {
+			latest = stored
+		}
+		if latest != nil {
+			next := *latest
 			applyTerminalGateHotPolling(&next, decision)
 			_ = s.store.UpsertSnapshot(ctx, decision.ThreadID, next)
 		}

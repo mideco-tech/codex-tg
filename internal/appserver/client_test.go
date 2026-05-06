@@ -124,6 +124,23 @@ func TestTurnStartParamsIncludesCollaborationMode(t *testing.T) {
 	}
 }
 
+func TestTurnStartParamsIncludesDefaultCollaborationMode(t *testing.T) {
+	params, err := turnStartParams("thread-1", "Run it", "/tmp/project", TurnStartOptions{
+		CollaborationMode: "default",
+		Model:             "gpt-test",
+	})
+	if err != nil {
+		t.Fatalf("turnStartParams failed: %v", err)
+	}
+	collaborationMode, ok := params["collaborationMode"].(map[string]any)
+	if !ok {
+		t.Fatalf("collaborationMode = %#v, want object", params["collaborationMode"])
+	}
+	if got, want := collaborationMode["mode"], "default"; got != want {
+		t.Fatalf("mode = %v, want %q", got, want)
+	}
+}
+
 func TestTurnStartParamsRejectsModeWithoutModel(t *testing.T) {
 	_, err := turnStartParams("thread-1", "Draft a plan", "", TurnStartOptions{CollaborationMode: "plan"})
 	if err == nil {

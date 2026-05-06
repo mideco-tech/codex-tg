@@ -38,12 +38,13 @@ EXPECTED_COMPLEX_SUM = "115514223"
 DEFAULT_CASES = (
     "sequential_commands",
     "sleep20_timing",
+    "tool_only_sleep_details",
     "multi_tool_current",
     "current_tool_priority",
     "details_binding",
     "complex_math",
 )
-AVAILABLE_CASES = DEFAULT_CASES + ("newchat_folder",)
+AVAILABLE_CASES = DEFAULT_CASES + ("newchat_folder", "notification_contract")
 
 
 def load_env_file(path: str) -> None:
@@ -280,6 +281,19 @@ async def wait_bot_text_after(client, bot, after_id: int, context: str, predicat
     raise SystemExit(f"BOT_TEXT_TIMEOUT case={context}")
 
 
+async def wait_message_deleted(client, bot, message_id: int, context: str, timeout: int = 40) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        await asyncio.sleep(1)
+        message = await client.get_messages(bot, ids=message_id)
+        if not message:
+            print(f"DELETED case={context} message_id={message_id}", flush=True)
+            return
+    message = await client.get_messages(bot, ids=message_id)
+    text = (message.raw_text or "").strip() if message else ""
+    raise SystemExit(f"DELETE_TIMEOUT case={context} message_id={message_id} preview={preview(text)}")
+
+
 def live_codex_chats_root() -> Path:
     raw = os.environ.get("CODEX_TG_E2E_CODEX_CHATS_ROOT", "").strip()
     if raw:
@@ -465,6 +479,78 @@ async def sleep20_timing_case(client, bot, thread_id: str, stamp: str) -> None:
     if tool_first_at is not None and final_at is not None:
         visible_for = final_at - tool_first_at
     print(f"RESULT case=sleep20_timing ok visible_for={visible_for:.1f}", flush=True)
+
+
+async def tool_only_sleep_details_case(client, bot, thread_id: str, stamp: str) -> None:
+    marker = f"OK_TOOL_ONLY_SLEEP_DETAILS_{stamp}"
+    prompt = (
+        "Run exactly one shell command tool call: sleep 10. "
+        "Do not use any other shell command. Do not answer before that command finishes. "
+        f"Final answer exactly: {marker}"
+    )
+    since = utc_now()
+    sent = await client.send_message(bot, f"/reply {thread_id} {prompt}")
+    print(f"SENT case=tool_only_sleep_details message_id={sent.id} marker={marker}", flush=True)
+    deadline = time.time() + 180
+    seen = set()
+    current_seen = False
+    final = None
+    while time.time() < deadline:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, sent.id):
+            text = (message.raw_text or "").strip()
+            key = (message.id, text)
+            if key not in seen:
+                seen.add(key)
+                print(f"BOT case=tool_only_sleep_details message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, "tool_only_sleep_details")
+            if "[Tool]" in text and "Current tool:" in text and "sleep 10" in text:
+                current_seen = True
+            if is_final_with_marker(text, marker) and has_button(message, "Details"):
+                final = message
+        if final is not None and current_seen:
+            break
+    if not current_seen:
+        raise SystemExit("TOOL_ONLY_SLEEP_CURRENT_TOOL_NOT_SEEN")
+    if final is None:
+        raise SystemExit(f"FINAL_TIMEOUT case=tool_only_sleep_details marker={marker}")
+
+    final = await client.get_messages(bot, ids=final.id)
+    await final.click(text="Details")
+    details = await wait_message_by_id(
+        client,
+        bot,
+        final.id,
+        "tool_only_sleep_details",
+        lambda message, text: (
+            "[Details]" in text
+            and "Tool activity" in text
+            and "sleep 10" in text
+            and "Status: completed" in text
+            and has_button(message, "Tool on")
+        ),
+    )
+    await details.click(text="Tool on")
+    tool_mode = await wait_message_by_id(
+        client,
+        bot,
+        final.id,
+        "tool_only_sleep_details",
+        lambda message, text: (
+            "[Details]" in text
+            and "Tool activity" in text
+            and "[Tool]" in text
+            and "sleep 10" in text
+            and has_button(message, "Tools file")
+        ),
+    )
+    await tool_mode.click(text="Tools file")
+    document_body = await wait_details_document_after(client, bot, final.id, "tool_only_sleep_details")
+    if "Tool activity" not in document_body or "sleep 10" not in document_body or "Status: completed" not in document_body:
+        raise SystemExit("TOOL_ONLY_SLEEP_DETAILS_DOCUMENT_MISSING_TOOL")
+
+    fail_if_bad_logs(since, thread_id, "tool_only_sleep_details")
+    print("RESULT case=tool_only_sleep_details ok", flush=True)
 
 
 async def multi_tool_current_case(client, bot, thread_id: str, stamp: str) -> None:
@@ -848,6 +934,100 @@ async def newchat_folder_case(client, bot, thread_id: str, stamp: str) -> None:
     print(f"RESULT case=newchat_folder ok chat_dir={chat_dir}", flush=True)
 
 
+async def notification_contract_case(client, bot, thread_id: str, stamp: str) -> None:
+    final_marker = f"NOTIFICATION_FINAL_{stamp}"
+    since = utc_now()
+    prompt = (
+        "This is a notification contract smoke test. "
+        "Do not use tools and do not write a plan. "
+        f"Final answer exactly: {final_marker}"
+    )
+    sent = await client.send_message(bot, f"/reply {thread_id} {prompt}")
+    print(f"SENT case=notification_contract phase=run message_id={sent.id}", flush=True)
+
+    deadline = time.time() + 180
+    seen = set()
+    new_run_id = None
+    commentary_id = None
+    final = None
+    while time.time() < deadline and final is None:
+        await asyncio.sleep(poll_seconds())
+        async for message in bot_messages_after(client, bot, sent.id):
+            text = (message.raw_text or "").strip()
+            key = (message.id, text)
+            if key not in seen:
+                seen.add(key)
+                print(f"BOT case=notification_contract phase=run message_id={message.id} preview={preview(text)}", flush=True)
+            fail_if_bad_text(text, "notification_contract")
+            if "New run:" in text:
+                new_run_id = message.id
+            if "[commentary]" in text:
+                commentary_id = message.id
+            if is_final_with_marker(text, final_marker) and has_button(message, "Details"):
+                final = message
+                break
+    if final is None:
+        raise SystemExit(f"FINAL_TIMEOUT case=notification_contract marker={final_marker}")
+    if new_run_id is None:
+        raise SystemExit("NOTIFICATION_CONTRACT_NEW_RUN_MISSING")
+    if commentary_id is None:
+        raise SystemExit("NOTIFICATION_CONTRACT_COMMENTARY_MISSING")
+    if final.id == commentary_id:
+        raise SystemExit("NOTIFICATION_CONTRACT_FINAL_REUSED_COMMENTARY_MESSAGE")
+    await wait_message_deleted(client, bot, commentary_id, "notification_contract")
+
+    final = await client.get_messages(bot, ids=final.id)
+    await final.click(text="Details")
+    details = await wait_message_by_id(
+        client,
+        bot,
+        final.id,
+        "notification_contract",
+        lambda message, text: "[Details]" in text and has_button(message, "Back"),
+    )
+    await details.click(text="Back")
+    await wait_message_by_id(
+        client,
+        bot,
+        final.id,
+        "notification_contract",
+        lambda message, text: "[Final]" in text and final_marker in text and has_button(message, "Details"),
+    )
+    fail_if_bad_logs(since, thread_id, "notification_contract")
+
+    plan_marker = f"NOTIFICATION_PLAN_FINAL_{stamp}"
+    plan_prompt = (
+        "/plan "
+        f"{thread_id} "
+        "Immediately ask me one structured multiple-choice question using the available user-input tool. "
+        "Use question text exactly: Pick one notification branch. "
+        "Use exactly two options labeled Alpha and Beta. "
+        "Do not put those choice buttons under commentary. "
+        f"After I pick Alpha, final answer exactly: {plan_marker}"
+    )
+    sent_plan = await client.send_message(bot, plan_prompt)
+    print(f"SENT case=notification_contract phase=plan message_id={sent_plan.id}", flush=True)
+    plan_card = await wait_bot_text_after(
+        client,
+        bot,
+        sent_plan.id,
+        "notification_contract",
+        lambda text: "[Plan]" in text.split("\n", 1)[0],
+        timeout=160,
+    )
+    if has_button(plan_card, "Alpha") and has_button(plan_card, "Beta"):
+        await plan_card.click(text="Alpha")
+        await wait_final_message(client, bot, sent_plan.id, plan_marker, "notification_contract", timeout=180)
+        fail_if_bad_logs(since, thread_id, "notification_contract")
+    else:
+        print(
+            "PLAN_FALLBACK case=notification_contract reason=no_structured_buttons",
+            flush=True,
+        )
+        await client.send_message(bot, f"/stop {thread_id}")
+    print("RESULT case=notification_contract ok", flush=True)
+
+
 async def main() -> None:
     require_env()
     thread_id = os.environ["CODEX_TG_E2E_THREAD_ID"].strip()
@@ -871,6 +1051,8 @@ async def main() -> None:
                 await sequential_commands_case(client, bot, thread_id, stamp)
             elif case == "sleep20_timing":
                 await sleep20_timing_case(client, bot, thread_id, stamp)
+            elif case == "tool_only_sleep_details":
+                await tool_only_sleep_details_case(client, bot, thread_id, stamp)
             elif case == "multi_tool_current":
                 await multi_tool_current_case(client, bot, thread_id, stamp)
             elif case == "current_tool_priority":
@@ -881,6 +1063,8 @@ async def main() -> None:
                 await complex_math_case(client, bot, thread_id, stamp)
             elif case == "newchat_folder":
                 await newchat_folder_case(client, bot, thread_id, stamp)
+            elif case == "notification_contract":
+                await notification_contract_case(client, bot, thread_id, stamp)
         print("ALL_OK", flush=True)
     finally:
         await client.disconnect()

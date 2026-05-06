@@ -13,17 +13,23 @@ New run
 [Final]
 ```
 
-`New run`, `[Tool]`, and `[Output]` are deleted best-effort when the final card is rendered. `[User]` remains as a historical marker.
+`New run`, `[commentary]`, `[Tool]`, and `[Output]` are deleted best-effort when the final card is rendered. `[User]` remains as a historical marker.
 
 `New run` identifies the source of the run. `[User]` carries the request text. Neither card shows run status.
 
 ## Final Card
 
-The active commentary card owns run status and becomes `[Final]` when the final answer is available. `[Final]` shows final-answer text/status only; completed commentary and tool/output history stay in Details. Details pagination edits the same message instead of sending more messages, and Details/Back buttons stay bound to the completed run card that created them.
+The active commentary card owns run status while the run is active. When the final answer is available, the bridge sends a new `[Final]` card and moves the panel route to that message. `[Final]` shows final-answer text/status only; completed commentary and tool/output history stay in Details. Tool-only turns with no commentary appear in Details as `Tool activity`. Details pagination edits the Final card instead of sending more messages, and Details/Back buttons stay bound to the completed run card that created them.
+
+## Notifications
+
+Most bot messages are sent silently to avoid notification spam. Normal Telegram notifications are reserved for `New run`, `[Plan]`, and `[Final]`. `New run` notifications are enabled by default and can be disabled with `CTR_GO_NOTIFY_NEW_RUN=off`; the card remains visible either way. `[Plan]` question cards and `[Final]` cards always use normal notifications.
 
 ## Plan Mode
 
 Telegram can start a Codex Plan Mode turn with `/plan <thread> <text>`, `/plan_mode <thread> <text>`, or `/reply --plan <thread> <text>`. These commands use App Server `turn/start` with `collaborationMode.mode = plan`; prompt wording alone is not treated as Plan Mode.
+
+If a thread remains in Plan Mode, `/default <thread> <text>`, `/default <text>` through the current route, or `/reply --default <thread> <text>` starts the next turn with `collaborationMode.mode = default`.
 
 When Codex asks for input, the bridge renders a separate routeable `[Plan]` prompt-card. Replying to that card answers the same run. Structured buttons appear only when Codex provides choices.
 

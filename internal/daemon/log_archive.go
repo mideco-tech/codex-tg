@@ -70,7 +70,7 @@ func (s *Service) sendFullLogArchive(ctx context.Context, chatID, topicID int64,
 		return &DirectResponse{Text: fmt.Sprintf("Could not build full log: %v", err)}, nil
 	}
 	caption := s.visualHeader(ctx, "Full log", *thread, "")
-	if _, err := sender.SendDocumentData(ctx, chatID, topicID, archive.FileName, archive.Data, caption); err != nil {
+	if _, err := sender.SendDocumentData(ctx, chatID, topicID, archive.FileName, archive.Data, caption, silentSendOptions()); err != nil {
 		return &DirectResponse{Text: fmt.Sprintf("Could not send full log: %v", err)}, nil
 	}
 	return &DirectResponse{CallbackText: "Полный лог отправлен."}, nil

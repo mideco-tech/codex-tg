@@ -20,6 +20,7 @@ type recordedMessage struct {
 	text      string
 	entities  []model.MessageEntity
 	buttons   [][]model.ButtonSpec
+	options   model.SendOptions
 }
 
 type recordedDocument struct {
@@ -29,6 +30,7 @@ type recordedDocument struct {
 	filePath string
 	data     []byte
 	caption  string
+	options  model.SendOptions
 }
 
 type recordingSender struct {
@@ -39,17 +41,17 @@ type recordingSender struct {
 	editErr   error
 }
 
-func (s *recordingSender) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec) (int64, error) {
+func (s *recordingSender) SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec, options model.SendOptions) (int64, error) {
 	messageID := int64(len(s.messages) + 1)
-	s.messages = append(s.messages, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: text, buttons: buttons})
+	s.messages = append(s.messages, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: text, buttons: buttons, options: options})
 	return messageID, nil
 }
 
-func (s *recordingSender) SendRenderedMessages(ctx context.Context, chatID, topicID int64, messages []model.RenderedMessage, buttons [][]model.ButtonSpec) ([]int64, error) {
+func (s *recordingSender) SendRenderedMessages(ctx context.Context, chatID, topicID int64, messages []model.RenderedMessage, buttons [][]model.ButtonSpec, options model.SendOptions) ([]int64, error) {
 	ids := make([]int64, 0, len(messages))
 	for _, message := range messages {
 		messageID := int64(len(s.messages) + 1)
-		s.messages = append(s.messages, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: message.Text, entities: message.Entities, buttons: buttons})
+		s.messages = append(s.messages, recordedMessage{chatID: chatID, topicID: topicID, messageID: messageID, text: message.Text, entities: message.Entities, buttons: buttons, options: options})
 		ids = append(ids, messageID)
 	}
 	return ids, nil
@@ -76,13 +78,14 @@ func (s *recordingSender) DeleteMessage(ctx context.Context, chatID, topicID, me
 	return nil
 }
 
-func (s *recordingSender) SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string) (int64, error) {
+func (s *recordingSender) SendDocumentData(ctx context.Context, chatID, topicID int64, fileName string, data []byte, caption string, options model.SendOptions) (int64, error) {
 	s.documents = append(s.documents, recordedDocument{
 		chatID:   chatID,
 		topicID:  topicID,
 		fileName: fileName,
 		data:     append([]byte(nil), data...),
 		caption:  caption,
+		options:  options,
 	})
 	return int64(len(s.documents)), nil
 }
@@ -102,6 +105,25 @@ func hasRecordedEntity(entities []model.MessageEntity, entityType, language stri
 func hasHeaderKind(text, kind string) bool {
 	firstLine := strings.SplitN(text, "\n", 2)[0]
 	return strings.Contains(firstLine, "["+kind+"]")
+}
+
+func finalMessages(messages []recordedMessage) []recordedMessage {
+	out := make([]recordedMessage, 0, len(messages))
+	for _, message := range messages {
+		if hasHeaderKind(message.text, "Final") {
+			out = append(out, message)
+		}
+	}
+	return out
+}
+
+func lastFinalMessage(t *testing.T, messages []recordedMessage) recordedMessage {
+	t.Helper()
+	finals := finalMessages(messages)
+	if len(finals) == 0 {
+		t.Fatalf("final message not found in %#v", messages)
+	}
+	return finals[len(finals)-1]
 }
 
 func hasThreadChip(text, threadID string) bool {
@@ -142,23 +164,18 @@ func TestSyncThreadPanelDoesNotDuplicateFinalAnswerOnRepeatedSync(t *testing.T) 
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "stable")
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "stable")
 
-	finalCount := 0
-	for _, message := range sender.edits {
-		if hasHeaderKind(message.text, "Final") {
-			finalCount++
-		}
-	}
+	finalCount := len(finalMessages(sender.messages))
 	if finalCount != 1 {
-		t.Fatalf("final edit count = %d, want 1; edits=%#v", finalCount, sender.edits)
+		t.Fatalf("final message count = %d, want 1; messages=%#v", finalCount, sender.messages)
 	}
-	if len(sender.messages) != 3 {
-		t.Fatalf("message count = %d, want 3 live trio messages on first sync only; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 4 {
+		t.Fatalf("message count = %d, want 3 live trio messages plus Final on first sync only; messages=%#v", len(sender.messages), sender.messages)
 	}
 	if len(sender.documents) != 0 {
 		t.Fatalf("documents = %#v, want no tool documents for a completed turn without tool output", sender.documents)
 	}
-	if len(sender.deletes) != 2 {
-		t.Fatalf("deletes = %#v, want best-effort delete for tool/output messages", sender.deletes)
+	if len(sender.deletes) != 3 {
+		t.Fatalf("deletes = %#v, want best-effort delete for commentary/tool/output messages", sender.deletes)
 	}
 
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
@@ -209,16 +226,7 @@ func TestSyncThreadPanelFormatsFinalAnswerMarkdownWithEntities(t *testing.T) {
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "explicit")
 
-	final := recordedMessage{}
-	for _, message := range sender.edits {
-		if hasHeaderKind(message.text, "Final") {
-			final = message
-			break
-		}
-	}
-	if final.text == "" {
-		t.Fatalf("final message not found in %#v", sender.messages)
-	}
+	final := lastFinalMessage(t, sender.messages)
 	if strings.Contains(final.text, "```") {
 		t.Fatalf("final message still contains raw markdown fence: %q", final.text)
 	}
@@ -276,6 +284,7 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 	}
 	runNoticeID := sender.messages[0].messageID
 	userID := sender.messages[1].messageID
+	summaryID := sender.messages[2].messageID
 	toolID := sender.messages[3].messageID
 	outputID := sender.messages[4].messageID
 
@@ -300,10 +309,10 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.deletes) != 3 {
-		t.Fatalf("deletes = %#v, want New run + tool + output deletes", sender.deletes)
+	if len(sender.deletes) != 4 {
+		t.Fatalf("deletes = %#v, want commentary + New run + tool + output deletes", sender.deletes)
 	}
-	wantDeletes := []int64{runNoticeID, toolID, outputID}
+	wantDeletes := []int64{summaryID, runNoticeID, toolID, outputID}
 	for index, want := range wantDeletes {
 		if sender.deletes[index].messageID != want {
 			t.Fatalf("delete[%d] = %d, want %d; deletes=%#v", index, sender.deletes[index].messageID, want, sender.deletes)
@@ -314,12 +323,27 @@ func TestFinalTransitionDeletesRunNoticeToolAndOutputButKeepsUser(t *testing.T) 
 			t.Fatalf("[User] message %d was deleted unexpectedly: %#v", userID, sender.deletes)
 		}
 	}
-	if len(sender.edits) == 0 || !hasHeaderKind(sender.edits[len(sender.edits)-1].text, "Final") {
-		t.Fatalf("edits = %#v, want summary edited into Final", sender.edits)
+	final := lastFinalMessage(t, sender.messages)
+	if !hasHeaderKind(final.text, "Final") || final.options.Silent {
+		t.Fatalf("final = %#v, want audible Final message", final)
 	}
-	finalText := sender.edits[len(sender.edits)-1].text
+	finalText := final.text
 	if strings.Contains(finalText, "[commentary]") || strings.Contains(finalText, "This completed commentary belongs in Details only.") {
 		t.Fatalf("final text = %q, want final answer without commentary transcript", finalText)
+	}
+	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
+	if err != nil {
+		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
+	}
+	if panel == nil || panel.SummaryMessageID != final.messageID || panel.LastFinalNoticeFP != "final-cleanup-fp" {
+		t.Fatalf("panel = %#v, want SummaryMessageID moved to final message %d with final fp", panel, final.messageID)
+	}
+	route, err := service.store.ResolveMessageRoute(ctx, target.ChatID, target.TopicID, final.messageID)
+	if err != nil {
+		t.Fatalf("ResolveMessageRoute(final) failed: %v", err)
+	}
+	if route == nil || route.ThreadID != thread.ID || route.TurnID != "turn-final-cleanup" || route.EventID != "final-cleanup-fp" {
+		t.Fatalf("final route = %#v, want thread/turn/final route", route)
 	}
 }
 
@@ -990,21 +1014,22 @@ func TestTelegramInputSyncAdoptsObserverPanelForSameTurn(t *testing.T) {
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, true, model.PanelSourceTelegramInput)
 
-	if len(sender.messages) != 0 {
-		t.Fatalf("messages = %#v, want no replacement trio/final messages", sender.messages)
+	if len(finalMessages(sender.messages)) != 1 {
+		t.Fatalf("messages = %#v, want one new Final message without replacement trio", sender.messages)
 	}
-	if len(sender.edits) == 0 || !hasHeaderKind(sender.edits[len(sender.edits)-1].text, "Final") {
-		t.Fatalf("edits = %#v, want existing summary edited into Final Card", sender.edits)
+	final := lastFinalMessage(t, sender.messages)
+	if final.options.Silent {
+		t.Fatalf("final = %#v, want audible Final message", final)
 	}
-	if len(sender.deletes) != 2 || sender.deletes[0].messageID != 102 || sender.deletes[1].messageID != 103 {
-		t.Fatalf("deletes = %#v, want old tool/output messages deleted", sender.deletes)
+	if len(sender.deletes) != 3 || sender.deletes[0].messageID != 101 || sender.deletes[1].messageID != 102 || sender.deletes[2].messageID != 103 {
+		t.Fatalf("deletes = %#v, want old commentary/tool/output messages deleted", sender.deletes)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
 		t.Fatalf("GetCurrentThreadPanel failed: %v", err)
 	}
-	if panel == nil || panel.SummaryMessageID != 101 || panel.SourceMode != model.PanelSourceTelegramInput || panel.LastFinalNoticeFP != "final-telegram-race-fp" {
-		t.Fatalf("panel = %#v, want adopted original panel with final fp", panel)
+	if panel == nil || panel.SummaryMessageID != final.messageID || panel.SourceMode != model.PanelSourceTelegramInput || panel.LastFinalNoticeFP != "final-telegram-race-fp" {
+		t.Fatalf("panel = %#v, want adopted panel routed to new final id %d with final fp", panel, final.messageID)
 	}
 }
 
@@ -1150,14 +1175,15 @@ func TestSyncThreadPanelToTargetCreatesPanelForRecentTerminalGlobalObserverChang
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "global_observer")
 
-	if len(sender.messages) != 3 {
-		t.Fatalf("message count = %d, want 3 live trio messages for recent terminal observer change; messages=%#v", len(sender.messages), sender.messages)
+	if len(sender.messages) != 4 {
+		t.Fatalf("message count = %d, want 3 live trio messages plus Final for recent terminal observer change; messages=%#v", len(sender.messages), sender.messages)
 	}
-	if len(sender.edits) != 1 || !hasHeaderKind(sender.edits[0].text, "Final") {
-		t.Fatalf("edits = %#v, want one final-card edit", sender.edits)
+	final := lastFinalMessage(t, sender.messages)
+	if final.options.Silent {
+		t.Fatalf("final = %#v, want audible Final message", final)
 	}
-	if len(sender.deletes) != 2 {
-		t.Fatalf("deletes = %#v, want tool/output delete after final", sender.deletes)
+	if len(sender.deletes) != 3 {
+		t.Fatalf("deletes = %#v, want commentary/tool/output delete after final", sender.deletes)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
@@ -1209,6 +1235,7 @@ func TestTerminalObserverPanelWithRunNoticeCollapsesWhenFinalAppears(t *testing.
 		t.Fatalf("initial messages = %#v, want New run + [User] + trio", sender.messages)
 	}
 	runNoticeID := sender.messages[0].messageID
+	summaryID := sender.messages[2].messageID
 	toolID := sender.messages[3].messageID
 	outputID := sender.messages[4].messageID
 
@@ -1233,21 +1260,18 @@ func TestTerminalObserverPanelWithRunNoticeCollapsesWhenFinalAppears(t *testing.
 	}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
 
-	if len(sender.deletes) != 3 {
-		t.Fatalf("deletes = %#v, want New run + tool + output", sender.deletes)
+	if len(sender.deletes) != 4 {
+		t.Fatalf("deletes = %#v, want commentary + New run + tool + output", sender.deletes)
 	}
-	wantDeletes := []int64{runNoticeID, toolID, outputID}
+	wantDeletes := []int64{summaryID, runNoticeID, toolID, outputID}
 	for index, want := range wantDeletes {
 		if sender.deletes[index].messageID != want {
 			t.Fatalf("delete[%d] = %d, want %d; deletes=%#v", index, sender.deletes[index].messageID, want, sender.deletes)
 		}
 	}
-	if len(sender.edits) == 0 {
-		t.Fatalf("edits = %#v, want final edit", sender.edits)
-	}
-	finalEdit := sender.edits[len(sender.edits)-1]
-	if !hasHeaderKind(finalEdit.text, "Final") {
-		t.Fatalf("last edit = %q, want Final", finalEdit.text)
+	finalEdit := lastFinalMessage(t, sender.messages)
+	if finalEdit.options.Silent {
+		t.Fatalf("final message = %#v, want audible Final", finalEdit)
 	}
 	if strings.Contains(finalEdit.text, "[commentary]") || strings.Contains(finalEdit.text, "Completed commentary should stay in Details.") {
 		t.Fatalf("final edit = %q, want final answer only", finalEdit.text)
@@ -1733,14 +1757,9 @@ func TestNewTerminalTurnAfterExistingPanelStillSendsFinal(t *testing.T) {
 
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "global_observer")
 
-	finalCount := 0
-	for _, message := range sender.edits {
-		if hasHeaderKind(message.text, "Final") {
-			finalCount++
-		}
-	}
+	finalCount := len(finalMessages(sender.messages))
 	if finalCount != 1 {
-		t.Fatalf("final edit count = %d, want 1; edits=%#v", finalCount, sender.edits)
+		t.Fatalf("final message count = %d, want 1; messages=%#v", finalCount, sender.messages)
 	}
 }
 
@@ -1785,19 +1804,20 @@ func TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile(t *testing.T
 
 	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "explicit")
-	if len(sender.edits) != 1 || !hasHeaderKind(sender.edits[0].text, "Final") {
-		t.Fatalf("initial edits = %#v, want one final card edit", sender.edits)
+	finalCard := lastFinalMessage(t, sender.messages)
+	if finalCard.options.Silent {
+		t.Fatalf("final card = %#v, want audible Final", finalCard)
 	}
-	cardMessageID := sender.edits[0].messageID
-	detailsToken := buttonToken(sender.edits[0].buttons, "Details")
+	cardMessageID := finalCard.messageID
+	detailsToken := buttonToken(finalCard.buttons, "Details")
 	if detailsToken == "" {
-		t.Fatalf("final card buttons = %#v, want Details", sender.edits[0].buttons)
+		t.Fatalf("final card buttons = %#v, want Details", finalCard.buttons)
 	}
 
 	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, detailsToken); err != nil {
 		t.Fatalf("HandleCallback(details) failed: %v", err)
 	}
-	if len(sender.edits) < 2 {
+	if len(sender.edits) < 1 {
 		t.Fatalf("edits = %#v, want details edit", sender.edits)
 	}
 	details := sender.edits[len(sender.edits)-1]
@@ -1842,6 +1862,9 @@ func TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile(t *testing.T
 	if len(sender.documents) != 1 {
 		t.Fatalf("documents = %#v, want one tools file", sender.documents)
 	}
+	if !sender.documents[0].options.Silent {
+		t.Fatalf("document options = %#v, want silent explicit export", sender.documents[0].options)
+	}
 	if sender.documents[0].filePath != "" {
 		t.Fatalf("tools file used path %q, want in-memory document data", sender.documents[0].filePath)
 	}
@@ -1856,6 +1879,89 @@ func TestFinalCardDetailsCallbacksEditSameMessageAndExportToolsFile(t *testing.T
 	back := sender.edits[len(sender.edits)-1]
 	if !hasHeaderKind(back.text, "Final") {
 		t.Fatalf("back text = %q, want final card", back.text)
+	}
+}
+
+func TestFinalCardDetailsShowsToolOnlyTurnWithoutCommentary(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	thread := model.Thread{
+		ID:          "thread-tool-only-details",
+		Title:       "Tool only details",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		UpdatedAt:   time.Now().UTC().Unix(),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:             thread,
+		LatestTurnID:       "turn-tool-only-details",
+		LatestTurnStatus:   "completed",
+		LatestFinalFP:      "final-tool-only",
+		LatestFinalText:    "Done.",
+		LatestToolID:       "cmd-sleep",
+		LatestToolKind:     "commandExecution",
+		LatestToolLabel:    "sleep 10",
+		LatestToolStatus:   "completed",
+		LatestToolFP:       "tool-sleep-completed",
+		LatestProgressText: "completed: sleep 10",
+		LatestProgressFP:   "progress-sleep-completed",
+		DetailItems: []model.DetailItem{
+			{ID: "user-1", Kind: model.DetailItemUser, Text: "Run sleep 10."},
+			{ID: "cmd-sleep", Kind: model.DetailItemTool, Label: "sleep 10", Status: "completed", CommentaryIndex: 0, FP: "tool-sleep-completed"},
+			{ID: "final-1", Kind: model.DetailItemFinal, Text: "Done.", CommentaryIndex: 0, FP: "final-tool-only"},
+		},
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "explicit")
+	finalCard := lastFinalMessage(t, sender.messages)
+	cardMessageID := finalCard.messageID
+	detailsToken := buttonToken(finalCard.buttons, "Details")
+	if detailsToken == "" {
+		t.Fatalf("final card buttons = %#v, want Details", finalCard.buttons)
+	}
+
+	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, detailsToken); err != nil {
+		t.Fatalf("HandleCallback(details) failed: %v", err)
+	}
+	details := sender.edits[len(sender.edits)-1]
+	if !strings.Contains(details.text, "Tool activity") || !strings.Contains(details.text, "sleep 10") || !strings.Contains(details.text, "Status: completed") {
+		t.Fatalf("details text = %q, want tool-only command in default Details", details.text)
+	}
+	if strings.Contains(details.text, "No commentary entries") {
+		t.Fatalf("details text = %q, want tool-only section instead of no commentary", details.text)
+	}
+
+	toolOnToken := buttonToken(details.buttons, "Tool on")
+	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, toolOnToken); err != nil {
+		t.Fatalf("HandleCallback(tool on) failed: %v", err)
+	}
+	toolMode := sender.edits[len(sender.edits)-1]
+	if !strings.Contains(toolMode.text, "Tool activity") || !strings.Contains(toolMode.text, "[Tool]") || !strings.Contains(toolMode.text, "sleep 10") {
+		t.Fatalf("tool mode text = %q, want orphan tool in tool mode", toolMode.text)
+	}
+
+	fileToken := buttonToken(toolMode.buttons, "Tools file")
+	if _, err := service.HandleCallback(ctx, target.ChatID, target.TopicID, cardMessageID, 123456789, fileToken); err != nil {
+		t.Fatalf("HandleCallback(tools file) failed: %v", err)
+	}
+	if len(sender.documents) != 1 {
+		t.Fatalf("documents = %#v, want one tools file", sender.documents)
+	}
+	body := string(sender.documents[0].data)
+	if !strings.Contains(body, "Tool activity") || !strings.Contains(body, "[Tool]") || !strings.Contains(body, "sleep 10") || !strings.Contains(body, "Status: completed") {
+		t.Fatalf("tools file body = %q, want tool-only command", body)
 	}
 }
 
@@ -2194,14 +2300,15 @@ func TestTerminalSyncAdoptsActivePanelWithoutTurnID(t *testing.T) {
 
 	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, "global_observer")
 
-	if len(sender.messages) != 0 {
-		t.Fatalf("messages = %#v, want no new trio when active panel adopts turn", sender.messages)
+	if len(finalMessages(sender.messages)) != 1 {
+		t.Fatalf("messages = %#v, want one new Final message without new trio when active panel adopts turn", sender.messages)
 	}
-	if len(sender.edits) == 0 || sender.edits[len(sender.edits)-1].messageID != 101 || !hasHeaderKind(sender.edits[len(sender.edits)-1].text, "Final") {
-		t.Fatalf("edits = %#v, want final edit on existing summary message 101", sender.edits)
+	final := lastFinalMessage(t, sender.messages)
+	if final.options.Silent {
+		t.Fatalf("final = %#v, want audible Final message", final)
 	}
-	if len(sender.deletes) != 2 || sender.deletes[0].messageID != 102 || sender.deletes[1].messageID != 103 {
-		t.Fatalf("deletes = %#v, want existing tool/output delete", sender.deletes)
+	if len(sender.deletes) != 3 || sender.deletes[0].messageID != 101 || sender.deletes[1].messageID != 102 || sender.deletes[2].messageID != 103 {
+		t.Fatalf("deletes = %#v, want existing commentary/tool/output delete", sender.deletes)
 	}
 }
 
@@ -2209,6 +2316,7 @@ func TestSyncThreadPanelCreatesRouteablePlanPromptAndDedupes(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
+	service.cfg.NotifyNewRun = true
 	sender := &recordingSender{}
 	service.SetSender(sender)
 	ctx := context.Background()
@@ -2268,6 +2376,12 @@ func TestSyncThreadPanelCreatesRouteablePlanPromptAndDedupes(t *testing.T) {
 	}
 	if got := buttonToken(sender.messages[2].buttons, "Continue"); got == "" {
 		t.Fatalf("plan prompt buttons = %#v, want structured Continue button", sender.messages[2].buttons)
+	}
+	if sender.messages[0].options.Silent {
+		t.Fatalf("New run options = %#v, want audible when notify_new_run is enabled", sender.messages[0].options)
+	}
+	if !sender.messages[1].options.Silent || sender.messages[2].options.Silent || !sender.messages[3].options.Silent || !sender.messages[4].options.Silent || !sender.messages[5].options.Silent {
+		t.Fatalf("message options = %#v, want only New run and [Plan] audible", sender.messages)
 	}
 	panel, err := service.store.GetCurrentThreadPanel(ctx, target.ChatID, target.TopicID, thread.ID)
 	if err != nil {
@@ -2341,6 +2455,50 @@ func TestSyncThreadPanelCreatesServerRequestPlanPromptRoute(t *testing.T) {
 	}
 	if route == nil || route.EventID != "plan_request:request-plan-1" {
 		t.Fatalf("plan request route = %#v, want plan_request event id", route)
+	}
+}
+
+func TestRunNoticeNotificationFlagCanSilenceNewRun(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	service.cfg.NotifyNewRun = false
+	sender := &recordingSender{}
+	service.SetSender(sender)
+	ctx := context.Background()
+
+	thread := model.Thread{
+		ID:          "thread-silent-new-run",
+		Title:       "Silent new run",
+		ProjectName: "Codex",
+		CWD:         `C:\Users\you\Projects\Codex`,
+		UpdatedAt:   time.Now().UTC().Unix(),
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-silent-new-run",
+		LatestTurnStatus: "inProgress",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	target := model.ObserverTarget{ChatKey: model.ChatKey(123456789, 0), ChatID: 123456789, TopicID: 0, Enabled: true}
+
+	service.syncThreadPanelToTarget(ctx, target, thread.ID, false, model.PanelSourceGlobalObserver)
+
+	if len(sender.messages) != 5 {
+		t.Fatalf("messages = %#v, want New run + [User placeholder] + trio", sender.messages)
+	}
+	if !strings.Contains(sender.messages[0].text, "New run:") {
+		t.Fatalf("first message = %q, want New run", sender.messages[0].text)
+	}
+	for index, message := range sender.messages {
+		if !message.options.Silent {
+			t.Fatalf("message[%d] options = %#v, want silent when notify_new_run is disabled", index, message.options)
+		}
 	}
 }
 
