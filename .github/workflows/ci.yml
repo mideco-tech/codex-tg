@@ -17,7 +17,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          forbidden_files='(^|/)(\.env|\.env\.local|.*\.sqlite|.*\.db|.*\.log|.*\.exe|.*\.session)$'
+          forbidden_files='(^|/)(\.env|\.env\.local|config\.env|.*\.sqlite|.*\.db|.*\.log|.*\.exe|.*\.session)$'
           if git ls-files | grep -E "$forbidden_files"; then
             echo "Forbidden local/runtime file is tracked."
             exit 1
