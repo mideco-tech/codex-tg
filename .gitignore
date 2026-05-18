@@ -25,3 +25,6 @@ logs/
 coverage.out
 dist/
 tmp/
+
+.DS_Store
+**/.DS_Store
