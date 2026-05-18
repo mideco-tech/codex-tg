@@ -1,16 +1,23 @@
-# codex-tg: Codex Telegram remote UI
+# codex-tg: local Codex control plane
 
-Codex Telegram bot and remote UI for local OpenAI Codex App Server, built in Go.
+Local control plane for OpenAI Codex App Server, built in Go, with Telegram as
+the first production adapter.
 
-`codex-tg` turns a Telegram bot into a mobile control surface for local Codex threads: it watches Codex GUI/CLI activity, keeps thread identity visible, routes replies back to the right thread, and exposes high-signal controls such as Plan Mode prompts, Stop, Steer, Details, Tools file, and Get full log.
+`codex-tg` watches local Codex threads, keeps durable thread identity visible,
+routes operator input back to the right turn, and exposes high-signal controls
+such as Plan Mode prompts, Stop, Steer, Details, Tools file, and Get full log.
+The current adapter is Telegram; the v0.5 direction is a reusable local
+`codex-control` layer for future router agents, voice assistants, tray flows,
+and other private adapters.
 
 ## Why codex-tg?
 
-- Codex Telegram remote UI for local OpenAI Codex App Server.
-- Control and observe Codex threads from Telegram without exposing App Server to the internet.
+- Local Codex control plane for OpenAI Codex App Server.
+- Control and observe Codex threads through adapters without exposing App Server to the internet.
+- Use Telegram today as a high-signal notification, reply, approval, and Details surface.
 - Reuse your existing Codex setup: skills, MCP servers, plugins, repo instructions, and local workflows.
 - Thread-first routing keeps replies, tools, Plan Mode, Details, and Final cards attached to the right run.
-- Built for long-running local coding-agent work from a phone.
+- Built toward long-running local coding-agent orchestration and future router-agent workflows.
 
 Current release: `v0.4.0`.
 
@@ -20,10 +27,18 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 
 ## Why It Matters
 
-- Keep local Codex work observable from a phone without exposing Codex App Server to the internet.
-- Continue supervising long-running coding tasks while away from the workstation.
-- Use Telegram as a low-friction fallback surface on unreliable or constrained networks.
+- Keep local Codex work observable and controllable without exposing Codex App Server to the internet.
+- Give future router agents a stable local control surface for Codex threads, turns, approvals, events, and skills.
+- Use Telegram as a low-friction fallback and notification surface on unreliable or constrained networks.
 - Preserve local-first ownership: Codex sessions, workspaces, SQLite state, and tokens stay on your machine.
+
+## Remote Connections
+
+Official Codex Remote Connections cover the broad mobile remote-control
+workflow for Codex. `codex-tg` is not trying to replace that feature. The
+project direction is a local control layer and adapter system: Telegram remains
+useful for operator notifications, replies, approvals, Details, and logs, while
+future adapters can consume the same Codex control core.
 
 ## Demo Screenshots
 
@@ -41,7 +56,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 
 ## Features
 
-- Thread-first routing over local `codex app-server` stdio.
+- Thread-first routing over local Codex App Server.
 - Global observer for foreign GUI/CLI runs, with polling fallback through `thread/read`.
 - Telegram-origin live current tool rendering from App Server `item/*` events, while foreign GUI/CLI panels stay completed-tool only.
 - Stable visual identity per thread: emoji marker plus project/thread/run chips.
@@ -52,6 +67,7 @@ The demo flow is documented in [docs/demo/telegram-plan-mode-demo.md](docs/demo/
 - On-demand full log archive from Codex session JSONL.
 - SQLite-backed durable state for bindings, routes, callbacks, observer target, panels, and delivery metadata.
 - macOS service installer with friendly first-run setup, user LaunchAgent management, and menu bar tray control.
+- v0.5 architecture direction: adapter-independent Codex Control Plane for router agents, voice adapters, and local private APIs.
 - Cross-platform Go daemon foundation for Windows, macOS, and Linux.
 
 ## Platform Status
@@ -233,20 +249,21 @@ See [docs/demo/telegram-plan-mode-demo.md](docs/demo/telegram-plan-mode-demo.md)
 Suggested repository description:
 
 ```text
-Codex Telegram bot and remote UI for local OpenAI Codex App Server. Observe, approve, and steer Codex from Telegram.
+Local Codex control plane with a Telegram adapter. Observe, approve, steer, and route Codex App Server threads without exposing App Server publicly.
 ```
 
 Suggested topics:
 
 ```text
 codex telegram telegram-bot telegram-ui openai-codex codex-cli
-codex-app-server ai-agents coding-agent remote-control developer-tools
-local-first go golang macos windows linux plan-mode agent-observer json-rpc
+codex-app-server codex-control-plane ai-agents coding-agent remote-control developer-tools
+local-first go macos windows linux plan-mode agent-observer router-agent
 ```
 
 ## Documentation
 
 - [Architecture](docs/wiki/Architecture.md)
+- [Control Plane](docs/wiki/Control-Plane.md)
 - [Quickstart](docs/wiki/Quickstart.md)
 - [Telegram UX](docs/wiki/Telegram-UX.md)
 - [Plan Mode](docs/wiki/Plan-Mode.md)
@@ -265,5 +282,5 @@ Apache License 2.0. This keeps the project permissive for the community while al
 ## Operational Notes
 
 - Telegram long polling returns `409 Conflict` when another process consumes the same bot token.
-- Do not expose Codex App Server on a public interface. `codex-tg` is designed around local stdio.
+- Do not expose Codex App Server on a public interface. `codex-tg` is designed around local/private App Server connectivity.
 - Keep bot tokens, Telegram sessions, SQLite databases, logs, and `.env` files out of git.

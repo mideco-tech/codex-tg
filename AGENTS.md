@@ -6,7 +6,7 @@ Good code is code that is easy to understand, change, test, and safely extend. G
 
 ## Repository Purpose
 
-`codex-tg` is a Go daemon that turns Telegram into a thread-first remote UI and observer for local OpenAI Codex App Server.
+`codex-tg` is a Go daemon evolving into a local Codex Control Plane. Telegram is the first production adapter for observing, steering, approving, and routing local Codex App Server work.
 
 The repo is public-facing. Keep every change safe for open-source publication: no private paths, tokens, Telegram ids, local sessions, databases, logs, screenshots with private data, or environment-specific credentials.
 
@@ -39,13 +39,14 @@ The repo is public-facing. Keep every change safe for open-source publication: n
 
 ## Core Decisions
 
-- Backend integration surface is only `codex app-server` over stdio.
+- Current runtime state authority is Codex App Server. New control-plane work must preserve App Server authority for interactive threads, turns, approvals, live events, history, and snapshots.
+- Spawned `codex app-server` over stdio remains supported, but ADR-019 allows future `unix://` and `app-server proxy` transport work.
 - Durable identity is `threadId`; Telegram chat/topic is only an input and rendering surface.
 - Live observer events come from the daemon session; foreign GUI/CLI activity must also be covered by polling `thread/read`.
 - App Server session lifecycle transitions must be serialized and generation-aware; stale old-session close/error events must not invalidate newer sessions or create repair loops.
 - Startup must remain non-blocking; never put full thread sync into synchronous startup.
 - SQLite is the local source of truth for bindings, routes, callbacks, panels, observer target, delivery metadata, and daemon state.
-- Do not add a second runtime backbone through `codex exec resume`, SDK-only wrappers, or MCP.
+- Do not add a second live runtime backbone for App Server state. SDK/MCP may be used only where ADR-019 allows orchestration adapters, and must not replace App Server truth for live UI/control state without a new ADR.
 
 ## Design And Code Principles
 

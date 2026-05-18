@@ -6,6 +6,7 @@ This file now serves two purposes:
 
 - baseline behavior imported from the Python oracle
 - target Telegram observer/UI v2 deltas that the Go runtime is expected to adopt
+- v0.5 Codex Control Plane contracts that future adapters should consume
 
 ## Commands
 
@@ -57,7 +58,57 @@ This file now serves two purposes:
 - `status`, `doctor`, daemon logs, init summaries, service summaries, LaunchAgent plists, and tray surfaces must not print Telegram bot tokens in full.
 - Official GitHub Release assets include `ctr-go` archives for macOS, Linux, and Windows, macOS `.pkg` artifacts, and `SHA256SUMS`.
 
-## Target Telegram observer/UI v2 deltas
+## Codex Control API Contract
+
+The first implementation target is internal Go interfaces, not a public HTTP
+API. Future router-agent or voice adapters may consume the same contract through
+a local loopback or unix-socket API after a separate ADR.
+
+Thread lifecycle:
+
+- list and search threads, including cwd-scoped queries when App Server supports them
+- read a thread with or without full turns
+- start, resume, fork, rename, archive, unarchive, compact, and rollback threads
+- keep `thread_id` as the durable identity across every adapter
+- detect unavailable App Server capabilities instead of assuming every method exists
+
+Turn lifecycle:
+
+- start a turn with text input and optional model, reasoning, cwd, approval, sandbox, and collaboration-mode settings
+- steer an active turn only when the expected turn id matches
+- interrupt an active turn by `thread_id + turn_id`
+- answer user-input requests and approval requests through the originating App Server request id
+- preserve existing stale-active recovery rules before falling back to a new `turn/start`
+
+Event subscription:
+
+- normalize App Server lifecycle, tool, final, approval, and input events before adapters see them
+- treat `thread/read` snapshots as durable reconciliation state
+- keep App Server live events as the only live tool/output/final source; session JSONL remains export-only
+- expose enough ids for adapters to route replies, approvals, Details, and notifications safely
+
+Skills and ecosystem:
+
+- list available Codex skills by cwd when supported
+- read plugin skill metadata when supported
+- inspect MCP server status, app list, hooks list, and config state when supported
+- prefer Codex-native Skills, Hooks, and Automations over duplicate custom formats
+
+Notifications:
+
+- classify normalized events as `urgent`, `normal`, `silent`, or `digest`
+- urgent examples: approval needed, user input needed, run failed, security/sandbox denial
+- normal examples: final answer, high-value run start when enabled by adapter policy
+- silent examples: progress deltas, tool output deltas, menu/callback responses
+- digest examples: low-priority automation summaries or scheduled findings
+
+Adapter routing:
+
+- adapters must not own Codex identity
+- Telegram message ids, voice sessions, tray actions, and future HTTP requests are adapter context
+- control-core operations route by durable Codex ids and explicit adapter-supplied intent
+
+## Telegram Adapter Contract
 
 - Global observer monitoring is default-on when an operator target can be resolved automatically.
 - `/observe all` moves the single global observer target to the current chat/topic.

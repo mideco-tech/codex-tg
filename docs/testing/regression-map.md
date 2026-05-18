@@ -1,8 +1,39 @@
 # Regression Map
 
-This map is the handoff index for agents changing Telegram routing, observer panels, lifecycle recovery, diagnostics, or Plan Mode.
+This map is the handoff index for agents changing Codex control-plane
+contracts, Telegram routing, observer panels, lifecycle recovery, diagnostics,
+or Plan Mode.
 
 When behavior changes, update the relevant ADR first, then update or add the tests named here. The tests are part of the architecture: they describe the contract that must survive App Server drift and daemon restarts.
+
+## Control Plane Architecture
+
+ADR: `docs/adr/ADR-019-codex-control-plane.md`; feature brief is
+`docs/process/v0.5.0-codex-control-plane-brief.md`; roadmap is
+`docs/process/v0.5.0-control-api-roadmap.md`.
+
+Future primary tests:
+
+- App Server capability-map smoke detects supported and missing schema methods.
+- Control-core thread lifecycle tests cover list/read/start/resume/fork/rename
+  through an App Server-backed implementation.
+- Control-core turn lifecycle tests cover start/steer/interrupt plus stale-active
+  recovery preservation.
+- Event normalization tests cover lifecycle/tool/final/approval/input events
+  before Telegram-specific rendering.
+- Notification policy tests classify normalized events as `urgent`, `normal`,
+  `silent`, or `digest`.
+- Telegram adapter compatibility tests prove existing commands and callback
+  routing still work on top of the control API.
+
+Contract notes:
+
+- App Server remains authoritative for live interactive Codex state.
+- SDK/MCP adapters are allowed only as orchestration adapters under ADR-019.
+- Session JSONL must not re-enter live UI/control state.
+- Generated App Server schema is an input to capability detection, not a file to
+  commit as a runtime source of truth.
+- Telegram is a channel adapter; Telegram ids must not become Codex identity.
 
 ## Distribution And Local Config
 
