@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Moved daemon live-event loop ownership further onto the adapter-independent `control.Event` / `control.NormalizedEvent` model while preserving existing App Server snapshot reconciliation.
+- Added an experimental local read-only router-agent HTTP API behind `CTR_GO_CONTROL_API_LISTEN`, disabled by default and restricted to loopback TCP.
+
 ## v0.5.0 - 2026-05-18
 
 - Repositioned the project from a Telegram-first remote UI to a local Codex Control Plane with Telegram as the first production adapter.
