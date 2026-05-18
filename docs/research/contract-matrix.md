@@ -60,9 +60,11 @@ This file now serves two purposes:
 
 ## Codex Control API Contract
 
-The first implementation target is internal Go interfaces, not a public HTTP
-API. Future router-agent or voice adapters may consume the same contract through
-a local loopback or unix-socket API after a separate ADR.
+The first implementation target is internal Go interfaces plus an experimental
+local read-only HTTP adapter for router-agent prototypes. The adapter is
+disabled by default, enabled through `CTR_GO_CONTROL_API_LISTEN`, and must bind
+only loopback TCP. Future write operations or non-local exposure require a
+separate contract/ADR.
 
 Thread lifecycle:
 
@@ -107,6 +109,14 @@ Adapter routing:
 - adapters must not own Codex identity
 - Telegram message ids, voice sessions, tray actions, and future HTTP requests are adapter context
 - control-core operations route by durable Codex ids and explicit adapter-supplied intent
+
+Local HTTP adapter:
+
+- `GET /health` returns process/version health.
+- `GET /v1/status` returns daemon doctor/status JSON.
+- `GET /v1/threads?limit=&cursor=` delegates to App Server `thread/list` through the control layer.
+- `GET /v1/threads/{thread_id}?include_turns=true|false` delegates to App Server `thread/read`.
+- State-changing HTTP operations are out of scope for the first router-agent API slice.
 
 ## Telegram Adapter Contract
 

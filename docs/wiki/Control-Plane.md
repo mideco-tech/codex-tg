@@ -83,6 +83,18 @@ A future router agent can sit above the control core. Its job is to interpret
 user intent, choose the right thread or project, select skills, start or steer
 turns, and decide where to notify the user.
 
+## Experimental Local API
+
+The first router-agent API surface is intentionally conservative:
+
+- disabled by default;
+- enabled with `CTR_GO_CONTROL_API_LISTEN`;
+- accepts only loopback TCP listeners such as `127.0.0.1:8765`;
+- exposes read-only health/status/thread list/thread read endpoints first.
+
+This is a local adapter over the same daemon/control core. It is not a public
+network service and must not expose App Server directly.
+
 Voice is expected to be a separate adapter for that router. The first voice
 prototype should use a chained pipeline: wake word, transcription, router
 decision, Codex action, and spoken summary.

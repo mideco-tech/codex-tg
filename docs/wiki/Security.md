@@ -32,9 +32,10 @@
 Do not expose Codex App Server on a public interface. App Server stays local or
 private to the operator machine.
 
-Future control-plane APIs must default to loopback-only or unix-socket-only
-access. Public network listeners, cloud brokers, and unauthenticated local
-control surfaces require a separate ADR.
+The experimental control-plane HTTP adapter is disabled by default and can only
+bind loopback TCP addresses through `CTR_GO_CONTROL_API_LISTEN`. Public network
+listeners, cloud brokers, and unauthenticated non-local control surfaces require
+a separate ADR.
 
 Telegram, tray, voice, and future HTTP/mobile surfaces are adapters. They must
 not bypass Codex approvals, sandboxing, allowlists, or App Server lifecycle

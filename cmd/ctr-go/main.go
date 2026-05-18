@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/controlapi"
 	"github.com/mideco-tech/codex-tg/internal/daemon"
 	"github.com/mideco-tech/codex-tg/internal/telegram"
 	"github.com/mideco-tech/codex-tg/internal/version"
@@ -107,11 +108,31 @@ func runDaemon(cfg config.Config) error {
 	if err := service.Start(ctx); err != nil {
 		return err
 	}
+	if err := startControlAPI(ctx, cfg, service, logger); err != nil {
+		return err
+	}
 	if err := bot.Start(ctx); err != nil {
 		return err
 	}
 	logger.Printf("ctr-go daemon running with %s", bot.String())
 	return bot.Run(ctx)
+}
+
+func startControlAPI(ctx context.Context, cfg config.Config, service *daemon.Service, logger *log.Logger) error {
+	listener, err := controlapi.Listen(cfg.ControlAPIListen)
+	if err != nil {
+		return err
+	}
+	if listener == nil {
+		return nil
+	}
+	logger.Printf("ctr-go control api listening on %s", listener.Addr().String())
+	go func() {
+		if err := controlapi.Serve(ctx, listener, controlapi.NewHandler(version.Version, service), logger); err != nil && ctx.Err() == nil {
+			logger.Printf("ctr-go control api stopped: %v", err)
+		}
+	}()
+	return nil
 }
 
 func daemonLogger(cfg config.Config) *log.Logger {
@@ -153,6 +174,7 @@ func runStatus(cfg config.Config, out io.Writer) error {
 		fmt.Sprintf("Home: %s", cfg.Paths.Home),
 		fmt.Sprintf("DB: %s", cfg.Paths.DBPath),
 		fmt.Sprintf("Codex bin: %s", cfg.CodexBin),
+		fmt.Sprintf("Control API: %s", formatOptional(cfg.ControlAPIListen, "off")),
 		fmt.Sprintf("Telegram configured: %t", strings.TrimSpace(cfg.TelegramBotToken) != ""),
 		fmt.Sprintf("Allowed users: %s", formatIDs(cfg.AllowedUserIDs)),
 		fmt.Sprintf("Allowed chats: %s", formatIDs(cfg.AllowedChatIDs)),
@@ -176,6 +198,13 @@ func runStatus(cfg config.Config, out io.Writer) error {
 	}
 	_, _ = fmt.Fprintln(out, strings.Join(lines, "\n"))
 	return nil
+}
+
+func formatOptional(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func runDoctor(cfg config.Config, out io.Writer) error {

@@ -23,6 +23,9 @@ Future primary tests:
   before Telegram-specific rendering.
 - Notification policy tests classify normalized events as `urgent`, `normal`,
   `silent`, or `digest`.
+- Local control API tests prove the router-agent HTTP adapter is disabled unless
+  configured, loopback-only, read-only for the first slice, and delegates
+  thread list/read through the control surface.
 - Telegram adapter compatibility tests prove existing commands and callback
   routing still work on top of the control API.
 

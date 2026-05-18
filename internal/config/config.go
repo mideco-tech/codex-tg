@@ -48,6 +48,7 @@ type Config struct {
 	Paths                       Paths
 	CodexBin                    string
 	AppServerListen             string
+	ControlAPIListen            string
 	TelegramBotToken            string
 	AllowedUserIDs              []int64
 	AllowedChatIDs              []int64
@@ -132,6 +133,7 @@ func fromSource(source envSource) Config {
 		Paths:                       paths,
 		CodexBin:                    codexBin,
 		AppServerListen:             listen,
+		ControlAPIListen:            source.get("CTR_GO_CONTROL_API_LISTEN"),
 		TelegramBotToken:            source.first("CTR_GO_TELEGRAM_BOT_TOKEN", "CTR_TELEGRAM_BOT_TOKEN"),
 		AllowedUserIDs:              parseInt64List(source.first("CTR_GO_ALLOWED_USER_IDS", "CTR_ALLOWED_USER_IDS")),
 		AllowedChatIDs:              parseInt64List(source.first("CTR_GO_ALLOWED_CHAT_IDS", "CTR_ALLOWED_CHAT_IDS")),
@@ -159,6 +161,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		DBPath                      string  `json:"db_path"`
 		CodexBin                    string  `json:"codex_bin"`
 		AppServerListen             string  `json:"app_server_listen"`
+		ControlAPIListen            string  `json:"control_api_listen,omitempty"`
 		HasTelegramToken            bool    `json:"telegram_configured"`
 		AllowedUserIDs              []int64 `json:"allowed_user_ids"`
 		AllowedChatIDs              []int64 `json:"allowed_chat_ids"`
@@ -180,6 +183,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		DBPath:                      c.Paths.DBPath,
 		CodexBin:                    c.CodexBin,
 		AppServerListen:             c.AppServerListen,
+		ControlAPIListen:            c.ControlAPIListen,
 		HasTelegramToken:            c.TelegramBotToken != "",
 		AllowedUserIDs:              c.AllowedUserIDs,
 		AllowedChatIDs:              c.AllowedChatIDs,

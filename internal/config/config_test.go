@@ -21,10 +21,10 @@ func TestFromEnvReadsCodexChatsRoot(t *testing.T) {
 	}
 }
 
-func TestMarshalJSONIncludesNotifyNewRun(t *testing.T) {
+func TestMarshalJSONIncludesPublicRuntimeConfig(t *testing.T) {
 	t.Parallel()
 
-	data, err := json.Marshal(Config{NotifyNewRun: true})
+	data, err := json.Marshal(Config{NotifyNewRun: true, ControlAPIListen: "127.0.0.1:8765"})
 	if err != nil {
 		t.Fatalf("json.Marshal failed: %v", err)
 	}
@@ -34,6 +34,9 @@ func TestMarshalJSONIncludesNotifyNewRun(t *testing.T) {
 	}
 	if got["notify_new_run"] != true {
 		t.Fatalf("notify_new_run = %#v, want true", got["notify_new_run"])
+	}
+	if got["control_api_listen"] != "127.0.0.1:8765" {
+		t.Fatalf("control_api_listen = %#v, want listen address", got["control_api_listen"])
 	}
 }
 
@@ -82,6 +85,7 @@ func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 		`CTR_GO_TELEGRAM_BOT_TOKEN="file-token"`,
 		`CTR_GO_ALLOWED_USER_IDS="101 202"`,
 		`CTR_GO_DEFAULT_CWD="` + fileDefaultCWD + `"`,
+		`CTR_GO_CONTROL_API_LISTEN="127.0.0.1:9876"`,
 		`CTR_GO_NOTIFY_NEW_RUN="off"`,
 		"",
 	}, "\n")), 0o600); err != nil {
@@ -108,6 +112,9 @@ func TestLoadReadsConfigFileAndEnvOverridesIt(t *testing.T) {
 	}
 	if cfg.NotifyNewRun {
 		t.Fatal("NotifyNewRun = true, want false from config file")
+	}
+	if cfg.ControlAPIListen != "127.0.0.1:9876" {
+		t.Fatalf("ControlAPIListen = %q, want configured listen", cfg.ControlAPIListen)
 	}
 }
 

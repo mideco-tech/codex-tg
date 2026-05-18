@@ -3777,6 +3777,36 @@ func TestHelpHidesDefaultModeFallback(t *testing.T) {
 	}
 }
 
+func TestControlThreadListAndReadUsePollSession(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	stub := &stubSession{
+		threadListResult: map[string]any{"threads": []any{map[string]any{"id": "thread-1"}}},
+		threadReads: map[string]map[string]any{
+			"thread-1": {"thread": map[string]any{"id": "thread-1"}},
+		},
+	}
+	service.poll = stub
+	service.pollConnected = true
+
+	list, err := service.ControlThreadList(ctx, 25, "next")
+	if err != nil {
+		t.Fatalf("ControlThreadList failed: %v", err)
+	}
+	if list == nil || stub.threadListCalls != 1 || stub.threadListLimit != 25 || stub.threadListCursor != "next" {
+		t.Fatalf("list=%#v calls=%d limit=%d cursor=%q", list, stub.threadListCalls, stub.threadListLimit, stub.threadListCursor)
+	}
+	read, err := service.ControlThreadRead(ctx, "thread-1", true)
+	if err != nil {
+		t.Fatalf("ControlThreadRead failed: %v", err)
+	}
+	if read == nil || stub.threadReadID != "thread-1" || !stub.threadReadIncludeTurns {
+		t.Fatalf("read=%#v id=%q include=%t", read, stub.threadReadID, stub.threadReadIncludeTurns)
+	}
+}
+
 func TestStopSetsDefaultOverrideForActiveThread(t *testing.T) {
 	t.Parallel()
 
@@ -4773,25 +4803,29 @@ func (s *startCountingSession) StartCalls() int {
 }
 
 type stubSession struct {
-	threadReads         map[string]map[string]any
-	threadListResult    map[string]any
-	threadListCalls     int
-	models              []appserver.ModelOption
-	collaborationModes  []appserver.CollaborationModeOption
-	threadReadErr       error
-	threadResumeErr     error
-	threadStartErr      error
-	threadStartResult   map[string]any
-	turnStartErr        error
-	turnSteerErr        error
-	turnSteerErrs       []error
-	threadStartCalls    []string
-	threadResumeCalls   []threadResumeCall
-	turnSteerCalls      []turnCall
-	turnStartCalls      []turnCall
-	turnInterruptCalls  []turnCall
-	respondRequestCalls []respondRequestCall
-	stderrTail          []string
+	threadReads            map[string]map[string]any
+	threadListResult       map[string]any
+	threadListCalls        int
+	threadListLimit        int
+	threadListCursor       string
+	threadReadID           string
+	threadReadIncludeTurns bool
+	models                 []appserver.ModelOption
+	collaborationModes     []appserver.CollaborationModeOption
+	threadReadErr          error
+	threadResumeErr        error
+	threadStartErr         error
+	threadStartResult      map[string]any
+	turnStartErr           error
+	turnSteerErr           error
+	turnSteerErrs          []error
+	threadStartCalls       []string
+	threadResumeCalls      []threadResumeCall
+	turnSteerCalls         []turnCall
+	turnStartCalls         []turnCall
+	turnInterruptCalls     []turnCall
+	respondRequestCalls    []respondRequestCall
+	stderrTail             []string
 }
 
 type threadResumeCall struct {
@@ -4821,9 +4855,13 @@ func (s *stubSession) Subscribe() <-chan appserver.Event {
 }
 func (s *stubSession) ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error) {
 	s.threadListCalls++
+	s.threadListLimit = limit
+	s.threadListCursor = cursor
 	return s.threadListResult, nil
 }
 func (s *stubSession) ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error) {
+	s.threadReadID = threadID
+	s.threadReadIncludeTurns = includeTurns
 	if s.threadReadErr != nil {
 		return nil, s.threadReadErr
 	}

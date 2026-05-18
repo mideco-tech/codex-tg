@@ -215,6 +215,40 @@ func (s *Service) Doctor(ctx context.Context) (map[string]any, error) {
 	}, nil
 }
 
+func (s *Service) ControlThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error) {
+	session, err := s.controlReadSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	return session.ThreadList(ctx, limit, cursor)
+}
+
+func (s *Service) ControlThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return nil, errors.New("thread id is required")
+	}
+	session, err := s.controlReadSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return session.ThreadRead(ctx, threadID, includeTurns)
+}
+
+func (s *Service) controlReadSession(ctx context.Context) (Session, error) {
+	s.ensurePollSession(ctx)
+	s.mu.RLock()
+	session := s.poll
+	s.mu.RUnlock()
+	if session == nil {
+		return nil, errors.New("app-server poll session unavailable")
+	}
+	return session, nil
+}
+
 func (s *Service) StatusSnapshot(ctx context.Context, chatID, topicID int64) (string, error) {
 	contextState, err := s.store.GetChatContext(ctx, chatID, topicID)
 	if err != nil {
