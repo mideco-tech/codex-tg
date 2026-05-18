@@ -16,26 +16,12 @@ import (
 
 	"github.com/mideco-tech/codex-tg/internal/appserver"
 	"github.com/mideco-tech/codex-tg/internal/config"
+	"github.com/mideco-tech/codex-tg/internal/control"
 	"github.com/mideco-tech/codex-tg/internal/model"
 	"github.com/mideco-tech/codex-tg/internal/storage"
 )
 
-type Session interface {
-	Start(ctx context.Context) error
-	Close() error
-	Subscribe() <-chan appserver.Event
-	ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error)
-	ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error)
-	ThreadResume(ctx context.Context, threadID, cwd string) (map[string]any, error)
-	ThreadStart(ctx context.Context, cwd string) (map[string]any, error)
-	TurnStart(ctx context.Context, threadID, message, cwd string, options appserver.TurnStartOptions) (map[string]any, error)
-	TurnSteer(ctx context.Context, threadID, turnID, message string) (map[string]any, error)
-	TurnInterrupt(ctx context.Context, threadID, turnID string) error
-	ModelList(ctx context.Context, includeHidden bool) ([]appserver.ModelOption, error)
-	CollaborationModeList(ctx context.Context) ([]appserver.CollaborationModeOption, error)
-	RespondServerRequest(ctx context.Context, requestID string, result map[string]any) error
-	StderrTail() []string
-}
+type Session = control.RuntimeSession
 
 type Sender interface {
 	SendMessage(ctx context.Context, chatID, topicID int64, text string, buttons [][]model.ButtonSpec, options model.SendOptions) (int64, error)

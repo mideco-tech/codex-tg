@@ -148,6 +148,40 @@ func TestTurnStartParamsRejectsModeWithoutModel(t *testing.T) {
 	}
 }
 
+func TestControlPlaneThreadForkParams(t *testing.T) {
+	params := threadForkParams("thread-1", "/tmp/project")
+	if got, want := params["threadId"], "thread-1"; got != want {
+		t.Fatalf("threadId = %v, want %q", got, want)
+	}
+	if got, want := params["cwd"], "/tmp/project"; got != want {
+		t.Fatalf("cwd = %v, want %q", got, want)
+	}
+
+	params = threadForkParams("thread-1", "")
+	if _, ok := params["cwd"]; ok {
+		t.Fatalf("cwd should be omitted for empty cwd: %#v", params)
+	}
+}
+
+func TestControlPlaneSkillsListParams(t *testing.T) {
+	params := skillsListParams([]string{"/tmp/a", "/tmp/b"}, true)
+	cwds, ok := params["cwds"].([]string)
+	if !ok {
+		t.Fatalf("cwds = %#v, want []string", params["cwds"])
+	}
+	if got, want := len(cwds), 2; got != want {
+		t.Fatalf("cwds len = %d, want %d", got, want)
+	}
+	if got, want := params["forceReload"], true; got != want {
+		t.Fatalf("forceReload = %v, want %v", got, want)
+	}
+
+	params = skillsListParams(nil, false)
+	if len(params) != 0 {
+		t.Fatalf("empty params = %#v, want empty", params)
+	}
+}
+
 func TestStartConcurrentCallsShareInitializedProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake app-server shell script is Unix-only")

@@ -16,38 +16,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mideco-tech/codex-tg/internal/control"
 	"github.com/mideco-tech/codex-tg/internal/version"
 )
 
-type Event struct {
-	Channel string         `json:"channel"`
-	Method  string         `json:"method,omitempty"`
-	Params  map[string]any `json:"params,omitempty"`
-	ID      any            `json:"id,omitempty"`
-}
+type Event = control.Event
+type TurnStartOptions = control.TurnStartOptions
+type ModelOption = control.ModelOption
+type CollaborationModeOption = control.CollaborationModeOption
 
-type TurnStartOptions struct {
-	CollaborationMode string
-	Model             string
-	ReasoningEffort   string
-}
-
-type ModelOption struct {
-	ID                       string
-	DisplayName              string
-	Description              string
-	DefaultReasoningEffort   string
-	SupportedReasoningEffort []string
-	IsDefault                bool
-	Hidden                   bool
-}
-
-type CollaborationModeOption struct {
-	Name            string
-	Mode            string
-	Model           string
-	ReasoningEffort string
-}
+var _ control.ControlPlane = (*Client)(nil)
 
 type rpcResponse struct {
 	Result any
@@ -322,6 +300,68 @@ func (c *Client) ThreadList(ctx context.Context, limit int, cursor string) (map[
 	return asMap(result), nil
 }
 
+func (c *Client) ThreadFork(ctx context.Context, threadID, cwd string) (map[string]any, error) {
+	result, err := c.Request(ctx, "thread/fork", threadForkParams(threadID, cwd))
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func threadForkParams(threadID, cwd string) map[string]any {
+	params := map[string]any{"threadId": threadID}
+	if strings.TrimSpace(cwd) != "" {
+		params["cwd"] = cwd
+	}
+	return params
+}
+
+func (c *Client) ThreadSetName(ctx context.Context, threadID, name string) (map[string]any, error) {
+	result, err := c.Request(ctx, "thread/name/set", map[string]any{
+		"threadId": threadID,
+		"name":     name,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) ThreadArchive(ctx context.Context, threadID string) (map[string]any, error) {
+	result, err := c.Request(ctx, "thread/archive", map[string]any{"threadId": threadID})
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) ThreadUnarchive(ctx context.Context, threadID string) (map[string]any, error) {
+	result, err := c.Request(ctx, "thread/unarchive", map[string]any{"threadId": threadID})
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) ThreadCompactStart(ctx context.Context, threadID string) (map[string]any, error) {
+	result, err := c.Request(ctx, "thread/compact/start", map[string]any{"threadId": threadID})
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) ThreadRollback(ctx context.Context, threadID string, numTurns int) (map[string]any, error) {
+	result, err := c.Request(ctx, "thread/rollback", map[string]any{
+		"threadId": threadID,
+		"numTurns": numTurns,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
 func (c *Client) ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error) {
 	result, err := c.Request(ctx, "thread/read", map[string]any{
 		"threadId":     threadID,
@@ -473,6 +513,103 @@ func (c *Client) CollaborationModeList(ctx context.Context) ([]CollaborationMode
 		return nil, err
 	}
 	return collaborationModeOptionsFromResult(result), nil
+}
+
+func (c *Client) SkillsList(ctx context.Context, cwds []string, forceReload bool) (map[string]any, error) {
+	result, err := c.Request(ctx, "skills/list", skillsListParams(cwds, forceReload))
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func skillsListParams(cwds []string, forceReload bool) map[string]any {
+	params := map[string]any{}
+	if len(cwds) > 0 {
+		params["cwds"] = cwds
+	}
+	if forceReload {
+		params["forceReload"] = true
+	}
+	return params
+}
+
+func (c *Client) PluginSkillRead(ctx context.Context, remoteMarketplaceName, remotePluginID, skillName string) (map[string]any, error) {
+	result, err := c.Request(ctx, "plugin/skill/read", map[string]any{
+		"remoteMarketplaceName": remoteMarketplaceName,
+		"remotePluginId":        remotePluginID,
+		"skillName":             skillName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) HooksList(ctx context.Context, cwds []string) (map[string]any, error) {
+	params := map[string]any{}
+	if len(cwds) > 0 {
+		params["cwds"] = cwds
+	}
+	result, err := c.Request(ctx, "hooks/list", params)
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) MCPServerStatusList(ctx context.Context, limit int, cursor string, detail bool) (map[string]any, error) {
+	params := map[string]any{}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+	if strings.TrimSpace(cursor) != "" {
+		params["cursor"] = cursor
+	}
+	if detail {
+		params["detail"] = true
+	}
+	result, err := c.Request(ctx, "mcpServerStatus/list", params)
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) AppList(ctx context.Context, limit int, cursor, threadID string, forceRefetch bool) (map[string]any, error) {
+	params := map[string]any{}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+	if strings.TrimSpace(cursor) != "" {
+		params["cursor"] = cursor
+	}
+	if strings.TrimSpace(threadID) != "" {
+		params["threadId"] = threadID
+	}
+	if forceRefetch {
+		params["forceRefetch"] = true
+	}
+	result, err := c.Request(ctx, "app/list", params)
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
+func (c *Client) ConfigRead(ctx context.Context, cwd string, includeLayers bool) (map[string]any, error) {
+	params := map[string]any{}
+	if strings.TrimSpace(cwd) != "" {
+		params["cwd"] = cwd
+	}
+	if includeLayers {
+		params["includeLayers"] = true
+	}
+	result, err := c.Request(ctx, "config/read", params)
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
 }
 
 func modelOptionsFromResult(result any) []ModelOption {
