@@ -68,7 +68,7 @@ type Service struct {
 	mu             sync.RWMutex
 	live           Session
 	poll           Session
-	liveEvents     <-chan appserver.Event
+	liveEvents     <-chan control.Event
 	liveGeneration uint64
 	pollGeneration uint64
 	cancel         context.CancelFunc
@@ -608,13 +608,13 @@ func (s *Service) liveEventLoop(ctx context.Context, live Session, ch <-chan app
 	}
 }
 
-func (s *Service) liveEventLoopCurrent(live Session, ch <-chan appserver.Event, generation uint64) bool {
+func (s *Service) liveEventLoopCurrent(live Session, ch <-chan control.Event, generation uint64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.live == live && s.liveEvents == ch && s.liveGeneration == generation
 }
 
-func (s *Service) handleLiveEvent(ctx context.Context, live Session, event appserver.Event) {
+func (s *Service) handleLiveEvent(ctx context.Context, live Session, event control.Event) {
 	if event.Channel == "transport_error" {
 		err := fmt.Errorf("app-server transport error: %v", event.Params)
 		_ = s.store.SetState(ctx, "appserver.live.last_error", sanitizeDiagnosticString(err.Error()))

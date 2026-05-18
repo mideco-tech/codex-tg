@@ -892,7 +892,7 @@ func TestNormalizeAppServerLiveEventMapsToolLifecycle(t *testing.T) {
 	if got, want := live.Output, "done\n"; got != want {
 		t.Fatalf("Output = %q, want %q", got, want)
 	}
-	snapshot, ok := live.ToolSnapshot(thread)
+	snapshot, ok := ToolSnapshotFromLiveEvent(live, thread)
 	if !ok {
 		t.Fatal("ToolSnapshot returned ok=false")
 	}
@@ -925,7 +925,7 @@ func TestLiveToolSnapshotMarksCurrentOnlyForStartedOrUpdatedWithTurn(t *testing.
 	if !ok {
 		t.Fatal("NormalizeAppServerLiveEvent(item/started) returned ok=false")
 	}
-	startedSnapshot, ok := started.ToolSnapshot(thread)
+	startedSnapshot, ok := ToolSnapshotFromLiveEvent(started, thread)
 	if !ok {
 		t.Fatal("ToolSnapshot(started) returned ok=false")
 	}
@@ -950,7 +950,7 @@ func TestLiveToolSnapshotMarksCurrentOnlyForStartedOrUpdatedWithTurn(t *testing.
 	if !ok {
 		t.Fatal("NormalizeAppServerLiveEvent(item/completed) returned ok=false")
 	}
-	completedSnapshot, ok := completed.ToolSnapshot(thread)
+	completedSnapshot, ok := ToolSnapshotFromLiveEvent(completed, thread)
 	if !ok {
 		t.Fatal("ToolSnapshot(completed) returned ok=false")
 	}
@@ -974,7 +974,7 @@ func TestLiveToolSnapshotMarksCurrentOnlyForStartedOrUpdatedWithTurn(t *testing.
 	if !ok {
 		t.Fatal("NormalizeAppServerLiveEvent(item/started without turn) returned ok=false")
 	}
-	withoutTurnSnapshot, ok := withoutTurn.ToolSnapshot(thread)
+	withoutTurnSnapshot, ok := ToolSnapshotFromLiveEvent(withoutTurn, thread)
 	if !ok {
 		t.Fatal("ToolSnapshot(withoutTurn) returned ok=false")
 	}

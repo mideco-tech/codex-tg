@@ -9,7 +9,7 @@ import (
 )
 
 type LiveEventKind = control.EventKind
-type NormalizedLiveEvent control.NormalizedEvent
+type NormalizedLiveEvent = control.NormalizedEvent
 
 const (
 	LiveEventTurnStarted        = control.EventTurnStarted
@@ -25,8 +25,8 @@ const (
 	LiveEventLegacyTaskComplete = control.EventLegacyTaskComplete
 )
 
-func NormalizeAppServerLiveEvent(event Event, thread model.Thread) (NormalizedLiveEvent, bool) {
-	normalized := NormalizedLiveEvent{
+func NormalizeAppServerLiveEvent(event Event, thread model.Thread) (control.NormalizedEvent, bool) {
+	normalized := control.NormalizedEvent{
 		Method: strings.TrimSpace(event.Method),
 		Raw:    event,
 	}
@@ -36,11 +36,11 @@ func NormalizeAppServerLiveEvent(event Event, thread model.Thread) (NormalizedLi
 	case "server_request":
 		return normalizeServerRequestEvent(event, thread, normalized)
 	default:
-		return NormalizedLiveEvent{}, false
+		return control.NormalizedEvent{}, false
 	}
 }
 
-func normalizeNotificationEvent(event Event, thread model.Thread, normalized NormalizedLiveEvent) (NormalizedLiveEvent, bool) {
+func normalizeNotificationEvent(event Event, thread model.Thread, normalized control.NormalizedEvent) (control.NormalizedEvent, bool) {
 	method := strings.TrimSpace(strings.ToLower(event.Method))
 	params := event.Params
 	if strings.HasPrefix(method, "codex/event") {
@@ -68,11 +68,11 @@ func normalizeNotificationEvent(event Event, thread model.Thread, normalized Nor
 	case "item/started", "item/updated", "item/completed":
 		return normalizeItemEvent(method, params, thread, normalized)
 	default:
-		return NormalizedLiveEvent{}, false
+		return control.NormalizedEvent{}, false
 	}
 }
 
-func normalizeItemEvent(method string, params map[string]any, thread model.Thread, normalized NormalizedLiveEvent) (NormalizedLiveEvent, bool) {
+func normalizeItemEvent(method string, params map[string]any, thread model.Thread, normalized control.NormalizedEvent) (control.NormalizedEvent, bool) {
 	item := asMap(params["item"])
 	itemType := strings.TrimSpace(stringValue(item["type"], ""))
 	normalized.ItemKind = itemType
@@ -101,7 +101,7 @@ func normalizeItemEvent(method string, params map[string]any, thread model.Threa
 		normalized.Phase = normalizeAgentMessagePhase(item)
 		return normalized, normalized.ThreadID != "" && normalized.Text != ""
 	default:
-		return NormalizedLiveEvent{}, false
+		return control.NormalizedEvent{}, false
 	}
 }
 
@@ -116,7 +116,7 @@ func toolLiveEventKind(method string) LiveEventKind {
 	}
 }
 
-func normalizeServerRequestEvent(event Event, thread model.Thread, normalized NormalizedLiveEvent) (NormalizedLiveEvent, bool) {
+func normalizeServerRequestEvent(event Event, thread model.Thread, normalized control.NormalizedEvent) (control.NormalizedEvent, bool) {
 	method := strings.TrimSpace(strings.ToLower(event.Method))
 	params := event.Params
 	normalized.ThreadID = firstString(nestedThreadID(params), thread.ID)
@@ -131,12 +131,12 @@ func normalizeServerRequestEvent(event Event, thread model.Thread, normalized No
 	case strings.Contains(method, "input") || strings.Contains(method, "elicitation"):
 		normalized.Kind = LiveEventInputRequest
 	default:
-		return NormalizedLiveEvent{}, false
+		return control.NormalizedEvent{}, false
 	}
 	return normalized, normalized.ThreadID != "" || normalized.RequestID != ""
 }
 
-func normalizeLegacyCodexEvent(event Event, thread model.Thread, normalized NormalizedLiveEvent) (NormalizedLiveEvent, bool) {
+func normalizeLegacyCodexEvent(event Event, thread model.Thread, normalized control.NormalizedEvent) (control.NormalizedEvent, bool) {
 	msg := asMap(event.Params["msg"])
 	if len(msg) == 0 {
 		msg = event.Params
@@ -173,12 +173,12 @@ func normalizeLegacyCodexEvent(event Event, thread model.Thread, normalized Norm
 		normalized.Kind = LiveEventAgentMessage
 		normalized.Text = strings.TrimSpace(stringValue(msg["message"], ""))
 	default:
-		return NormalizedLiveEvent{}, false
+		return control.NormalizedEvent{}, false
 	}
 	return normalized, normalized.ThreadID != "" || normalized.TurnID != "" || normalized.Label != "" || normalized.Text != ""
 }
 
-func (e NormalizedLiveEvent) ToolSnapshot(thread model.Thread) (ThreadReadSnapshot, bool) {
+func ToolSnapshotFromLiveEvent(e control.NormalizedEvent, thread model.Thread) (ThreadReadSnapshot, bool) {
 	switch e.Kind {
 	case LiveEventToolStarted, LiveEventToolUpdated, LiveEventToolCompleted:
 	default:

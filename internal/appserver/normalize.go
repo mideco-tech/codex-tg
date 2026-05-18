@@ -590,7 +590,7 @@ func ToolSnapshotFromLiveNotification(event Event, thread model.Thread) (ThreadR
 	if !ok {
 		return ThreadReadSnapshot{}, false
 	}
-	return liveEvent.ToolSnapshot(thread)
+	return ToolSnapshotFromLiveEvent(liveEvent, thread)
 }
 
 func PendingApprovalFromServerRequest(event Event) (*model.PendingApproval, bool) {
