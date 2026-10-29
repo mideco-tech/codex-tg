@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mideco-tech/codex-tg/internal/appserver"
+	"github.com/mideco-tech/codex-tg/internal/apptools"
 	"github.com/mideco-tech/codex-tg/internal/config"
 	"github.com/mideco-tech/codex-tg/internal/model"
 )
@@ -2402,7 +2403,7 @@ func TestTelegramOriginHotPollCapturesRunningTool(t *testing.T) {
 	}
 	service.pollConnected = true
 
-	keepGoing := service.telegramOriginHotPollOnce(ctx, thread.ID, turnID)
+	keepGoing := service.telegramOriginHotPollOnce(ctx, thread.ID, turnID, false)
 
 	if !keepGoing {
 		t.Fatal("telegramOriginHotPollOnce returned false for in-progress turn")
@@ -2426,6 +2427,38 @@ func TestTelegramOriginHotPollCapturesRunningTool(t *testing.T) {
 	}
 	if stored.NextPollAfter == "" {
 		t.Fatal("NextPollAfter is empty, want hot poll continuation")
+	}
+}
+
+func TestTelegramOriginHotPollUsesDesktopReadWhenPreferred(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "thread-desktop-hot-poll",
+		Title:       "Desktop hot poll",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "active",
+	}
+	desktop := &stubDesktopThreads{
+		threadPayloads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayload(thread, "turn-desktop-hot", "inProgress"),
+		},
+	}
+	service.desktop = desktop
+
+	keepGoing := service.telegramOriginHotPollOnce(ctx, thread.ID, "turn-desktop-hot", true)
+
+	if !keepGoing {
+		t.Fatal("telegramOriginHotPollOnce returned false for active desktop turn")
+	}
+	if len(desktop.readCalls) != 1 || desktop.readCalls[0] != thread.ID {
+		t.Fatalf("desktop readCalls = %#v, want [%s]", desktop.readCalls, thread.ID)
+	}
+	if !service.preferDesktopThread(ctx, thread.ID) {
+		t.Fatal("desktop thread preference was not recorded")
 	}
 }
 
@@ -3056,8 +3089,8 @@ func TestPlanCommandStartsPlanCollaborationMode(t *testing.T) {
 		t.Fatalf("turnStartCalls = %#v, want one start", stub.turnStartCalls)
 	}
 	got := stub.turnStartCalls[0]
-	if got.collaborationMode != collaborationModePlan || got.model != "gpt-test" || got.reasoningEffort != "high" {
-		t.Fatalf("turn start options = %#v, want plan/gpt-test/high", got)
+	if got.collaborationMode != collaborationModePlan || got.model != telegramForcedModel || got.reasoningEffort != "high" {
+		t.Fatalf("turn start options = %#v, want plan/%s/high", got, telegramForcedModel)
 	}
 }
 
@@ -3269,7 +3302,7 @@ func TestTelegramTurnLifecycleLogsSuccessfulStart(t *testing.T) {
 	requireLogContains(t, got, `"method":"TurnStart"`)
 	requireLogContains(t, got, `"event":"telegram_origin_turn_marked"`)
 	requireLogContains(t, got, `"collaboration_mode":"plan"`)
-	requireLogContains(t, got, `"model":"gpt-test"`)
+	requireLogContains(t, got, `"model":"deepseek/deepseek-v4.1-flash"`)
 	requireLogContains(t, got, `"text_len":24`)
 	requireLogContains(t, got, `"text_sha256"`)
 	if strings.Contains(got, "keep this prompt private") {
@@ -3333,7 +3366,10 @@ func TestTelegramTurnLifecycleLogsThreadResumeFailure(t *testing.T) {
 	if err := service.store.UpsertThread(ctx, thread); err != nil {
 		t.Fatalf("UpsertThread failed: %v", err)
 	}
-	stub := &stubSession{threadResumeErr: errors.New("resume failed")}
+	stub := &stubSession{
+		threadResumeErr: errors.New("resume failed"),
+		threadReadErr:   errors.New("thread read failed"),
+	}
 	service.live = stub
 	service.liveConnected = true
 
@@ -3345,6 +3381,225 @@ func TestTelegramTurnLifecycleLogsThreadResumeFailure(t *testing.T) {
 	requireLogContains(t, got, `"method":"ThreadResume"`)
 	requireLogContains(t, got, `"outcome":"error"`)
 	requireLogContains(t, got, `"error":"resume failed"`)
+}
+
+func TestTelegramResumeFailureFallsBackToReadBeforeTurnStart(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "desktop-open-thread",
+		Title:       "Desktop open",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "idle",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	stub := &stubSession{
+		threadResumeErr: errors.New("thread is open in another app"),
+		threadReads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayload(thread, "turn-previous", "completed"),
+		},
+	}
+	service.live = stub
+	service.liveConnected = true
+
+	response, err := service.sendInputToThreadTurn(ctx, 123456789, 0, thread.ID, "", "continue", "")
+	if err != nil {
+		t.Fatalf("sendInputToThreadTurn failed: %v", err)
+	}
+	if response == nil || response.TurnID != "started-turn" {
+		t.Fatalf("response = %#v, want started turn after read fallback", response)
+	}
+	if len(stub.threadResumeCalls) != 1 {
+		t.Fatalf("threadResumeCalls = %#v, want one failed resume attempt", stub.threadResumeCalls)
+	}
+	if stub.threadReadID != thread.ID {
+		t.Fatalf("threadReadID = %q, want %q", stub.threadReadID, thread.ID)
+	}
+	if len(stub.turnStartCalls) != 1 {
+		t.Fatalf("turnStartCalls = %#v, want one turn after read fallback", stub.turnStartCalls)
+	}
+}
+
+func TestTelegramResumeFailureUsesDesktopPipeForOwnedThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{
+		ID:          "desktop-owned-thread",
+		Title:       "Desktop owned",
+		ProjectName: "Codex",
+		CWD:         "/Users/example/project",
+		Status:      "active",
+	}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	live := &stubSession{threadResumeErr: errors.New("thread-store conflict: active writer")}
+	service.live = live
+	service.liveConnected = true
+	desktop := &stubDesktopThreads{
+		sendResult: apptools.SendResult{TurnID: "desktop-turn"},
+		threadPayloads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayload(thread, "desktop-turn", "inProgress"),
+		},
+	}
+	service.desktop = desktop
+
+	response, err := service.sendInputToThreadTurn(ctx, 123456789, 0, thread.ID, "", "continue from Telegram", "")
+	if err != nil {
+		t.Fatalf("sendInputToThreadTurn failed: %v", err)
+	}
+	if response == nil || response.ThreadID != thread.ID || response.TurnID != "desktop-turn" {
+		t.Fatalf("response = %#v, want desktop-owned thread continuation", response)
+	}
+	if len(live.turnStartCalls) != 0 {
+		t.Fatalf("turnStartCalls = %#v, want no competing writer", live.turnStartCalls)
+	}
+	if len(desktop.sendCalls) != 1 {
+		t.Fatalf("desktop sendCalls = %#v, want one forwarded prompt", desktop.sendCalls)
+	}
+	call := desktop.sendCalls[0]
+	if call.model != telegramForcedModel || call.thinking != "low" {
+		t.Fatalf("desktop send model/thinking = %s/%s, want %s/low", call.model, call.thinking, telegramForcedModel)
+	}
+	if len(desktop.readCalls) == 0 {
+		t.Fatal("desktop readCalls empty, want same-thread snapshot refresh")
+	}
+}
+
+func TestRefreshThreadFallsBackToDesktopReadWhenAppServerIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "desktop-read-thread", Title: "Desktop read", Status: "active"}
+	appServer := &stubSession{threadReadErr: errors.New("thread-store conflict: active writer")}
+	desktop := &stubDesktopThreads{
+		threadPayloads: map[string]map[string]any{
+			thread.ID: diagnosticThreadReadPayload(thread, "desktop-turn", "inProgress"),
+		},
+	}
+	service.desktop = desktop
+
+	refreshed, err := service.refreshThreadForOperation(ctx, appServer, thread.ID, "blocked_read")
+	if err != nil {
+		t.Fatalf("refreshThreadForOperation failed: %v", err)
+	}
+	if refreshed == nil || refreshed.ID != thread.ID {
+		t.Fatalf("refreshed = %#v, want desktop thread", refreshed)
+	}
+	if len(desktop.readCalls) != 1 || desktop.readCalls[0] != thread.ID {
+		t.Fatalf("desktop readCalls = %#v, want [%s]", desktop.readCalls, thread.ID)
+	}
+}
+
+func TestBindingChangeReleasesPreviousThread(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	previous := model.Thread{ID: "thread-previous", Title: "Previous", Status: "idle"}
+	current := model.Thread{ID: "thread-current", Title: "Current", Status: "idle"}
+	for _, thread := range []model.Thread{previous, current} {
+		if err := service.store.UpsertThread(ctx, thread); err != nil {
+			t.Fatalf("UpsertThread failed: %v", err)
+		}
+		snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+			Thread:           thread,
+			LatestTurnStatus: "completed",
+		}, time.Now().UTC())
+		if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+			t.Fatalf("UpsertSnapshot failed: %v", err)
+		}
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, previous.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding(previous) failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	if err := service.setBinding(ctx, 123456789, 0, current.ID); err != nil {
+		t.Fatalf("setBinding(current) failed: %v", err)
+	}
+	binding, err := service.store.GetBinding(ctx, 123456789, 0)
+	if err != nil {
+		t.Fatalf("GetBinding failed: %v", err)
+	}
+	if binding == nil || binding.ThreadID != current.ID {
+		t.Fatalf("binding = %#v, want %s", binding, current.ID)
+	}
+	if got := stub.threadUnsubscribeCalls; len(got) != 1 || got[0] != previous.ID {
+		t.Fatalf("threadUnsubscribeCalls = %#v, want [%s]", got, previous.ID)
+	}
+}
+
+func TestAttachTrackedDoesNotAcquireThreadOwnership(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "thread-idle", Title: "Idle", Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	if err := service.store.SetBinding(ctx, 123456789, 0, thread.ID, model.BindingModeBound); err != nil {
+		t.Fatalf("SetBinding failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnStatus: "completed",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	service.attachTracked(ctx)
+
+	if len(stub.threadResumeCalls) != 0 {
+		t.Fatalf("threadResumeCalls = %#v, want no ownership acquisition", stub.threadResumeCalls)
+	}
+	if len(stub.threadUnsubscribeCalls) != 0 {
+		t.Fatalf("threadUnsubscribeCalls = %#v, want passive observation only", stub.threadUnsubscribeCalls)
+	}
+}
+
+func TestThreadOwnershipReleaseIsIdempotentPerTurn(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	ctx := context.Background()
+	thread := model.Thread{ID: "thread-release-once", Title: "Release once", Status: "idle"}
+	if err := service.store.UpsertThread(ctx, thread); err != nil {
+		t.Fatalf("UpsertThread failed: %v", err)
+	}
+	snapshot := appserver.CompactSnapshot(nil, appserver.ThreadReadSnapshot{
+		Thread:           thread,
+		LatestTurnID:     "turn-finished",
+		LatestTurnStatus: "completed",
+	}, time.Now().UTC())
+	if err := service.store.UpsertSnapshot(ctx, thread.ID, snapshot); err != nil {
+		t.Fatalf("UpsertSnapshot failed: %v", err)
+	}
+	stub := &stubSession{}
+	service.live = stub
+	service.liveConnected = true
+
+	service.releaseThreadOwnership(ctx, thread.ID, "first")
+	service.releaseThreadOwnership(ctx, thread.ID, "duplicate")
+
+	if got := stub.threadUnsubscribeCalls; len(got) != 1 || got[0] != thread.ID {
+		t.Fatalf("threadUnsubscribeCalls = %#v, want one release for the same terminal turn", got)
+	}
 }
 
 func TestTelegramTurnLifecycleLogsTurnStartFailure(t *testing.T) {
@@ -4382,7 +4637,7 @@ func TestPlanCommandClearsStaleDefaultOverride(t *testing.T) {
 	}
 }
 
-func TestModelMenuPersistsSelectedModel(t *testing.T) {
+func TestModelMenuLocksDeepSeek(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -4398,26 +4653,14 @@ func TestModelMenuPersistsSelectedModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleCommand(/model) failed: %v", err)
 	}
-	token := callbackTokenForButton(response.Buttons, "gpt-menu")
-	if token == "" {
-		t.Fatalf("model menu buttons = %#v, want gpt-menu", response.Buttons)
+	if response == nil || !strings.Contains(response.Text, telegramForcedModel) || !strings.Contains(response.Text, "locked") {
+		t.Fatalf("model response = %#v, want locked DeepSeek summary", response)
 	}
-	callbackResponse, err := service.HandleCallback(ctx, 123456789, 0, 900, 123456789, token)
-	if err != nil {
-		t.Fatalf("HandleCallback(model select) failed: %v", err)
+	if callbackTokenForButton(response.Buttons, "gpt-menu") != "" {
+		t.Fatalf("model menu buttons = %#v, want no GPT choice", response.Buttons)
 	}
-	if callbackResponse == nil || !strings.Contains(callbackResponse.Text, "Model saved.") {
-		t.Fatalf("callback response = %#v, want saved settings summary", callbackResponse)
-	}
-	if len(callbackResponse.Buttons) != 0 {
-		t.Fatalf("callback buttons = %#v, want choice buttons removed after selection", callbackResponse.Buttons)
-	}
-	value, err := service.store.GetState(ctx, codexModelStateKey)
-	if err != nil {
-		t.Fatalf("GetState(model) failed: %v", err)
-	}
-	if value != "gpt-menu" {
-		t.Fatalf("stored model = %q, want gpt-menu", value)
+	if callbackTokenForButton(response.Buttons, "Reasoning") == "" {
+		t.Fatalf("model menu buttons = %#v, want reasoning control", response.Buttons)
 	}
 }
 
@@ -4426,12 +4669,9 @@ func TestReasoningMenuUsesSelectedModelEfforts(t *testing.T) {
 
 	service := newTestService(t)
 	ctx := context.Background()
-	if err := service.store.SetState(ctx, codexModelStateKey, "gpt-menu"); err != nil {
-		t.Fatalf("SetState(model) failed: %v", err)
-	}
 	stub := &stubSession{models: []appserver.ModelOption{
 		{ID: "gpt-default", IsDefault: true, SupportedReasoningEffort: []string{"low", "medium", "high"}},
-		{ID: "gpt-menu", SupportedReasoningEffort: []string{"minimal", "low"}},
+		{ID: telegramForcedModel, SupportedReasoningEffort: []string{"minimal", "low"}},
 	}}
 	service.live = stub
 	service.liveConnected = true
@@ -4476,8 +4716,8 @@ func TestSettingsCallbacksMissingValueUseAuto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setCodexModel(nil payload) failed: %v", err)
 	}
-	if modelResponse == nil || strings.Contains(modelResponse.Text, "<nil>") {
-		t.Fatalf("model response = %#v, want no <nil>", modelResponse)
+	if modelResponse == nil || !strings.Contains(modelResponse.Text, telegramForcedModel) {
+		t.Fatalf("model response = %#v, want locked DeepSeek", modelResponse)
 	}
 	modelValue, err := service.store.GetState(ctx, codexModelStateKey)
 	if err != nil {
@@ -4612,6 +4852,7 @@ func newTestService(t *testing.T) *Service {
 	if err != nil {
 		t.Fatalf("daemon.New failed: %v", err)
 	}
+	service.desktop = nil
 	t.Cleanup(func() {
 		_ = service.Close()
 	})
@@ -4821,11 +5062,52 @@ type stubSession struct {
 	turnSteerErrs          []error
 	threadStartCalls       []string
 	threadResumeCalls      []threadResumeCall
+	threadUnsubscribeCalls []string
 	turnSteerCalls         []turnCall
 	turnStartCalls         []turnCall
 	turnInterruptCalls     []turnCall
 	respondRequestCalls    []respondRequestCall
 	stderrTail             []string
+}
+
+type desktopSendCall struct {
+	threadID string
+	prompt   string
+	model    string
+	thinking string
+}
+
+type stubDesktopThreads struct {
+	sendResult     apptools.SendResult
+	sendErr        error
+	readErr        error
+	threadPayloads map[string]map[string]any
+	sendCalls      []desktopSendCall
+	readCalls      []string
+}
+
+func (s *stubDesktopThreads) SendMessageToThread(ctx context.Context, threadID, prompt, model, thinking string) (apptools.SendResult, error) {
+	s.sendCalls = append(s.sendCalls, desktopSendCall{
+		threadID: threadID,
+		prompt:   prompt,
+		model:    model,
+		thinking: thinking,
+	})
+	if s.sendErr != nil {
+		return apptools.SendResult{}, s.sendErr
+	}
+	return s.sendResult, nil
+}
+
+func (s *stubDesktopThreads) ReadThread(ctx context.Context, threadID string) (map[string]any, error) {
+	s.readCalls = append(s.readCalls, threadID)
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
+	if payload, ok := s.threadPayloads[threadID]; ok {
+		return payload, nil
+	}
+	return nil, errors.New("desktop thread not found")
 }
 
 type threadResumeCall struct {
@@ -4876,6 +5158,10 @@ func (s *stubSession) ThreadResume(ctx context.Context, threadID, cwd string) (m
 		return nil, s.threadResumeErr
 	}
 	return nil, nil
+}
+func (s *stubSession) ThreadUnsubscribe(ctx context.Context, threadID string) (map[string]any, error) {
+	s.threadUnsubscribeCalls = append(s.threadUnsubscribeCalls, threadID)
+	return map[string]any{"status": "unsubscribed"}, nil
 }
 func (s *stubSession) ThreadStart(ctx context.Context, cwd string) (map[string]any, error) {
 	s.threadStartCalls = append(s.threadStartCalls, cwd)

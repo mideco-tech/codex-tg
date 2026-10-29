@@ -388,6 +388,16 @@ func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) (map[st
 	return asMap(result), nil
 }
 
+func (c *Client) ThreadUnsubscribe(ctx context.Context, threadID string) (map[string]any, error) {
+	result, err := c.Request(ctx, "thread/unsubscribe", map[string]any{
+		"threadId": threadID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return asMap(result), nil
+}
+
 func (c *Client) TurnStart(ctx context.Context, threadID, message, cwd string, options TurnStartOptions) (map[string]any, error) {
 	resolved, err := c.resolveTurnStartOptions(ctx, options)
 	if err != nil {
@@ -789,7 +799,7 @@ func (c *Client) readStdout(generation uint64) {
 		return
 	}
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 128*1024*1024)
 	for scanner.Scan() {
 		if !c.isStartedGeneration(generation) {
 			return
@@ -827,7 +837,7 @@ func (c *Client) readStderr(generation uint64) {
 		return
 	}
 	scanner := bufio.NewScanner(stderr)
-	scanner.Buffer(make([]byte, 0, 512), 64*1024)
+	scanner.Buffer(make([]byte, 0, 512), 1024*1024)
 	for scanner.Scan() {
 		if !c.isStartedGeneration(generation) {
 			return
