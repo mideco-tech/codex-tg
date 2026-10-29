@@ -231,6 +231,54 @@ sleep 5
 	}
 }
 
+func TestThreadUnsubscribeUsesDedicatedRPC(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake app-server shell script is Unix-only")
+	}
+	root := t.TempDir()
+	logPath := filepath.Join(root, "rpc.log")
+	t.Setenv("CODEX_TG_FAKE_APPSERVER_LOG", logPath)
+	script := writeFakeAppServer(t, root, `#!/bin/sh
+set -eu
+log="${CODEX_TG_FAKE_APPSERVER_LOG:-}"
+if IFS= read -r line; then
+  if [ -n "$log" ]; then printf '%s\n' "$line" >> "$log"; fi
+  printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+fi
+if IFS= read -r line; then
+  if [ -n "$log" ]; then printf '%s\n' "$line" >> "$log"; fi
+fi
+if IFS= read -r line; then
+  if [ -n "$log" ]; then printf '%s\n' "$line" >> "$log"; fi
+  printf '{"jsonrpc":"2.0","id":2,"result":{"status":"unsubscribed"}}\n'
+fi
+sleep 5
+`)
+	client := NewClient(script, "stdio", root, 5*time.Second)
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	result, err := client.ThreadUnsubscribe(ctx, "thread-1")
+	if err != nil {
+		t.Fatalf("ThreadUnsubscribe failed: %v", err)
+	}
+	if got, want := result["status"], "unsubscribed"; got != want {
+		t.Fatalf("unsubscribe status = %v, want %q", got, want)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) failed: %v", logPath, err)
+	}
+	if !strings.Contains(string(data), `"method":"thread/unsubscribe"`) ||
+		!strings.Contains(string(data), `"threadId":"thread-1"`) {
+		t.Fatalf("thread/unsubscribe request missing from log:\n%s", data)
+	}
+}
+
 func TestStartCleansUpAfterInitializeFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake app-server shell script is Unix-only")

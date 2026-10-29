@@ -277,6 +277,33 @@ Contract notes:
 - Stale old live-loop closes must not clear newer session state.
 - Repair is serialized with reconcile/startup and is processed before replacement reconcile.
 
+## Desktop-Owned Thread Handoff
+
+Primary tests:
+
+- `internal/apptools/client_test.go::TestSendMessageToThreadUsesDesktopPipe`
+- `internal/apptools/client_test.go::TestReadThreadParsesStructuredDesktopPayload`
+- `internal/daemon/service_test.go::TestTelegramResumeFailureUsesDesktopPipeForOwnedThread`
+- `internal/daemon/service_test.go::TestRefreshThreadFallsBackToDesktopReadWhenAppServerIsBlocked`
+- `internal/daemon/service_test.go::TestBindingChangeReleasesPreviousThread`
+- `internal/daemon/service_test.go::TestAttachTrackedDoesNotAcquireThreadOwnership`
+- `internal/daemon/service_test.go::TestThreadOwnershipReleaseIsIdempotentPerTurn`
+- `internal/daemon/service_test.go::TestTelegramOriginHotPollUsesDesktopReadWhenPreferred`
+
+Contract notes:
+
+- Passive observation uses `thread/read`; it must not resume or acquire every
+  bound thread.
+- A direct App Server writer owns a thread only for input, steering, and the
+  active turn.
+- When a direct resume is rejected because Codex desktop already owns the
+  thread, the bridge forwards normal input through the local Codex app tools
+  pipe with DeepSeek V4.1 Flash and reads progress from that same pipe.
+- Desktop-owned hot polling must prefer the app tools pipe and must not wait for
+  a competing App Server read on every tick.
+- Terminal Telegram turns are unsubscribed once per turn. Binding a different
+  thread releases the previous inactive local writer.
+
 ## Transient Interrupted Gating
 
 ADR: `docs/adr/ADR-012-turn-lifecycle-normalization.md`

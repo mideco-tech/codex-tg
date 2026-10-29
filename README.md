@@ -57,6 +57,7 @@ future adapters can consume the same Codex control core.
 ## Features
 
 - Thread-first routing over local Codex App Server.
+- Desktop-owned thread handoff: when Codex desktop already owns a thread, Telegram input can be forwarded through the local Codex app tools pipe instead of creating a second writer or fork.
 - Global observer for foreign GUI/CLI runs, with polling fallback through `thread/read`.
 - Telegram-origin live current tool rendering from App Server `item/*` events, while foreign GUI/CLI panels stay completed-tool only.
 - Stable visual identity per thread: emoji marker plus project/thread/run chips.

@@ -54,6 +54,7 @@ type Threads interface {
 	ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error)
 	ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error)
 	ThreadResume(ctx context.Context, threadID, cwd string) (map[string]any, error)
+	ThreadUnsubscribe(ctx context.Context, threadID string) (map[string]any, error)
 	ThreadStart(ctx context.Context, cwd string) (map[string]any, error)
 }
 

@@ -446,7 +446,7 @@ func (s *Service) openChatThread(ctx context.Context, chatID, topicID int64, thr
 	if thread == nil || !s.isCodexChatThread(*thread) {
 		return &DirectResponse{Text: "This Chat button is stale. Use Open Chats to refresh."}, nil
 	}
-	if err := s.store.SetBinding(ctx, chatID, topicID, threadID, model.BindingModeBound); err != nil {
+	if err := s.setBinding(ctx, chatID, topicID, threadID); err != nil {
 		return nil, err
 	}
 	s.kickBootstrap()
@@ -514,7 +514,7 @@ func (s *Service) bindLatestProjectThread(ctx context.Context, chatID, topicID i
 	if !ok || strings.TrimSpace(workspace.LatestThread) == "" {
 		return &DirectResponse{Text: "This project button is stale. Use /projects to refresh."}, nil
 	}
-	if err := s.store.SetBinding(ctx, chatID, topicID, workspace.LatestThread, model.BindingModeBound); err != nil {
+	if err := s.setBinding(ctx, chatID, topicID, workspace.LatestThread); err != nil {
 		return nil, err
 	}
 	s.kickBootstrap()
@@ -758,7 +758,7 @@ func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, top
 		"reasoning_effort": options.ReasoningEffort,
 	})
 	if err != nil {
-		_ = s.store.SetBinding(ctx, chatID, topicID, thread.ID, model.BindingModeBound)
+		_ = s.setBinding(ctx, chatID, topicID, thread.ID)
 		return &DirectResponse{
 			Text:     fmt.Sprintf("Created thread %s, but could not start first turn: %v\nUse /reply %s <text> to retry.", thread.ID, err, thread.ID),
 			ThreadID: thread.ID,
@@ -782,7 +782,7 @@ func (s *Service) createThreadFromProjectPrompt(ctx context.Context, chatID, top
 		})
 	}
 	s.ensureNewChatThreadFallback(ctx, thread.ID, state)
-	if err := s.store.SetBinding(ctx, chatID, topicID, thread.ID, model.BindingModeBound); err != nil {
+	if err := s.setBinding(ctx, chatID, topicID, thread.ID); err != nil {
 		return nil, err
 	}
 	target := model.ObserverTarget{ChatKey: model.ChatKey(chatID, topicID), ChatID: chatID, TopicID: topicID, Enabled: true}

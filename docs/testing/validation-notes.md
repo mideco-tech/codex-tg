@@ -8,6 +8,13 @@ For feature-to-test ownership, see `docs/testing/regression-map.md`.
 
 2026-05-18 PDT: v0.5.0 control-plane architecture validation added ADR-019, Control Plane docs, internal control interfaces, App Server capability mapping, normalized event contracts, and notification severity policy. The slice was validated with targeted `internal/control`, `internal/appserver`, and `internal/daemon` tests, full `go test ./...`, `go build -buildvcs=false ./...`, `git diff --check`, and targeted secret/local scans. Live Telegram E2E was not required because Telegram-visible behavior was not changed.
 
+2026-10-29 CET: desktop-owned thread handoff added a framed local app-tools
+client, per-turn `thread/unsubscribe`, passive `thread/read` observation, and a
+same-thread Telegram forwarding path. The local pipe was read live against the
+current Codex desktop thread; framed send/read behavior is covered by isolated
+Unix-socket tests. A live Telegram-origin send was not automated because it
+would inject a test prompt into the operator's active thread.
+
 ## Runtime and documented UX contract
 
 The public docs describe the intended observer/UI contract:
